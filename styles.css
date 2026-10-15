@@ -1,0 +1,171 @@
+:root { color-scheme: light; --background: #fff; --border: #dadce0; --muted: #5f6368; --surface: #f8f9fa; --text: #202124; --link: #185abc; --input-border: #9aa0a6; --unsaved-row: #fff8e1; --credit-result-row: #e3e5e7; --simulator-separator: #80868b; background: var(--background); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+:root[data-theme="dark"] { color-scheme: dark; --background: #202124; --border: #5f6368; --muted: #bdc1c6; --surface: #303134; --text: #e8eaed; --link: #8ab4f8; --input-border: #9aa0a6; --unsaved-row: #3d3522; --credit-result-row: #3c4043; --simulator-separator: #9aa0a6; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme]) { color-scheme: dark; --background: #202124; --border: #5f6368; --muted: #bdc1c6; --surface: #303134; --text: #e8eaed; --link: #8ab4f8; --input-border: #9aa0a6; --unsaved-row: #3d3522; --credit-result-row: #3c4043; --simulator-separator: #9aa0a6; } }
+[hidden] { display: none !important; }
+body { background: var(--background); color: var(--text); margin: 0; } header { align-items: center; border-bottom: 1px solid var(--border); display: grid; gap: 2rem; grid-template-columns: auto auto 1fr; padding: .9rem 1.25rem; } .brandRow { align-items: center; display: flex; white-space: nowrap; } .settingsLink { justify-self: end; } nav { display: flex; gap: 1rem; } a { color: var(--link); } a[aria-current="page"] { color: var(--text); font-weight: 600; text-decoration: none; }
+.applicationVersion { font-weight: 600; }
+.emptyState { border: 1px solid var(--border); padding: .75rem; }
+.utilizationBadge { border-radius: 2px; display: inline-block; font-size: .75rem; font-weight: 500; padding: .08rem .3rem; white-space: nowrap; }
+.creditUtilizationTotal { align-items: center; display: grid; font-size: 1rem; grid-template-columns: 1fr auto; padding: .55rem .5rem 0; }
+.creditUtilizationTotal .utilizationBadge { font-size: 1rem; padding: .12rem .4rem; }
+.utilizationGreen { background: #81c995; color: #092e12; } .utilizationYellow { background: #fdd663; color: #3c2f00; } .utilizationRed { background: #b3261e; color: #fff; }
+.statusBanner { border: 1px solid var(--border); box-sizing: border-box; margin: 0 0 1rem; padding: .75rem; width: 100%; }
+.statusGreen { background: #81c995; color: #000; } .statusYellow { background: #fdd663; color: #000; } .statusRed { background: #b3261e; color: #fff; }
+.compactControl { margin: 0 0 .75rem; }
+#sinkingFundAsOfDate { box-sizing: border-box; max-width: 100%; width: 9.5rem; }
+#minimumBalanceHelper { min-height: 3.75rem; }
+#utilizationWarningHelper { min-height: 1.5rem; }
+.temporaryNotification { bottom: env(safe-area-inset-bottom, 0); box-sizing: border-box; left: 50%; max-width: 1100px; padding: .65rem 1rem; position: fixed; transform: translateX(-50%); width: calc(100% - 2rem); z-index: 20; border-top: 4px solid currentColor; white-space: pre-line; }
+.temporaryNotification button { float: right; margin-left: 1rem; }
+.dialogDelete { margin-top: 1rem; }
+.dialogLedgerActions { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; }
+.dialogLedgerActions button { margin-top: 0; }
+.dialogLedgerActions:not(:has(button:not([hidden]))) { display: none; }
+.rowSummary { border: 1px solid var(--border); margin: .5rem 0 1rem; padding: .5rem; }
+.rowSummary div { display: grid; grid-template-columns: minmax(7rem, auto) 1fr; gap: .5rem; }
+.rowSummary dt { font-weight: 700; }
+.rowSummary dd { margin: 0; }
+.descriptionFilter { flex: 1 1 14rem; }
+.moneyInput { align-items: stretch; display: flex; }
+.moneyInputPrefix { align-items: center; background: var(--surface); border: 1px solid var(--input-border); border-right: 0; box-sizing: border-box; display: flex; min-height: 2rem; padding: .25rem .4rem; }
+.moneyInput input { border-bottom-left-radius: 0; border-top-left-radius: 0; min-width: 0; width: 100%; }
+.amountFilterValues { align-items: end; display: flex; gap: .5rem; }
+.amountFilterGroup { align-items: end; box-sizing: border-box; display: flex; flex: 1 0 100%; gap: .5rem; white-space: nowrap; }
+.transferAmountHelper { display: block; margin-top: .35rem; }
+.budgetRecurringAction { margin-bottom: .5rem; margin-top: 1.5rem; }
+main { margin: 0 auto; max-width: 90rem; padding: 1.5rem 1.25rem; } h1 { font-size: 1.5rem; font-weight: 500; margin: 0; } h2 { font-size: 1.15rem; margin: 1.5rem 0 .75rem; }
+button, input, select { font: inherit; } button { appearance: none; background: var(--surface); border: 1px solid var(--input-border); border-radius: 2px; color: var(--text); cursor: pointer; padding: .35rem .65rem; } .positiveAction { background: #34a853; border: 1px solid #27823f; color: #000; } .pageActions { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; } .headingRow { align-items: center; display: flex; justify-content: space-between; gap: 1rem; }
+.linkButton, .sortButton { background: none; border: 0; color: var(--link); padding: 0; text-decoration: underline; }
+.sortButton { color: inherit; font-weight: 600; text-decoration: none; }
+.secondaryText { color: var(--muted); font-size: .8rem; margin-top: .1rem; }
+.setAsideValues { line-height: 1.45; }
+.destructiveButton { background: #b3261e; border: 1px solid #8c1d18; color: #fff; justify-self: start; margin-top: .25rem; }
+.filterForm { align-items: end; display: flex; flex-wrap: wrap; gap: .75rem; margin: 1rem 0; } label { display: grid; gap: .25rem; } input, select { background: var(--background); border: 1px solid var(--input-border); color: var(--text); border-radius: 2px; box-sizing: border-box; min-height: 2rem; padding: .25rem .4rem; }
+.dashboardGrid { display: grid; gap: 2rem; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.inlineLabel { align-items: center; display: flex; font-size: .9rem; gap: .35rem; }
+.inlineLabel input { min-height: auto; }
+.checkboxLabel { align-items: center; display: flex; gap: .4rem; }
+.checkboxLabel input { min-height: auto; }
+.periodControls { align-items: end; display: flex; flex-wrap: wrap; gap: .5rem; }
+.customDateControls { align-items: end; display: flex; gap: .5rem; }
+.summaryTable dl { display: grid; grid-template-columns: repeat(5, minmax(8rem, 1fr)); margin: .75rem 0; }
+.summaryTable dl div { border: 1px solid var(--border); border-right: 0; padding: .5rem; }
+.summaryTable dl div:last-child { border-right: 1px solid var(--border); }
+.summaryTable dt { color: var(--muted); font-size: .85rem; }
+.summaryTable dd { font-weight: 600; margin: .2rem 0 0; }
+.transactionSummary dl { grid-template-columns: repeat(3, minmax(8rem, 1fr)); }
+.databaseStatus { display: flex; flex-wrap: wrap; gap: .75rem 2rem; margin: .75rem 0; }
+.databaseStatus div { min-width: 8rem; }
+.databaseStatus dt { color: var(--muted); font-size: .85rem; }
+.databaseStatus dd { font-weight: 600; margin: .2rem 0 0; }
+.budgetOverview { margin-bottom: 1rem; }
+.monthlyRequirement { display: grid; justify-items: start; margin: .5rem 0 .75rem; }
+.monthlyRequirement span { color: var(--muted); font-size: .9rem; }
+.monthlyRequirement strong { font-size: 1.75rem; line-height: 1.2; }
+.monthlyRecurringControls { align-items: end; display: flex; flex-wrap: wrap; gap: .75rem; }
+.monthlyRecurringAggregate { min-width: 38rem; }
+.budgetDateColumn { white-space: nowrap; width: 8.5rem; }
+.monthlyRecurringAggregateRow { font-weight: 600; }
+.monthlyRecurringDetailRow { color: var(--text); }
+.monthlyRecurringDetailRow td:nth-child(2) { padding-left: 1.5rem; }
+.paymentsIncomeLayout { display: grid; gap: 2rem; grid-template-columns: 1fr; }
+.paymentsIncomePanel { min-width: 0; }
+.paymentsIncomeTable { min-width: 33rem; table-layout: fixed; }
+.paymentsIncomeTable th:nth-child(1), .paymentsIncomeTable td:nth-child(1) { width: 8.5rem; }
+.paymentsIncomeTable th:nth-child(3), .paymentsIncomeTable td:nth-child(3) { width: 7rem; }
+.paymentsIncomeTable th:nth-child(4), .paymentsIncomeTable td:nth-child(4) { width: 11rem; }
+.budgetNavigation { border-bottom: 1px solid var(--border); flex-wrap: wrap; margin-top: 1.5rem; padding-bottom: .6rem; }
+.budgetNavigation a { flex: none; white-space: nowrap; }
+.inputWithUnit { align-items: center; display: flex; gap: .4rem; }
+.inputWithUnit input { width: 7rem; }
+.needsRollup { font-weight: 600; }
+.needsChild td:first-child { padding-left: 1.5rem; }
+.expenseDetailGroup th, .expenseDetailGroup td { background: var(--background); font-weight: 600; }
+.expenseDetailChild td:first-child { padding-left: 1.5rem; }
+.tableWrap { overflow-x: auto; } table { border-collapse: collapse; width: 100%; } th, td { border-bottom: 1px solid var(--border); padding: .45rem .55rem; text-align: left; vertical-align: top; } th { background: var(--surface); font-weight: 600; } .amount { text-align: right; white-space: nowrap; } .rowActions { white-space: nowrap; } .rowActions button { margin-right: .25rem; }
+.minimumColumn { width: 1%; }
+.packageActions { align-items: flex-start; display: flex; flex-direction: column; font-weight: 400; gap: .35rem; margin-top: .5rem; }
+.packageActions a { font-weight: 400; }
+.compactTable th, .compactTable td { padding-bottom: .3rem; padding-top: .3rem; }
+#bulkEntryDialog { max-width: 75rem; }
+#bulkEntryTable { min-width: 65rem; }
+#bulkEntryTable input, #bulkEntryTable select { width: 100%; }
+#bulkEntryTable tr.bulkHangingRow td { background: var(--surface); border-bottom-style: dashed; }
+dialog { background: var(--background); border: 1px solid var(--input-border); color: var(--text); border-radius: 3px; max-width: 30rem; width: calc(100% - 2rem); } dialog::backdrop { background: rgb(0 0 0 / 35%); } dialog form, dialog > div { display: grid; gap: .75rem; } dialog h2, dialog h3, dialog blockquote, dialog p { margin: 0; } fieldset { border: 1px solid var(--border); display: grid; gap: .75rem; } .dialogActions { display: flex; gap: .5rem; justify-content: flex-end; } .formError { color: #b3261e; min-height: 1.2em; margin: 0; } .formHint { color: var(--muted); font-size: .9rem; margin: 0; }
+@media (max-width: 40rem) {
+  .temporaryNotification { left: 0; transform: none; width: 100%; }
+  .filterForm .descriptionFilter { flex: 0 1 auto; }
+  header { gap: .75rem; grid-template-columns: 1fr auto; }
+  #mainNavigation { flex-wrap: wrap; grid-column: 1 / -1; grid-row: 2; row-gap: .5rem; }
+  .settingsNavigation { flex-wrap: wrap; }
+  .settingsNavigation a { flex: none; white-space: nowrap; }
+  .headingRow { align-items: flex-start; flex-direction: column; }
+  .monthlyRecurringControls { align-items: stretch; flex-direction: column; width: 100%; }
+  .filterForm, .periodControls { align-items: stretch; flex-direction: column; width: 100%; }
+  .amountFilterValues { align-items: stretch; flex-direction: column; }
+  .amountFilterGroup { align-items: stretch; flex-direction: column; width: 100%; white-space: normal; }
+  .dashboardGrid { grid-template-columns: 1fr; }
+  .summaryTable dl { grid-template-columns: 1fr 1fr; }
+  .summaryTable dl div, .summaryTable dl div:last-child { border: 0; border-bottom: 1px solid var(--border); }
+  #expenseCategoryTable { min-width: 34rem; }
+}
+
+@media (min-width: 70rem) { .paymentsIncomeLayout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+
+.simulatorLayout { display: block; }
+.simulatorExecutedRow { background: var(--surface); color: var(--muted); }
+.simulatorExecutedRow select, .simulatorExecutedRow input { color: var(--muted); }
+.simulatorPlanToolbar { align-items: end; display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; }
+.simulatorPlanToolbar label { min-width: min(24rem, 100%); }
+.simulatorPlanToolbar select { width: 100%; }
+.simulatorWorksheet tr.unsavedRow td, .pendingTable tr.unsavedRow td { background: var(--unsaved-row); }
+.simulatorWorksheet tr.hangingRow td { background: var(--surface); border-bottom-style: dashed; }
+.simulatorWorksheet tr.simulatorGroupStart td { border-top: .45rem solid var(--simulator-separator); }
+.simulatorLayout > section + section { margin-top: 1.5rem; }
+.simulatorWorksheet { table-layout: fixed; width: 73rem; }
+.simulatorProjectedTable, .simulatorSummary { width: 100%; }
+.simulatorWorksheet th:nth-child(1), .simulatorWorksheet td:nth-child(1) { width: 9rem; }
+.simulatorWorksheet th:nth-child(2), .simulatorWorksheet td:nth-child(2) { width: 10rem; }
+.simulatorWorksheet th:nth-child(3), .simulatorWorksheet td:nth-child(3) { width: 20rem; }
+.simulatorWorksheet th:nth-child(4), .simulatorWorksheet td:nth-child(4) { width: 10rem; }
+.simulatorWorksheet th:nth-child(5), .simulatorWorksheet td:nth-child(5) { width: 8rem; }
+.simulatorWorksheet th:nth-child(6), .simulatorWorksheet td:nth-child(6) { width: 16rem; }
+.simulatorWorksheet select, .simulatorWorksheet input { box-sizing: border-box; min-width: 0; width: 100%; }
+.simulatorWorksheet td:nth-child(3) { white-space: nowrap; }
+.simulatorAccountPair { align-items: center; display: grid; gap: .35rem; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); width: 100%; }
+.simulatorAccountPair select { width: 100%; }
+.simulatorResults .summaryTable { margin-bottom: 1rem; }
+.simulatorResultsLayout { align-items: start; display: grid; gap: 1.25rem; grid-template-columns: minmax(0, 1fr) minmax(18rem, 1fr); }
+.simulatorResultsLayout > div { min-width: 0; }
+.simulatorResultsLayout h2, .simulatorResultsLayout h3 { margin-top: 0; }
+.simulatorBufferProjectionOption { align-items: flex-start; margin-top: .5rem; max-width: 100%; width: fit-content; }
+.simulatorBufferProjectionOption input { flex: 0 0 auto; }
+.simulatorSummary dl { grid-template-columns: repeat(5, minmax(8rem, 1fr)); }
+.simulatorResults tr.creditResultRow td { background: var(--credit-result-row); }
+@media (max-width: 75rem) { .simulatorResultsLayout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 40rem) { .simulatorSummary dl { grid-template-columns: 1fr 1fr; } }
+/* Authorization is authoritative in Python; these rules also keep write controls
+   out of the Auditor's normal interface, including dynamically rendered rows. */
+.ownerOnly { display: none; }
+body[data-role="owner"] .ownerOnly { display: revert; }
+body[data-role="auditor"] button:not([data-view-control]):not([data-sort]):not([data-budget-sort]):not([data-monthly-sort]):not([data-income-sort]):not([data-payment-sort]) { display: none; }
+body[data-role="auditor"] a[href="/api/backup"], body[data-role="auditor"] a[href="/api/package"] { display: none; }
+.signIn { max-width: 28rem; }
+.signIn form { display: grid; gap: 1rem; }
+.signIn label { display: grid; gap: .25rem; }
+.pendingTable { min-width: 68rem; }
+.pendingTable input:not([type="checkbox"]), .pendingTable select { width: 100%; min-width: 8rem; }
+.pendingTable th:nth-child(7), .pendingTable td:nth-child(7) { width: 1%; }
+.pendingTable .moneyInput { width: 9rem; }
+.pendingTable input[data-pending-field="amount"] { min-width: 0; }
+.pendingTable th:last-child, .pendingTable td:last-child { min-width: 16rem; width: 16rem; }
+.pendingTable td:last-child { white-space: normal; }
+.pendingTable td:last-child button { white-space: nowrap; }
+.pendingTable [data-pending-default-description]:disabled, #reviewPendingButton:disabled { background: var(--background); border-color: var(--border); color: var(--muted); cursor: default; opacity: 1; }
+.pendingSaveActions { display: inline-flex; gap: .25rem; }
+.pendingTable label { display: block; }
+.integrationSecretValue { overflow-wrap: anywhere; white-space: normal; }
+.integrationSecretCreateRow td { background: var(--surface); border-bottom-style: dashed; }
+#integrationSecretLabel { width: 24ch; max-width: 100%; min-width: 0; }
+
+.templateHighlight { background: #fff1a8; color: #111; }
