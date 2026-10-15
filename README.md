@@ -2,6 +2,12 @@
 
 A small Flask and SQLite personal finance application with one shared personal ledger, a required Owner, and an optional read-only Auditor.
 
+## License
+
+Copyright (C) 2026 Austin Pritchett.
+
+No Part Finance is licensed under the [GNU General Public License, version 3 only](LICENSE) (`GPL-3.0-only`). See the license for redistribution terms and the disclaimer of warranty.
+
 ## Screenshots
 
 All screenshots show AI-generated fictional finances from the included demo database. Account names, employers, merchants, amounts, and planning records are invented; no personal financial records or existing credentials are included.
