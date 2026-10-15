@@ -31,6 +31,7 @@ includedFiles = (
     "packageLinux.sh",
     "packageApplication.py",
     "README.md",
+    "LICENSE",
     "screenshots/dashboard.jpg",
     "screenshots/transactions.jpg",
     "screenshots/budget.jpg",
