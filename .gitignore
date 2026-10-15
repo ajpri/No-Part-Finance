@@ -1,0 +1,46 @@
+# Private financial databases and all SQLite working files.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+# This freshly generated fictional fixture is intentionally public.
+!finance.demo.db
+
+# Backups, private database-inclusive packages, and legacy exports.
+backups/
+packages/
+*.bak
+*.backup
+*.zip
+*.csv
+*.tsv
+
+# Python environments and generated caches.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local credentials, deployment overrides, and editor/agent state.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+.codex/
+.agents/
+.vscode/
+.idea/
+
+# Temporary output and operating-system files.
+*.log
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db

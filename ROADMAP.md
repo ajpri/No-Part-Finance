@@ -1,0 +1,252 @@
+# No Part Finance Roadmap
+
+This file contains future product work. SPEC.md describes the implemented product.
+
+Only Version Next is approved implementation scope. Implement one named Version Next milestone at a time. Version Soon, Version Later, and Deferred Ideas are not approved until explicitly promoted.
+
+
+
+## Version Next
+
+No implementation milestone is currently approved.
+
+## Version Soon
+
+### Historical Category Activity When a Category Becomes a Rollup
+
+Purpose: prevent direct historical Expense activity from disappearing from the category breakdown when a formerly standalone category gains children. Public Release 5 Part 2 reproduced a $10 parent purchase remaining in total Expenses while the new rollup and child each displayed $0.
+
+Approved planning decision: a category may become a rollup only when zero transactions reference it. An existing unused category is eligible; it need not be newly created. Zero means no transaction references, not a zero net amount, zero selected-period activity, or zero current balance. Historical activity, including purchases and offsetting refunds, disqualifies the category regardless of date or active/archive presentation.
+
+User-visible behavior: reject adding or moving a child under a category with direct transaction history, with concise guidance to create an empty parent and move the existing category beneath it instead. Preserve the existing one-level Expense hierarchy and compatible parent/child rules. A rollup remains nonselectable for new transaction assignments and derives its reporting amount, percentage, and per-day values from its direct children only. Do not add a Direct activity row.
+
+Financial and data invariants: enforce the zero-reference check authoritatively in Python within the same SQLite transaction as the hierarchy change. Never recategorize, delete, or rewrite transaction history to make a parent eligible. Preserve stable IDs, ledger cents and signs, account balances, overall Income/Expense totals, and offsets. Deliberately moving an existing Expense category under an empty parent changes only its hierarchy and the corresponding rollup presentation, as already specified; retain archived history, refunds, and ordinary Hide zeros behavior. Maintain the invariant when validating new transaction assignments as well as hierarchy changes.
+
+Meaningful edge cases: a purchase and full refund still constitute transaction history; activity outside the selected reporting period still blocks conversion; archived historical references still count. Both creating a child and changing an existing child's parent require the same check. A rejected hierarchy change leaves all configuration and history unchanged. Concurrent transaction creation and hierarchy changes must not allow direct activity to appear on a newly established rollup.
+
+Acceptance criteria: verify that a new empty parent and an existing unused compatible category can become rollups; categories with any direct transaction references cannot, including net-zero, refunded, old, and archived activity. Verify both child creation and reparenting, clear correction guidance, unchanged state on rejection, and concurrent-write protection. Grouping an existing category beneath an empty parent preserves its transactions and IDs and produces correct child-derived rollup amounts, percentages, per-day values, refunds, archived activity, and Hide zeros behavior. Use explicit temporary database and backup paths with the test database guard; never test against real finance.db. Cover the unresolved cases below after their behavior is decided.
+
+Explicit non-goals: direct-parent activity reporting rows, selectable rollups, deeper hierarchy, automatic recategorization or configuration repair, new category types, stored rollup totals, and unrelated reporting changes.
+
+Unresolved decisions: determine how to handle an unused prospective parent referenced by Templates or Flexible Category Budgets, without silently clearing or remapping references. Determine safe handling of any existing rollup that already has direct historical transactions; do not hide, rewrite, or automatically move that history, and do not assume none exist. Resolve these cases before implementing affected behavior.
+
+This item remains Version Soon planning only; it is not approved implementation scope.
+
+### External Transfers in Simulator Allocation
+
+Purpose: make External transfers follow the Simulator's existing selected Cash Live Balance pool allocation rule. Public Release 5 Part 2 reproduced $90 Starting Cash plus a $50 incoming External transfer projecting Cash at $140 while incorrectly reducing Unallocated Money to $40.
+
+Approved user-visible behavior: an External-to-Cash transfer increases Unallocated Money by its positive Amount only when the tracked destination Cash Account is selected by a Live balance row. A selected Live balance Cash Account-to-External transfer decreases Unallocated Money by Amount. External transfers involving a Cash Account outside the selected Live Balance pool do not change the allocation summary. In every case, the tracked Account's projected balance still reflects its signed transfer side. With no other planned rows, $90 Starting Cash plus $50 External-to-selected-Cash produces $140 projected Cash and $140 Unallocated Money; a $50 selected-Cash-to-External transfer produces $40 for both.
+
+Use the existing signed Transfers/Payments summary contribution: incoming money to the selected Cash pool contributes negative Amount to that deduction, outgoing money contributes positive Amount, and an unselected Cash side contributes zero. Do not classify External inflows as Planned Income or outflows as Planned Spending. External-to-Credit payments retain the existing Credit-payment allocation rule; this item changes only the External/Cash selected-pool treatment, without changing other transfer or Payoff rules.
+
+Financial and data invariants: Python owns selected-pool membership, projected balances, integer-cent signs, summary contributions, and Unallocated Money. Preserve atomic two-row zero-sum ledger transfers, positive entered transfer Amount, distinct eligible Accounts, existing External selector boundaries, reporting exclusions, and the distinction between planning and authoritative ledger activity. External never appears in Results or exposed balance totals. Executed financial rows remain excluded from planned calculations; their recorded effects appear through refreshed live balances. Store no derived balances or allocation totals.
+
+Meaningful edge cases: both directions with selected and unselected Cash Accounts; no Live balance rows; multiple selected Cash Accounts; adding or removing a Live balance selection; multiple incoming and outgoing transfers that offset; negative Unallocated Money; executed rows; archived saved references under existing rules; External-to-Credit payments and unaffected ordinary Cash/Credit transfers. Never infer pool membership from names or from merely appearing in Results.
+
+Acceptance criteria: verify explicit expected projected balances, signed transfer-summary contributions, Starting Cash, Planned Income, Planned Spending & Buffer, and Unallocated Money in both directions and selected/unselected cases. Adding or removing the tracked Cash Account's Live balance row changes the allocation basis consistently without altering saved transfer fields or ledger data. Verify refresh and persistence, executed-row exclusion, existing Credit-payment behavior, External exclusion from Results and financial reporting, and unchanged transfer signs and zero-sum atomicity. Use synthetic fixtures with explicit temporary database and backup paths and the test database guard; never test against real finance.db.
+
+Explicit non-goals: new allocation pools or controls, automatically selecting Live balance Accounts, treating External transfers as Income/Expenses, exposing External balances, changing the summary label, new ledger operations, stored totals, automatic recording, matching, or unrelated transfer rules.
+
+Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+
+### Dashboard and Simulator Utilization Threshold Rounding
+
+Purpose: make Dashboard and Simulator Credit Card utilization badges classify the same ratio consistently. Public Release 5 Part 2 found projected utilization rounded before classification in Simulator, while Dashboard classified the exact ratio. An exact 29.996% displayed as 30.00% with different badge colors across the views.
+
+Approved user-visible behavior: classify badges using the exact ratio, then round only the displayed percentage to two decimal places. Green is below 30%; Yellow is at least 30% and below 50%; Red is at least 50%. A ratio just below a boundary may therefore display 30.00% with Green or 50.00% with Yellow. Retain concise visible percentages and descriptive accessible labels; do not add another displayed precision, tooltip, or explanatory control.
+
+Financial and data invariants: Python owns badge eligibility and state for individual Dashboard cards, Dashboard total revolving utilization, and Simulator projected cards. Derive amount owed as max(0, -internalBalanceCents), using current balances on Dashboard and final projected balances in Simulator. Compare integer amounts against limits without floating point or rounded display values: below 30% means amountOwedCents * 100 < creditLimitCents * 30; below 50% means amountOwedCents * 100 < creditLimitCents * 50. Dashboard total uses the existing sums of eligible card amounts owed and limits. Preserve all eligibility, total inclusion, two-decimal percentage formatting, account balances, credit limits, ledger signs, projections, and reporting. The frontend renders the authoritative state instead of independently classifying the displayed percentage.
+
+Account-specific Utilization Warning alerts retain their existing exact integer/basis-point comparisons and helper rounding; this item does not change those thresholds or their configuration.
+
+Meaningful edge cases: exact values below, at, and above 30% and 50%; ratios that display-round across either boundary; zero debt, overpayments, utilization above 100%, missing limits, ineligible subtypes, total revolving utilization, and differences between live and projected debt. Cards absent from Simulator Results remain absent; there is no projected total-utilization badge.
+
+Acceptance criteria: verify exact-ratio classification at both boundaries and near-boundary ratios such as 29.996% and 49.996%, while retaining two-decimal display values. Identical eligible current/projected amounts and limits yield identical states in Dashboard and Simulator. Verify the Dashboard aggregate ratio from summed eligible amounts/limits, frontend use of backend-provided states, readable narrow-screen badges, accessible labeling, unchanged account-specific warning behavior, overpayment handling, and utilization above 100%. Use synthetic fixtures, explicit temporary database and backup paths, and the test database guard; never test against real finance.db.
+
+Explicit non-goals: configurable badge thresholds, more display precision, new warnings or tooltips, total projected utilization, schema changes, changes to account-specific warning comparisons, financial calculations beyond badge classification, or unrelated presentation work.
+
+Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+
+### Other Credit Transfer and Payment Presentation
+
+Purpose: resolve conflicting transfer presentation rules by using destination Account class consistently. Existing passages disagree about whether Other Credit destinations receive payment wording or ordinary Transfer wording.
+
+Approved user-visible behavior: every Credit destination, including Other Credit, uses the existing payment presentation in ordinary transfer/payment forms and Simulator Transfer rows. The ordinary form's primary action reads Make Payment, and its destination note reads This will be recorded as a payment to <Account Name>. Other Credit destinations default Description or Simulator Label to <Account Name> Payment, matching Personal Loan naming.
+
+Preserve the existing Credit Card description rule: use <Account Name> Card Payment unless the Account name already ends in Card, in which case use <Account Name> Payment. Thus Disney defaults to Disney Card Payment, Disney Card remains Disney Card Payment, and Apple Card remains Apple Card Payment; never generate Card Card Payment. Personal Loans retain <Account Name> Payment. Do not change the existing Credit Card naming condition or broaden this item into name normalization.
+
+Apply approved destination-based defaults when selecting or changing destinations in new entry forms and when explicitly changing a Simulator row's destination. Users retain normal editable Description/Label fields. Merely opening or rendering an existing transfer/payment or saved Simulator row preserves its saved Description/Label. Retain Cash defaults of Transfer to <Destination Account Name> and existing External transfer presentation. The Simulator Type remains Transfer; do not introduce a Payment row type or replace its existing recording-action label.
+
+Financial and data invariants: this is presentation only. A payment remains the existing atomic two-row, opposite-signed, zero-sum transfer with no Category and no Income/Expense effect. Preserve positive entered Amount, Account eligibility, External boundaries, balances, reporting, stored descriptions, and existing transfer validation. The ordinary payoff helper remains available only under its existing new-entry Credit Card/Personal Loan, Cash-source, amount-owed, and source-coverage rules; Other Credit does not gain helper eligibility. Do not change Simulator Payoff eligibility or calculations, Planned Debt Payment eligibility, or any other subtype-specific rule.
+
+Meaningful edge cases: Cash, Credit Card, Personal Loan, Other Credit, and External destinations; switching among them; names ending in Card versus names without that ending; new entries, duplicate/prefilled entries, existing transfer editing, saved Simulator rendering, and explicit Simulator destination changes. A saved user description is not replaced merely to conform to the new presentation.
+
+Acceptance criteria: verify Make Payment and the destination payment note for every Credit subtype, and Other Credit defaults of <Account Name> Payment in both ordinary forms and Simulator rows. Verify Disney, Disney Card, and Apple Card naming without duplicated Card wording; retain Personal Loan naming, Cash defaults, and External presentation. Verify existing saved descriptions and labels survive opening, rendering, refresh, and unrelated edits. Verify destination changes follow the established generated-default behavior, fields remain editable, and Other Credit receives no ordinary payoff helper. Assert unchanged helper/Payoff/Planned Debt Payment eligibility, transfer validation, integer-cent signs, zero sum, atomicity, balances, and reporting. Use explicit temporary database and backup paths with the test database guard, and verify narrow-screen forms, accessible wording, and safe Account-name rendering.
+
+Explicit non-goals: a separate payment transaction or Simulator row type, payoff-helper expansion, new debt accounting, changes to Payoff or Budget destination eligibility, automatic rewriting of saved descriptions, name normalization, schema changes, or unrelated transfer behavior.
+
+Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+
+### Simulator Transfer Summary Label
+
+Purpose: resolve the conflicting Simulator summary labels Payments & Cash Transfers and Transfers & Payments with one consistent label.
+
+Approved user-visible behavior: use Transfers & Payments for the existing Simulator allocation-summary value. Preserve the five-value order: Starting Cash, Planned Income, Planned Spending & Buffer, Transfers & Payments, Unallocated Money. Use the approved label consistently in maintained Simulator presentation, accessible labels, current user guidance, and canonical specification wording when implementation is completed and verified. Preserve historical release summaries.
+
+Financial and data invariants: wording only. Preserve the existing transfersPaymentsCents API field, integer-cent values, signed selected-Cash-pool contribution, Credit/Payoff payment contributions, executed-row exclusions, and Unallocated Money formula. The summary remains an allocation deduction that can be signed; renaming it must not turn it into a gross unsigned transfer total or change which rows contribute. Preserve the separately approved External allocation rules without implicitly implementing that milestone.
+
+Meaningful edge cases: a zero summary, negative net deduction from incoming selected-pool Cash transfers, offsetting Cash transfers, Credit payments, Payoff rows, External cases, and narrow-screen wrapping. These cases do not require alternative labels.
+
+Acceptance criteria: verify the exact label and five-value order in visible and accessible Simulator presentation, with normal responsive wrapping and no overflow. Verify current documentation is aligned after implementation while historical release summaries remain intact. Assert unchanged API field, summary values, selected-pool direction, Credit/Payoff calculations, and Unallocated Money against existing fixtures; no database writes or schema change are introduced by renaming.
+
+Explicit non-goals: changing allocation math, API field names, transaction-history summary labels, transfer types, stored values, new controls, tooltips, or unrelated presentation.
+
+Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+
+### Dashboard Response Fields Required by the OpenAPI Contract
+
+Purpose: make Dashboard JSON responses satisfy their published OpenAPI contract so integrations can interpret Account eligibility and displayed events without guessing. Public Release 5 Part 3 found required ordinaryEligible and transferEligible absent from Dashboard Account records and required combinedTransfer absent from pinned quickUpdates records.
+
+Approved behavior: return the promised Boolean fields rather than remove or weaken their required status in the published contract. Dashboard Account records expose ordinaryEligible and transferEligible from the existing authoritative Account eligibility rules. Active/archive status and System boundaries remain authoritative: External is ineligible for ordinary entry and eligible only under existing transfer rules wherever an applicable response includes it. Do not add External to Dashboard financial Account lists to expose these fields.
+
+Dashboard recent-event and pinned-event records expose combinedTransfer according to existing event grouping. A valid combined transfer event has true; an ordinary pinned transaction has false. Visible invalid linked rows remain underlying rows rather than being falsely marked as combined events. Preserve existing response collections, event grouping, IDs, fields, and eligibility semantics; reuse established backend metadata rather than add a second eligibility calculation.
+
+User-visible behavior: integrations receive the documented yes/no answers consistently. The browser Dashboard retains its existing appearance and workflows. These fields describe existing eligibility and grouping; they do not grant permission or replace backend write validation.
+
+Financial and data invariants: preserve balances, integer-cent ledger and display signs, reports, transfer zero-sum integrity, Account eligibility, active/archive behavior, External exclusions, recent/pinned inclusion and ordering, and existing role permissions. Financial JSON never exposes integration secrets, user password hashes, session tokens, or other credentials. Reading Dashboard performs no database or planning-state mutation.
+
+Meaningful edge cases: populated and empty responses; active Cash and Credit Accounts; archived Accounts where an existing response legitimately includes them; System Account boundaries; ordinary Income/Expense/refund/reversal events; valid combined transfers/payments; invalid linked rows; ordinary pinned events; Owner, Auditor, and Bearer read access under their existing permissions. Missing optional configuration must not omit these required Boolean fields.
+
+Acceptance criteria: validate populated Dashboard Account, recent-event, and pinned quickUpdates records against the published required fields and Boolean types, including ordinary events and valid combined transfers. Verify values agree with existing authoritative eligibility/grouping rules and that invalid linked rows remain visible without combined classification. Verify empty responses, External exclusions, unchanged financial values and browser presentation, read-only behavior, permissions, and credential isolation. Test the integration Dashboard response against the approved OpenAPI contract and applicable shared Dashboard response paths using synthetic fixtures, explicit temporary database and backup paths, and the test database guard; never test against real finance.db. Align maintained public documentation after implementation without weakening the contract.
+
+Explicit non-goals: new eligibility rules, fields granting write authority, direct integration ledger writes, changing Dashboard collections or financial calculations, exposing External balances, new API operations, schema changes, credential disclosure, or unrelated contract cleanup.
+
+Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+
+### Integration Oversized-Request Error Representation
+
+Purpose: make oversized integration-submission errors readable by integrations and consistent with the published JSON Error contract. Public Release 5 Part 3 found an authenticated request exceeding the configured 1 MiB limit returned HTTP 413 with text/html despite the documented JSON response.
+
+Approved behavior: retain the existing 1 MiB request-size limit and HTTP 413 rejection, but return application/json using the existing documented JSON Error shape for oversized integration submissions. Include a concise message explaining that the request exceeds the 1 MiB limit. Do not introduce another error envelope, expose framework HTML, or include request contents or private diagnostic details. Keep OpenAPI and public agent error guidance aligned with this behavior after implementation and verification.
+
+User-visible behavior: an integration receives a machine-readable error and can report that its submission is too large. No additional confirmation, retry workflow, or browser UI is required.
+
+Financial and data invariants: an oversized submission creates no proposal, ledger row, decision, or financial/planning mutation. Preserve authentication, authorization, revocation, Owner-configuration requirements, existing browser CSRF policy, and ordinary validation/error behavior. The JSON error does not grant access or bypass eligibility and financial validation. Keep the size limit unchanged and apply the smallest explicit handler change needed for the integration-submission route.
+
+Meaningful edge cases: an authenticated valid integration secret with an oversized body; a body exactly at the limit versus above it; oversized malformed JSON; missing, invalid, and revoked credentials; Owner not configured; and unaffected ordinary-size validation failures. Preserve existing access-control outcomes and precedence for unauthorized callers rather than redefining them as part of error formatting. Existing non-integration HTML errors retain their normal behavior.
+
+Acceptance criteria: an authenticated submission above the configured limit returns 413, application/json, and the documented Error shape with a concise size-limit message. Verify boundary handling using body byte sizes; an exactly-at-limit request is not rejected for size but still undergoes normal parsing and validation. Verify oversized malformed content does not leak body text or exception details. Assert no proposal or ledger writes, unchanged authentication/authorization and ordinary errors, and no unrelated HTML error changes. Verify public documentation describes the tested response. Use synthetic fixtures, explicit temporary database and backup paths, and the in-process test database guard; never access real finance.db.
+
+Explicit non-goals: changing the size limit, accepting larger submissions, automatic retries, new error frameworks or envelopes, broad HTTP exception rewrites, new API operations, schema changes, or unrelated browser error handling.
+
+Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+
+### Integration History Filter ID Validation
+
+Purpose: make integration history Account and Category filter validation match the published positive-integer ID contract. Public Release 5 Part 3 found zero and negative IDs accepted as successful empty results while nonnumeric IDs were rejected.
+
+Approved behavior: an omitted accountId or categoryId applies no corresponding filter. A supplied ID must be an integer of at least 1. Zero, negative, nonnumeric, blank, and other malformed supplied values return the existing JSON validation error with HTTP 400 rather than silently clearing the filter or producing a successful empty result. A syntactically valid positive ID with no matching record returns HTTP 200 with an empty result using the existing history envelope; no new not-found error or lookup workflow is added. Apply the same rule to both filters, including when other filters are present.
+
+User-visible behavior: integrations can distinguish an invalid filter request from a valid search that finds nothing. Archived Account and Category IDs remain valid historical filters under existing rules. Preserve existing integer query syntax; do not coerce fractional values, remap names, or guess intended IDs.
+
+Financial and data invariants: filtering reads existing history and writes nothing. Preserve matching either side of a valid combined transfer for Account filters, Category-filter exclusion of transfers, invalid linked-row visibility, all other filter semantics, sorting, pagination, total and nextOffset, optional summary over all matching events, integer-cent signs, financial totals, and existing read permissions. Positive unavailable IDs never silently broaden results. Do not change proposal/submission ID validation or browser stable-ID URL behavior.
+
+Meaningful edge cases: omitted, positive existing, positive unavailable, zero, negative, blank, nonnumeric, and fractional values for each filter; active and archived references; simultaneous Account and Category filters; combination with period, type, description, amount, and pagination; either transfer side; empty matching history and optional summary.
+
+Acceptance criteria: verify explicit expected 200 or 400 outcomes and the existing JSON shapes for all supplied/omitted cases. Existing and archived positive IDs retain correct matching; unavailable positive IDs yield an empty successful envelope with zero matching total, no next page, and normal zero semantic summary when requested. Invalid IDs fail without partial or broadened results. Verify transfer-side matching, Category transfer exclusion, pagination, totals, optional summary, permissions, and read-only behavior remain unchanged. Align maintained public documentation and OpenAPI with tested behavior after implementation. Use synthetic fixtures, explicit temporary database and backup paths, and the in-process test database guard; never access real finance.db.
+
+Explicit non-goals: new history filters, lookup endpoints, new not-found errors, automatic correction/remapping, changed proposal ID rules, changes to browser filter URLs, financial calculations, schema changes, or unrelated query validation.
+
+Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+
+### Preserve the Database When a Pre-Upgrade Backup Fails
+
+Purpose: fix the data-loss defect found during Public Release 3 documentation verification. initializeDatabase records backupPath before SQLite's backup operation succeeds and then attempts recovery from that path after a failure. An isolated injected backup failure reproduced replacement of the original database with an empty database at schema version 0.
+
+Approved behavior: distinguish a candidate backup path from a completed, integrity-verified recovery snapshot. Before any migration, create the pre-upgrade snapshot using SQLite's supported backup mechanism and verify its integrity. Only successful completion and verification make it eligible for recovery; file existence alone does not. A backup-file creation failure, interrupted/failed backup operation, or invalid completed snapshot stops startup before migrations and leaves the original database unchanged. Never restore from an incomplete, empty, or invalid snapshot.
+
+If migration or post-migration verification fails after a verified backup exists, restore the original state from that verified snapshot using the existing recovery workflow, retain the snapshot, and stop startup clearly. If recovery also fails, leave the installation stopped, retain the verified backup for manual recovery, and report both the original upgrade failure and recovery failure without claiming successful restoration. Do not proceed with a partial upgrade or retry startup automatically.
+
+User-visible behavior: concise startup diagnostics explain whether backup creation/verification, migration, or recovery failed and identify a verified recovery snapshot when available. Preserve the original error when reporting a secondary recovery error. Remove the README and SPEC known-defect descriptions only after the corrective implementation and failure-preservation tests are verified; retain ordinary independent manual-backup guidance.
+
+Financial and data invariants: failed pre-upgrade backup cases preserve the original database's records and schema version and never enter migrations. Recovery after a migration failure restores all original financial, configuration, user, integration-secret, revocation, proposal, and planning records, relationships, and schema version from the verified snapshot. Preserve integer-cent values, balances, ledger history, foreign keys, and credential state without recalculation or repair. Retain newer-schema rejection, unique migration-backup naming, source integrity checks, ordered migrations, post-upgrade verification, and existing no-backup behavior for new/current databases. Keep one shared initialization path and use the smallest explicit change.
+
+Meaningful edge cases: failure to create the backup file; backup failure before completion, including a partial file; a completed but invalid snapshot; migration failure after verification; post-migration verification failure; recovery failure; successful older-schema upgrades; new/current databases; and rejection of a newer unsupported schema. A failed snapshot is never promoted to a recovery source, regardless of whether its file remains present.
+
+Acceptance criteria: isolated fault-injection tests cover each backup creation/completion/verification failure and assert unchanged original records and schema, no migration entry, and no recovery attempt from the failed candidate. Tests cover migration and post-migration verification failure after a verified snapshot, proving original-state restoration and snapshot retention. Recovery-failure tests prove startup remains stopped, the verified snapshot remains available, and diagnostics preserve both failures without claiming recovery succeeded. Successful upgrades, new/current initialization, and newer-schema rejection continue to pass. Use synthetic fixtures, explicit temporary database and backup paths, and the in-process test database guard before application imports; never read, initialize, migrate, or write real finance.db. Verify the exact documentation update only after the fix passes these checks.
+
+Explicit non-goals: new schema migrations, an updater, scheduled/automatic backups, a restore wizard, backup-retention features, automatic recovery retries, deployment changes, unrelated refactoring, or changes to financial behavior.
+
+Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+
+## Version Later
+
+These ideas preserve product direction but are not approved implementation scope. Promote and fully design one before implementation.
+
+### Progressive Web App
+
+Consider an installable manifest and a read-only offline Dashboard snapshot. Offline mode would cache the latest balances, reporting state, and seven days of recent events on the current browser, clearly label stale data, disable writes and unavailable features, and recover only after a real API refresh. It must not queue writes or create server-side state. HTTPS remains the reverse proxy's responsibility unless separately designed.
+
+### Automatic Backups and Production Server
+
+Consider one consistent SQLite backup before the first successful write of each server-local day, with integrity verification, bounded retry, feature-owned retention, and a persistent failure banner that never blocks the authoritative write. Manual and migration backups remain separate. Tests use explicit temporary paths.
+
+Replace Flask's development server with Waitress for normal startup while retaining portable Windows and Linux launch scripts and existing binding and reverse-proxy behavior.
+
+### Sensitive Financial Information
+
+Do not store full card, routing, ACH, or CVV credentials as ordinary fields. Prefer a password manager and retain only non-secret references such as institution, nickname, last four digits, or payment URL. Any in-application vault requires complete authentication, encryption, key-management, recovery, display, backup, and deployment-security design.
+
+### Primary Navigation
+
+Consider a plain, accessible hamburger menu shared by desktop and mobile while preserving Settings and all destinations. Do not introduce a persistent sidebar, bottom navigation, or separate mobile model.
+
+### New Transaction URL
+
+Prefer a #new fragment on the current page so opening, closing, refresh, Back, and Forward preserve the underlying page state. Apply it only to ordinary transaction creation and reuse the existing form. Decide separately whether /new redirects, remains compatible, or is retired.
+
+
+### Future Integration Extensions
+
+Authenticated financial JSON reads, ordinary transaction proposals, durable retry identity, public agent documentation, and Owner review are already implemented in SPEC.md. Do not duplicate them with a direct-to-ledger transaction API. Any additional integration operations require separate scope and approval while preserving the current human-review boundary.
+
+### Telegram and Daily Summaries
+
+Consider opt-in Telegram notifications after selected successful ledger writes. Delivery occurs only after commit; failure never rolls back or casts doubt on the financial write. Credentials require masking and backup disclosure. Simulator-only activity is excluded, and the initial design has no retry queue, history, worker, or automatic retry.
+
+Scheduled Telegram, SMTP, or companion-service summaries require separate decisions about content, cadence, timezone, credentials, privacy, and reliability.
+
+### Purchase Financing
+
+Consider informational tracking for 0% financing or installments. It must not count proceeds as income, double-count repayment expense, create another ledger, or automatically alter transactions.
+
+### Merchant Grouping and Description Type-Ahead
+
+Consider user-approved reporting rules that group full descriptions under merchant names without changing the source text. Fuzzy matching may suggest but never apply rules. Description type-ahead may suggest prior full descriptions but must not rewrite text or add a required field.
+
+### Save Transaction as Template
+
+An ordinary transaction editor may open the existing template dialog with Account, Description, Category, and user-facing Amount prefilled. Template Name remains required, all prefills remain editable, archived references are omitted, and saving never changes or links the source transaction. Transfers are ineligible.
+
+### Statements and Export
+
+Consider printable and CSV statements for selected accounts and an inclusive range. Each account includes its starting balance, matching transactions, and ending balance, including balanceOffsetCents. Multi-account CSV includes Account.
+
+### Savings Goals
+
+Savings goals may eventually replace parts of the old bucket concept. No design is committed.
+## Deferred Ideas
+
+The following are not current implementation requirements unless deliberately promoted into a future release:
+
+```text
+Additional expense analysis
+Additional reporting periods
+Net worth
+Bank integrations
+Recurring transaction automation
+Other financial tools
+```
+
+Do not build scaffolding for deferred features unless a committed release actually requires it.

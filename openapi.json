@@ -1,0 +1,3198 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "No Part Finance Integration API",
+    "version": "26.10.3",
+    "description": "No Part Finance is a self-hosted personal finance application for tracking Cash and Credit Accounts, recording transactions and transfers, and reporting Income and Expenses by Category. Budget provides informational planning, and Simulator projects future account balances without changing the ledger. One Owner manages the shared ledger; an optional Auditor has read-only access.\n\nThis integration API lets external agents and programs read financial and planning information, submit proposed ordinary transactions or transfers/payments for Owner review, read and update all current Pending items, and check their own submission status. It cannot directly create ledger transactions, approve proposals, or change application configuration.\n\nRespect entered USD signs: Income ledger=entered; Expense ledger=-entered. Expense refunds and Income reversals use negative entered dollars. Computed response money uses integer cents and dates use ISO calendar dates; editable Pending amount fields retain entered USD strings. Human approval is always required; pending/rejected proposals affect no financial totals. Owner review corrections may be saved while a proposal remains Pending; original content continues to identify agent retries.\n\n/docs and this contract are public and contain only fictional examples; all documented API operations require Bearer authentication. Secrets are recoverable in finance.db; database backups and packages containing the database are credentials, and restoring them restores the saved revocation state. No outbound delivery or vendor-specific compatibility is provided.\n\nTransfers require type=transfer, a positive entered USD amount, distinct eligible active From/To Accounts, explicit Date and Description, and no Category. After approval From is negative and To positive with zero sum. Manual creation and moving existing events to Pending are Owner browser actions, unavailable to Bearer callers; all Pending items, including Manual and moved events, are readable and updateable through the Pending API. Terminal status history remains caller-specific."
+  },
+  "security": [
+    {
+      "integrationBearer": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "integrationBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Owner-created active integration secret, supplied only in Authorization header. No browser login, direct ledger/configuration writes, or approval/rejection privileges. Submissions persist proposals for Owner review."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/integration/read/accounts": {
+      "get": {
+        "operationId": "readAccounts",
+        "summary": "Read accounts",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "accountClass": {
+                        "type": "string",
+                        "enum": [
+                          "cash",
+                          "credit",
+                          "system"
+                        ]
+                      },
+                      "accountSubtype": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "active": {
+                        "type": "integer",
+                        "enum": [
+                          0,
+                          1
+                        ]
+                      },
+                      "displayOrder": {
+                        "type": "integer"
+                      },
+                      "balanceCents": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Authoritative integer cents; never floating-point dollars."
+                      },
+                      "balanceOffsetCents": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Authoritative integer cents; never floating-point dollars."
+                      },
+                      "creditLimitCents": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "minimumBalanceCents": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "minimumCautionPercent": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "utilizationWarningBasisPoints": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "systemIdentity": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "ordinaryEligible": {
+                        "type": "boolean"
+                      },
+                      "transferEligible": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "accountClass",
+                      "active",
+                      "ordinaryEligible",
+                      "transferEligible"
+                    ],
+                    "description": "Cash and Credit current internal balances include offsets and all ledger activity. System External has neither balanceCents nor balanceOffsetCents. Eligible flags are authoritative; archived Accounts remain readable."
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/read/categories": {
+      "get": {
+        "operationId": "readCategories",
+        "summary": "Read categories",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "parentCategoryId": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "active": {
+                        "type": "integer",
+                        "enum": [
+                          0,
+                          1
+                        ]
+                      },
+                      "displayOrder": {
+                        "type": "integer"
+                      },
+                      "offerReimbursement": {
+                        "type": "integer",
+                        "enum": [
+                          0,
+                          1
+                        ]
+                      },
+                      "hasChildren": {
+                        "type": "integer",
+                        "enum": [
+                          0,
+                          1
+                        ]
+                      },
+                      "reportingRole": {
+                        "type": "string",
+                        "enum": [
+                          "expense",
+                          "income"
+                        ]
+                      },
+                      "ordinaryEligible": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "reportingRole",
+                      "ordinaryEligible"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/read/templates": {
+      "get": {
+        "operationId": "readTemplates",
+        "summary": "Read templates",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "accountId": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "description": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "categoryId": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "enteredAmountCents": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "prefillAmount": {
+                        "type": "integer",
+                        "enum": [
+                          0,
+                          1
+                        ]
+                      },
+                      "active": {
+                        "type": "integer",
+                        "enum": [
+                          0,
+                          1
+                        ]
+                      },
+                      "displayOrder": {
+                        "type": "integer"
+                      },
+                      "accountName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "categoryName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "ordinaryEligible": {
+                        "type": "boolean"
+                      },
+                      "reportingRole": {
+                        "type": "string",
+                        "enum": [
+                          "expense",
+                          "income"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "enteredAmountCents",
+                      "ordinaryEligible"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/read/settings": {
+      "get": {
+        "operationId": "readSettings",
+        "summary": "Read settings",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Budget suggestion settings, paychecksPerYear and reimbursementCategoryId. No credential state."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/read/report-periods": {
+      "get": {
+        "operationId": "readReportPeriods",
+        "summary": "Read report-periods",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/read/transactions": {
+      "get": {
+        "operationId": "readTransactions",
+        "summary": "Read transactions",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [
+          {
+            "name": "period",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "all (history only), thisMonth, lastMonth, yearToDate, last30Days, month:YYYY-MM or custom. This Month includes future dates in that month; reporting day divisor is elapsed days."
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+            },
+            "description": "Required with custom; inclusive."
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+            },
+            "description": "Required with custom; inclusive."
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "transactions",
+                "transfers"
+              ],
+              "default": "all"
+            },
+            "description": ""
+          },
+          {
+            "name": "accountId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Matches either transfer side."
+          },
+          {
+            "name": "categoryId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Excludes transfers."
+          },
+          {
+            "name": "description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Case-insensitive substring."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "date",
+                "account",
+                "description",
+                "category",
+                "amount"
+              ],
+              "default": "date"
+            },
+            "description": ""
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "desc"
+            },
+            "description": ""
+          },
+          {
+            "name": "amountMode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "any",
+                "exact",
+                "lessThan",
+                "greaterThan",
+                "between",
+                "withinDollar"
+              ],
+              "default": "any"
+            },
+            "description": "Compare absolute ledger-event magnitude; Between inclusive, inequalities strict."
+          },
+          {
+            "name": "amount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "USD for Exact/Less/Greater/withinDollar; withinDollar must be whole-dollar."
+          },
+          {
+            "name": "amountMin",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Between inclusive minimum USD."
+          },
+          {
+            "name": "amountMax",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Between inclusive maximum USD."
+          },
+          {
+            "name": "includeSummary",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false"
+            },
+            "description": "Summary across ALL matches, before pagination."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "description": "Page size."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "Live-snapshot offset."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "transactions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "accountId": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "date": {
+                            "type": "string",
+                            "format": "date",
+                            "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "categoryId": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "transferId": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "pinned": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "accountName": {
+                            "type": "string"
+                          },
+                          "accountClass": {
+                            "type": "string"
+                          },
+                          "categoryName": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "categoryRole": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              "expense",
+                              "income",
+                              null
+                            ]
+                          },
+                          "amountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "enteredAmountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "displayAmountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "combinedTransfer": {
+                            "type": "boolean"
+                          },
+                          "simulatorEligible": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "date",
+                          "amountCents",
+                          "displayAmountCents",
+                          "combinedTransfer"
+                        ],
+                        "description": "Ordinary amountCents is signed ledger cents. Income entered/display = ledger; Expense entered/display = -ledger. Combined valid transfer amount/display are unsigned; id is its largest ledger-row ID and transferId identifies the pair. Invalid linked and uncategorized rows preserve raw signed ledger/display cents."
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "offset": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "nextOffset": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "summary": {
+                      "type": "object",
+                      "properties": {
+                        "expenseCents": {
+                          "type": "integer",
+                          "format": "int64",
+                          "description": "Authoritative integer cents; never floating-point dollars."
+                        },
+                        "incomeCents": {
+                          "type": "integer",
+                          "format": "int64",
+                          "description": "Authoritative integer cents; never floating-point dollars."
+                        },
+                        "transferPaymentCents": {
+                          "type": "integer",
+                          "format": "int64",
+                          "description": "Authoritative integer cents; never floating-point dollars."
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "transactions",
+                    "total",
+                    "offset",
+                    "limit",
+                    "nextOffset"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/read/dashboard": {
+      "get": {
+        "operationId": "readDashboard",
+        "summary": "Read dashboard",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [
+          {
+            "name": "period",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "all (history only), thisMonth, lastMonth, yearToDate, last30Days, month:YYYY-MM or custom. This Month includes future dates in that month; reporting day divisor is elapsed days."
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+            },
+            "description": "Required with custom; inclusive."
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+            },
+            "description": "Required with custom; inclusive."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "accounts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "accountClass": {
+                            "type": "string",
+                            "enum": [
+                              "cash",
+                              "credit",
+                              "system"
+                            ]
+                          },
+                          "accountSubtype": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "active": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "displayOrder": {
+                            "type": "integer"
+                          },
+                          "balanceCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "balanceOffsetCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "creditLimitCents": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "minimumBalanceCents": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "minimumCautionPercent": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "utilizationWarningBasisPoints": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "systemIdentity": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "ordinaryEligible": {
+                            "type": "boolean"
+                          },
+                          "transferEligible": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "accountClass",
+                          "active",
+                          "ordinaryEligible",
+                          "transferEligible"
+                        ],
+                        "description": "Cash and Credit current internal balances include offsets and all ledger activity. System External has neither balanceCents nor balanceOffsetCents. Eligible flags are authoritative; archived Accounts remain readable."
+                      }
+                    },
+                    "incomeCents": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Authoritative integer cents; never floating-point dollars."
+                    },
+                    "expensesCents": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Authoritative integer cents; never floating-point dollars."
+                    },
+                    "netCents": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Authoritative integer cents; never floating-point dollars."
+                    },
+                    "perDayCents": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Authoritative integer cents; never floating-point dollars."
+                    },
+                    "recentTransactions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "accountId": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "date": {
+                            "type": "string",
+                            "format": "date",
+                            "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "categoryId": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "transferId": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "pinned": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "accountName": {
+                            "type": "string"
+                          },
+                          "accountClass": {
+                            "type": "string"
+                          },
+                          "categoryName": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "categoryRole": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              "expense",
+                              "income",
+                              null
+                            ]
+                          },
+                          "amountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "enteredAmountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "displayAmountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "combinedTransfer": {
+                            "type": "boolean"
+                          },
+                          "simulatorEligible": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "date",
+                          "amountCents",
+                          "displayAmountCents",
+                          "combinedTransfer"
+                        ],
+                        "description": "Ordinary amountCents is signed ledger cents. Income entered/display = ledger; Expense entered/display = -ledger. Combined valid transfer amount/display are unsigned; id is its largest ledger-row ID and transferId identifies the pair. Invalid linked and uncategorized rows preserve raw signed ledger/display cents."
+                      }
+                    },
+                    "quickUpdates": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "accountId": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "date": {
+                            "type": "string",
+                            "format": "date",
+                            "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "categoryId": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "transferId": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "pinned": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "accountName": {
+                            "type": "string"
+                          },
+                          "accountClass": {
+                            "type": "string"
+                          },
+                          "categoryName": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "categoryRole": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              "expense",
+                              "income",
+                              null
+                            ]
+                          },
+                          "amountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "enteredAmountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "displayAmountCents": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Authoritative integer cents; never floating-point dollars."
+                          },
+                          "combinedTransfer": {
+                            "type": "boolean"
+                          },
+                          "simulatorEligible": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "date",
+                          "amountCents",
+                          "displayAmountCents",
+                          "combinedTransfer"
+                        ],
+                        "description": "Ordinary amountCents is signed ledger cents. Income entered/display = ledger; Expense entered/display = -ledger. Combined valid transfer amount/display are unsigned; id is its largest ledger-row ID and transferId identifies the pair. Invalid linked and uncategorized rows preserve raw signed ledger/display cents."
+                      }
+                    },
+                    "categories": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "accountsByExpense": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "accountsByIncome": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "accountsByNetChange": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "accountsByBalanceChange": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "expensesByAccountAndCategory": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "expensesByCategoryAndAccount": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "netChangeGroups": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "balanceChangeGroups": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "minimumBalanceAlerts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "creditUtilizationAlerts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "periodStart": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "periodEnd": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "dayCount": {
+                      "type": "integer"
+                    },
+                    "totalCreditBalanceCents": {
+                      "type": "integer"
+                    },
+                    "totalCreditLimitCents": {
+                      "type": "integer"
+                    },
+                    "totalRevolvingOwedCents": {
+                      "type": "integer"
+                    },
+                    "spendingPercentageHundredths": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "description": "Existing full Dashboard snapshot: reporting period, Category rollups, Account and detailed Category/Account breakdowns, current balances and alerts. No integration credentials or pending proposals."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/read/budget": {
+      "get": {
+        "operationId": "readBudget",
+        "summary": "Read budget",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+            },
+            "description": "Sinking Fund target date only; other summaries retain their normal date basis."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "plans": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "expectedIncomePlans": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "plannedCreditPayments": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "comingUp": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "paychecksPerYear": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "totalReserveTargetCents": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Authoritative integer cents; never floating-point dollars."
+                    },
+                    "totalMonthlyContributionCents": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Authoritative integer cents; never floating-point dollars."
+                    },
+                    "totalPerPaycheckContributionCents": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "totalMonthlyRecurringCents": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Authoritative integer cents; never floating-point dollars."
+                    },
+                    "monthlyRequirementCents": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "flexibleBudgets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                      }
+                    },
+                    "flexibleCategories": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "monthlyRecurringByPaymentAccount": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "monthlyRecurringByCategory": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "totalFlexibleCategoryBudgetCents": {
+                      "type": "integer"
+                    },
+                    "totalPlannedCreditPaymentCents": {
+                      "type": "integer"
+                    },
+                    "totalExpectedIncomeCents": {
+                      "type": "integer"
+                    },
+                    "suggestionRoundingCents": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "description": "Full existing Budget settings, plans, upcoming items, grouping, suggestions and totals. date modifies only Sinking Fund target presentation. Plans are configuration, never recorded payments."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/read/simulator": {
+      "get": {
+        "operationId": "readSimulator",
+        "summary": "Read simulator",
+        "description": "Complete unpaginated snapshot except transactions (default 100, max 500). Unknown query filters are rejected. Uses authoritative existing Python calculations.",
+        "parameters": [
+          {
+            "name": "plan",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Stable ID, falling back to oldest plan if absent/invalid/unavailable."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "plans": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "planDate": {
+                            "type": "string",
+                            "format": "date",
+                            "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                          }
+                        }
+                      }
+                    },
+                    "plan": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "planDate": {
+                              "type": "string",
+                              "format": "date",
+                              "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                            },
+                            "rows": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                  },
+                                  "rowType": {
+                                    "type": "string"
+                                  },
+                                  "amountCents": {
+                                    "type": [
+                                      "integer",
+                                      "null"
+                                    ]
+                                  },
+                                  "effectiveAmountCents": {
+                                    "type": "integer",
+                                    "format": "int64",
+                                    "description": "Authoritative integer cents; never floating-point dollars."
+                                  },
+                                  "executed": {
+                                    "type": "integer",
+                                    "enum": [
+                                      0,
+                                      1
+                                    ]
+                                  },
+                                  "executedTransactionId": {
+                                    "type": [
+                                      "integer",
+                                      "null"
+                                    ]
+                                  }
+                                }
+                              }
+                            },
+                            "results": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                  },
+                                  "accountClass": {
+                                    "type": "string"
+                                  },
+                                  "balanceCents": {
+                                    "type": "integer",
+                                    "format": "int64",
+                                    "description": "Authoritative integer cents; never floating-point dollars."
+                                  },
+                                  "projectedBalanceCents": {
+                                    "type": "integer",
+                                    "format": "int64",
+                                    "description": "Authoritative integer cents; never floating-point dollars."
+                                  },
+                                  "plannedChangeCents": {
+                                    "type": "integer",
+                                    "format": "int64",
+                                    "description": "Authoritative integer cents; never floating-point dollars."
+                                  },
+                                  "bufferCents": {
+                                    "type": "integer",
+                                    "format": "int64",
+                                    "description": "Authoritative integer cents; never floating-point dollars."
+                                  }
+                                }
+                              }
+                            },
+                            "totals": {
+                              "type": "object",
+                              "description": "Complete authoritative existing application snapshot. Monetary fields ending Cents are integer cents; percentageHundredths/basisPoints are integers; null means unavailable. See /docs and SPEC.md for calculations and inclusion."
+                            }
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reimbursementCategoryId": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "description": "All plan identities plus selected plan's saved rows, execution and one-way ledger links, authoritative projected results and allocation totals. Excludes System Account results. Executed rows do not affect future projections."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/submissions": {
+      "post": {
+        "operationId": "submitOrdinaryProposal",
+        "summary": "Submit one transaction or transfer for Owner approval",
+        "description": "Only Pending state is written. Ordinary requests retain their exact original fields. Transfer requests require exactly submissionId, type: transfer, date, fromAccountId, toAccountId, description, amount. Reject mixed or unsupported fields. Date is explicit; no inferred today. Accounts must be distinct, active and transfer-eligible; External may be either side, and Credit/Loan destinations remain payments through this same operation. Positive entered amount becomes negative From and positive To ledger cents only on Owner approval, never Income/Expenses. No balance-based restrictions or payoff defaults. Original submitted type/content remains immutable for retries through saved corrections, decisions and restart. Identical ID/content returns current status; differing content/type conflicts. No bulk, reimbursements or direct writes. Owner-only Manual entries and moves share review, Bearer cannot create Manual items or move/decide events, and may read and update all current Pending items through the Pending operations.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "submissionId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "date": {
+                        "type": "string",
+                        "format": "date",
+                        "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                      },
+                      "accountId": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "categoryId": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "amount": {
+                        "type": "string",
+                        "description": "Entered USD STRING: Expense +50.00 stores -5000; Expense refund -20.00 stores +2000; Income +1500.00 stores +150000; Income reversal -50.00 stores -5000. Never use ledger cents here. Strict shared USD parser, optional expressions, max two decimals. Zero is accepted by ordinary rules."
+                      }
+                    },
+                    "required": [
+                      "submissionId",
+                      "date",
+                      "accountId",
+                      "description",
+                      "categoryId",
+                      "amount"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "submissionId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "transfer"
+                        ]
+                      },
+                      "date": {
+                        "type": "string",
+                        "format": "date",
+                        "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                      },
+                      "fromAccountId": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "toAccountId": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "amount": {
+                        "type": "string",
+                        "description": "Strictly positive entered USD string through shared parser; zero and negative invalid. After approval source ledger cents are negative and destination positive; no Category. Not a balance, payoff or ledger-cents field."
+                      }
+                    },
+                    "required": [
+                      "submissionId",
+                      "type",
+                      "date",
+                      "fromAccountId",
+                      "toAccountId",
+                      "description",
+                      "amount"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "examples": {
+                "ordinary": {
+                  "summary": "Fictional ordinary expense",
+                  "value": {
+                    "submissionId": "example-expense-001",
+                    "date": "2026-10-01",
+                    "accountId": 1,
+                    "description": "Example groceries",
+                    "categoryId": 2,
+                    "amount": "50.00"
+                  }
+                },
+                "transfer": {
+                  "summary": "Fictional Cash transfer",
+                  "value": {
+                    "submissionId": "example-transfer-001",
+                    "type": "transfer",
+                    "date": "2026-10-02",
+                    "fromAccountId": 1,
+                    "toAccountId": 3,
+                    "description": "Example Cash transfer",
+                    "amount": "25.00"
+                  }
+                },
+                "payment": {
+                  "summary": "Fictional Credit or Loan payment",
+                  "value": {
+                    "submissionId": "example-payment-001",
+                    "type": "transfer",
+                    "date": "2026-10-02",
+                    "fromAccountId": 1,
+                    "toAccountId": 4,
+                    "description": "Example Card Payment",
+                    "amount": "50.00"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New Pending proposal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "submissionId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "Pending",
+                        "Approved",
+                        "Rejected"
+                      ]
+                    },
+                    "transactionId": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "description": "Approved ordinary ledger-row ID, otherwise null; may become null after ledger deletion. Transfer approvals always return null here."
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "transaction",
+                        "transfer"
+                      ]
+                    },
+                    "transferId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Approved transfer group identifier; null for ordinary or Pending/Rejected proposals. Retained after ledger deletion: history lookup may find no rows. Retry remains Approved and never recreates a group."
+                    },
+                    "reviewVersion": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "submissionId",
+                    "status",
+                    "transactionId",
+                    "kind",
+                    "transferId",
+                    "reviewVersion"
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Identical retry and current status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "submissionId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "Pending",
+                        "Approved",
+                        "Rejected"
+                      ]
+                    },
+                    "transactionId": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "description": "Approved ordinary ledger-row ID, otherwise null; may become null after ledger deletion. Transfer approvals always return null here."
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "transaction",
+                        "transfer"
+                      ]
+                    },
+                    "transferId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Approved transfer group identifier; null for ordinary or Pending/Rejected proposals. Retained after ledger deletion: history lookup may find no rows. Retry remains Approved and never recreates a group."
+                    },
+                    "reviewVersion": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "submissionId",
+                    "status",
+                    "transactionId",
+                    "kind",
+                    "transferId",
+                    "reviewVersion"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listOwnSubmissions",
+        "summary": "Read only this credential's submission statuses",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "description": "Page size."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "Live-snapshot offset."
+          },
+          {
+            "name": "submissionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact caller ID."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pending",
+                "Approved",
+                "Rejected"
+              ]
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Own status page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "submissions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "submissionId": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "Pending",
+                              "Approved",
+                              "Rejected"
+                            ]
+                          },
+                          "transactionId": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "description": "Approved ordinary ledger-row ID, otherwise null; may become null after ledger deletion. Transfer approvals always return null here."
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "transaction",
+                              "transfer"
+                            ]
+                          },
+                          "transferId": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Approved transfer group identifier; null for ordinary or Pending/Rejected proposals. Retained after ledger deletion: history lookup may find no rows. Retry remains Approved and never recreates a group."
+                          },
+                          "reviewVersion": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "submissionId",
+                          "status",
+                          "transactionId",
+                          "kind",
+                          "transferId",
+                          "reviewVersion"
+                        ]
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "offset": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "nextOffset": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "submissions",
+                    "total",
+                    "offset",
+                    "limit",
+                    "nextOffset"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported filters or validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked Bearer secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Prohibited operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting retry or stale review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Owner not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure without private details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Lists only the authenticated integration’s submissions. Optional submissionId and status filters, existing pagination. Identifiers and kind describe the current decision. Ordinary Approved transactionId may become null after deletion; Approved transferId is retained after deletion though a ledger lookup may find no rows. Retries never recreate deleted events. Owner and API corrections remain separate from original retry type/content. Manual entries and moved ledger events are not listed by this caller-specific status operation; use /api/integration/pending for all current Pending sources. reviewVersion is included; successful Owner or API saves advance it."
+      }
+    },
+    "/api/integration/pending": {
+      "get": {
+        "summary": "Read all current Pending transactions and transfers",
+        "description": "Complete unpaginated read-only snapshot of every Pending source: any integration, Manual Save as Pending, and events moved from the ledger. Includes latest Owner/API corrections, current reviewVersion, original/current Reporting Roles and validation flags. No query parameters. Contains no terminal history, integration secrets, credentials, immutable original payloads or private source snapshots. Each transfer counts once. An empty queue has zero counts and rows: []. No database or planning mutation.",
+        "responses": {
+          "200": {
+            "description": "Current Pending review queue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "transactionCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "transferCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "integer",
+                                "minimum": 1
+                              },
+                              "submissionId": {
+                                "type": "string"
+                              },
+                              "source": {
+                                "type": "string",
+                                "enum": [
+                                  "integration",
+                                  "manual"
+                                ]
+                              },
+                              "label": {
+                                "type": "string",
+                                "description": "Current submitting integration label or fixed Manual attribution."
+                              },
+                              "pinned": {
+                                "type": "boolean",
+                                "description": "Read-only ordinary pin state; preserved by API updates."
+                              },
+                              "originalRole": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "expense",
+                                  "income",
+                                  null
+                                ]
+                              },
+                              "currentRole": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "expense",
+                                  "income",
+                                  null
+                                ]
+                              },
+                              "reviewVersion": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "roleChanged": {
+                                "type": "boolean"
+                              },
+                              "ledgerAmountCents": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "description": "Authoritative ordinary preview in ledger cents, null for transfers or invalid rows; not the entered Amount."
+                              },
+                              "validationError": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "kind": {
+                                "type": "string",
+                                "const": "transaction"
+                              },
+                              "date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                              },
+                              "accountId": {
+                                "type": "integer",
+                                "minimum": 1
+                              },
+                              "description": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "categoryId": {
+                                "type": "integer",
+                                "minimum": 1
+                              },
+                              "amount": {
+                                "type": "string",
+                                "description": "Entered USD STRING: Expense +50.00 stores -5000; Expense refund -20.00 stores +2000; Income +1500.00 stores +150000; Income reversal -50.00 stores -5000. Never use ledger cents here. Strict shared USD parser, optional expressions, max two decimals. Zero is accepted by ordinary rules."
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "submissionId",
+                              "source",
+                              "label",
+                              "pinned",
+                              "originalRole",
+                              "currentRole",
+                              "reviewVersion",
+                              "roleChanged",
+                              "ledgerAmountCents",
+                              "validationError",
+                              "kind",
+                              "date",
+                              "accountId",
+                              "description",
+                              "categoryId",
+                              "amount"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "integer",
+                                "minimum": 1
+                              },
+                              "submissionId": {
+                                "type": "string"
+                              },
+                              "source": {
+                                "type": "string",
+                                "enum": [
+                                  "integration",
+                                  "manual"
+                                ]
+                              },
+                              "label": {
+                                "type": "string",
+                                "description": "Current submitting integration label or fixed Manual attribution."
+                              },
+                              "pinned": {
+                                "type": "boolean",
+                                "description": "Read-only ordinary pin state; preserved by API updates."
+                              },
+                              "originalRole": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "expense",
+                                  "income",
+                                  null
+                                ]
+                              },
+                              "currentRole": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "expense",
+                                  "income",
+                                  null
+                                ]
+                              },
+                              "reviewVersion": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "roleChanged": {
+                                "type": "boolean"
+                              },
+                              "ledgerAmountCents": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "description": "Authoritative ordinary preview in ledger cents, null for transfers or invalid rows; not the entered Amount."
+                              },
+                              "validationError": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "kind": {
+                                "type": "string",
+                                "const": "transfer"
+                              },
+                              "date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                              },
+                              "fromAccountId": {
+                                "type": "integer",
+                                "minimum": 1
+                              },
+                              "toAccountId": {
+                                "type": "integer",
+                                "minimum": 1
+                              },
+                              "description": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "amount": {
+                                "type": "string",
+                                "description": "Strictly positive entered USD string through shared parser; zero and negative invalid. After approval source ledger cents are negative and destination positive; no Category. Not a balance, payoff or ledger-cents field."
+                              },
+                              "type": {
+                                "type": "string",
+                                "const": "transfer",
+                                "description": "Original submission type may be present before its first saved correction; use kind to identify review rows."
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "submissionId",
+                              "source",
+                              "label",
+                              "pinned",
+                              "originalRole",
+                              "currentRole",
+                              "reviewVersion",
+                              "roleChanged",
+                              "ledgerAmountCents",
+                              "validationError",
+                              "kind",
+                              "date",
+                              "fromAccountId",
+                              "toAccountId",
+                              "description",
+                              "amount"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "count",
+                    "transactionCount",
+                    "transferCount",
+                    "rows"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported query parameters, or current financial validation failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked integration Bearer credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure; no private diagnostics in the response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Installation requires a configured Owner.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/submissions/{proposalId}": {
+      "put": {
+        "summary": "Update any Pending transaction or transfer",
+        "description": "Replace one Pending item's complete editable fields, regardless of submitting integration or Manual/moved source and even after Owner edits. Send the id from GET /api/integration/pending in the path, with that row's current reviewVersion. Ordinary updates include reviewedRole from the selected Category's current reportingRole; transfer updates omit it. Do not send kind, type, id, submissionId, pin, source, status or attribution fields. Python reuses Owner save validation and a single SQLite transaction. Every successful save, including unchanged content, advances reviewVersion. Stale retries fail with 409: read /api/integration/pending and reconcile; never automatically replace the expected version. Only review content/version changes. The item stays Pending, financial values and Simulator links do not change, original retry content/source snapshots/pin remain intact, and Owner approval/rejection remains required. No delete, approval/rejection, partial/bulk update, or direct ledger operation.",
+        "parameters": [
+          {
+            "name": "proposalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Stable Pending proposal id from the all-source Pending read, not caller-generated submissionId. No query parameters accepted."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "date": {
+                        "type": "string",
+                        "format": "date",
+                        "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                      },
+                      "accountId": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "categoryId": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "amount": {
+                        "type": "string",
+                        "description": "Entered USD STRING: Expense +50.00 stores -5000; Expense refund -20.00 stores +2000; Income +1500.00 stores +150000; Income reversal -50.00 stores -5000. Never use ledger cents here. Strict shared USD parser, optional expressions, max two decimals. Zero is accepted by ordinary rules."
+                      },
+                      "reviewedRole": {
+                        "type": "string",
+                        "enum": [
+                          "expense",
+                          "income"
+                        ],
+                        "description": "Explicit current Reporting Role of the selected Category. A mismatch is a 409 conflict; never infer it from names or ledger signs."
+                      },
+                      "reviewVersion": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "date",
+                      "accountId",
+                      "description",
+                      "categoryId",
+                      "amount",
+                      "reviewedRole",
+                      "reviewVersion"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "date": {
+                        "type": "string",
+                        "format": "date",
+                        "description": "ISO calendar date YYYY-MM-DD, never a timestamp."
+                      },
+                      "fromAccountId": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "toAccountId": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "amount": {
+                        "type": "string",
+                        "description": "Strictly positive entered USD string through shared parser; zero and negative invalid. After approval source ledger cents are negative and destination positive; no Category. Not a balance, payoff or ledger-cents field."
+                      },
+                      "reviewVersion": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "date",
+                      "fromAccountId",
+                      "toAccountId",
+                      "description",
+                      "amount",
+                      "reviewVersion"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "examples": {
+                "ordinary": {
+                  "summary": "Fictional Expense correction; version obtained from the Pending read",
+                  "value": {
+                    "date": "2026-10-01",
+                    "accountId": 1,
+                    "description": "Corrected example groceries",
+                    "categoryId": 2,
+                    "amount": "45.00",
+                    "reviewedRole": "expense",
+                    "reviewVersion": 0
+                  }
+                },
+                "transfer": {
+                  "summary": "Fictional transfer correction",
+                  "value": {
+                    "date": "2026-10-02",
+                    "fromAccountId": 1,
+                    "toAccountId": 3,
+                    "description": "Corrected example transfer",
+                    "amount": "30.00",
+                    "reviewVersion": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved correction; item remains Pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reviewVersion": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "reviewVersion"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed fields, unsupported query parameters, or current financial validation failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked integration Bearer credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Proposal ID does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Target is no longer Pending, reviewVersion is stale/invalid, or the Category Reporting Role differs from reviewedRole.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure; no private diagnostics in the response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Installation requires a configured Owner.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
