@@ -15,6 +15,8 @@ let notificationStartedAt = 0;
 let simulatorSavePending = false;
 let browserSession = null;
 let pendingDecisionBusy = false;
+let pendingSummaryRequestId = 0;
+let pendingSummarySignature = null;
 const currentPath = window.location.pathname;
 
 function localCalendarDate(currentDate = new Date()) {
@@ -1753,6 +1755,31 @@ function pendingReviewElements() {
   return [...document.querySelectorAll("#pendingRows tr, #pendingTransferRows tr")];
 }
 
+async function refreshPendingSummary() {
+  const rows = pendingReviewElements().map((row) => ({kind: row.dataset.kind, amount: row.querySelector("[data-pending-field=amount]").value}));
+  const signature = JSON.stringify(rows);
+  if (signature === pendingSummarySignature) return;
+  pendingSummarySignature = signature;
+  const requestId = ++pendingSummaryRequestId;
+  const transactionTotal = document.querySelector("#pendingTransactionTotal");
+  const transferTotal = document.querySelector("#pendingTransferTotal");
+  const status = document.querySelector("#pendingSummaryStatus");
+  transactionTotal.textContent = "—"; transferTotal.textContent = "—";
+  status.textContent = "Calculating totals…";
+  try {
+    const summary = await api("/api/pending/summary", {method: "POST", body: JSON.stringify({rows})});
+    if (requestId !== pendingSummaryRequestId) return;
+    transactionTotal.textContent = summary.transactionDisplay ?? "Unavailable";
+    transferTotal.textContent = summary.transferDisplay ?? "Unavailable";
+    status.textContent = summary.transactionCents === null || summary.transferCents === null ? "Correct invalid amounts to see all totals." : "";
+  } catch (error) {
+    if (requestId !== pendingSummaryRequestId) return;
+    pendingSummarySignature = null;
+    transactionTotal.textContent = "Unavailable"; transferTotal.textContent = "Unavailable";
+    status.textContent = `Totals unavailable: ${error.message}`;
+  }
+}
+
 function updatePendingRowActions(row) {
   const dirty = JSON.stringify(pendingDraft(row)) !== JSON.stringify(row.savedDraft);
   row.classList.toggle("unsavedRow", dirty);
@@ -1819,7 +1846,8 @@ function cancelPendingRowChanges(row) {
   previewPendingRow(row);
 }
 
-async function previewPendingRow(row) {
+async function previewPendingRow(row, refreshSummary = true) {
+  if (refreshSummary) refreshPendingSummary();
   const requestId = (row.previewRequestId || 0) + 1;
   row.previewRequestId = requestId;
   row.reviewedRole = null; row.previewValid = false; row.previewSignature = null;
@@ -1840,6 +1868,10 @@ async function previewPendingRow(row) {
 }
 
 async function loadPendingReview() {
+  ++pendingSummaryRequestId; pendingSummarySignature = null;
+  document.querySelector("#pendingTransactionTotal").textContent = "—";
+  document.querySelector("#pendingTransferTotal").textContent = "—";
+  document.querySelector("#pendingSummaryStatus").textContent = "Calculating totals…";
   const review = await api("/api/pending");
   const transactionBody = document.querySelector("#pendingRows"), transferBody = document.querySelector("#pendingTransferRows");
   transactionBody.replaceChildren(); transferBody.replaceChildren();
@@ -1893,10 +1925,11 @@ async function loadPendingReview() {
       actions.append(defaultDescription, " ");
     }
     updatePendingRowActions(row);
-    previews.push(previewPendingRow(row));
+    previews.push(previewPendingRow(row, false));
   }
   enhanceMoneyInputs(transactionBody); enhanceMoneyInputs(transferBody);
   await Promise.all(previews);
+  await refreshPendingSummary();
 }
 
 async function decidePendingSelection(decision, approveAll = false) {
@@ -1932,7 +1965,7 @@ async function decidePendingSelection(decision, approveAll = false) {
   } catch (error) {
     showFormError(form, error);
     if (error.message.startsWith("Category Reporting Role changed.")) {
-      await Promise.all(pendingReviewElements().map(previewPendingRow));
+      await Promise.all(pendingReviewElements().map((row) => previewPendingRow(row)));
     }
   } finally {
     pendingDecisionBusy = false;

@@ -54,6 +54,8 @@ button, input, select { font: inherit; } button { appearance: none; background: 
 .summaryTable dt { color: var(--muted); font-size: .85rem; }
 .summaryTable dd { font-weight: 600; margin: .2rem 0 0; }
 .transactionSummary dl { grid-template-columns: repeat(3, minmax(8rem, 1fr)); }
+.pendingSummary dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pendingSummary dd { overflow-wrap: anywhere; }
 .databaseStatus { display: flex; flex-wrap: wrap; gap: .75rem 2rem; margin: .75rem 0; }
 .databaseStatus div { min-width: 8rem; }
 .databaseStatus dt { color: var(--muted); font-size: .85rem; }

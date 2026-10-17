@@ -2900,6 +2900,29 @@ def pendingCounts(rows):
     return {"count": len(rows), "transactionCount": transactions, "transferCount": len(rows) - transactions}
 
 
+def pendingReviewSummary(rows):
+    if not isinstance(rows, list):
+        raise ValidationError("Summary rows must be a list")
+    totals = {"transaction": 0, "transfer": 0}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"kind", "amount"} or row["kind"] not in ("transaction", "transfer"):
+            raise ValidationError("Each summary row requires a proposal kind and entered Amount")
+        kind = row["kind"]
+        try:
+            if not isinstance(row["amount"], str):
+                raise ValidationError("Amount must be entered USD text")
+            amountCents = parseMoneyCents(row["amount"], positiveOnly=kind == "transfer")
+        except ValidationError:
+            # An invalid amount makes its entire kind unavailable; never show a partial sum.
+            totals[kind] = None
+        else:
+            if totals[kind] is not None:
+                # Entered signs are already user-facing: refunds/reversals subtract.
+                # Each transfer proposal contributes once, without creating ledger rows.
+                totals[kind] += amountCents
+    return {"transactionCents": totals["transaction"], "transferCents": totals["transfer"]}
+
+
 def pendingReviewRows(connection):
     reviewRows = []
     for proposal in connection.execute(

@@ -77,6 +77,7 @@ from database import (
     updateIntegrationLabel,
     submitPendingTransaction,
     pendingReviewRows,
+    pendingReviewSummary,
     savePendingReview,
     decidePendingTransactions,
     SubmissionConflict,
@@ -207,7 +208,7 @@ def createApp(databasePathOverride=None):
             if request.path.startswith("/api/") or request.path == "/health":
                 return jsonify({"error": "Sign In required"}), 401
             return redirect("/sign-in")
-        ownerOnly = request.endpoint in {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "reviewPending", "savePendingRow", "previewPending", "decidePending", "pendingPage", "downloadBackup", "downloadApplicationPackage", "transactionPendingSnapshot", "transferPendingSnapshot"}
+        ownerOnly = request.endpoint in {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "reviewPending", "savePendingRow", "previewPending", "summarizePending", "decidePending", "pendingPage", "downloadBackup", "downloadApplicationPackage", "transactionPendingSnapshot", "transferPendingSnapshot"}
         isMutation = request.method not in {"GET", "HEAD", "OPTIONS"}
         nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut"}
         if g.user["role"] == "auditor" and (ownerOnly or (isMutation and request.endpoint not in nonpersistentPosts)):
@@ -1240,6 +1241,21 @@ def createApp(databasePathOverride=None):
     def savePendingRow(proposalId):
         nextVersion = savePendingReview(getDatabase(), proposalId, request.get_json(silent=True))
         return jsonify({"reviewVersion": nextVersion})
+
+    @app.post("/api/pending/summary")
+    def summarizePending():
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict) or set(submitted) != {"rows"}:
+            raise ValidationError("Submit summary rows only")
+        summary = pendingReviewSummary(submitted["rows"])
+        for kind in ("transaction", "transfer"):
+            amountCents = summary[f"{kind}Cents"]
+            # Format integer cents here so even large sums display without float rounding.
+            summary[f"{kind}Display"] = None if amountCents is None else (
+                ("-" if amountCents < 0 else "")
+                + f"${abs(amountCents) // 100:,}.{abs(amountCents) % 100:02d}"
+            )
+        return jsonify(summary)
 
     @app.post("/api/pending/preview")
     def previewPending():
