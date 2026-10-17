@@ -30,6 +30,8 @@ After the requested milestone is successfully implemented and verified, merge it
 
 This project is intentionally split into milestones to reduce wasted implementation effort and Codex usage.
 
+Keep one logical change per commit. If a small nit surfaces right after committing and it hasn't been pushed yet, fold it in with `git commit --amend` instead of a second commit. Never amend or rewrite anything already on GitHub.
+
 ## 3. Handling Ambiguity
 
 If a small implementation detail is unspecified, choose the simplest behavior consistent with `SPEC.md`.
