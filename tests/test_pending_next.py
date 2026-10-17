@@ -71,6 +71,92 @@ class PendingNextTests(unittest.TestCase):
         self.assertEqual(500, after["expensesCents"])
         self.assertEqual(-300, after["incomeCents"])
 
+    def testPendingSummaryUsesAllEnteredSignsAndCountsTransfersOnceWithoutWrites(self):
+        self.submit({**self.ordinary, "pinned": False}, manual=True)
+        self.submit({**self.ordinary, "submissionId": "refund", "accountId": self.card, "amount": "-5.00"})
+        self.submit({**self.ordinary, "submissionId": "income", "categoryId": self.income, "amount": "25.00"})
+        self.submit({**self.ordinary, "submissionId": "reversal", "categoryId": self.income, "amount": "-3.00"})
+        self.submit(self.transfer)
+        self.submit({**self.transfer, "submissionId": "external", "fromAccountId": self.external, "amount": "7.23"}, manual=True)
+        before = self.snapshot()
+        review = self.owner.get("/api/pending").get_json()
+        summaryRows = [{"kind": row["kind"], "amount": row["amount"]} for row in review["rows"]]
+        response = self.owner.post("/api/pending/summary", json={"rows": summaryRows})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"transactionCents": 2700, "transferCents": 5723, "transactionDisplay": "$27.00", "transferDisplay": "$57.23"}, response.get_json())
+        # Draft edits change the displayed sum without saving the proposal or ledger.
+        summaryRows[0]["amount"] = "100.00"
+        self.assertEqual(11700, self.owner.post("/api/pending/summary", json={"rows": summaryRows}).get_json()["transactionCents"])
+        summaryRows[0]["amount"] = "10.00"
+        self.assertEqual(2700, self.owner.post("/api/pending/summary", json={"rows": summaryRows}).get_json()["transactionCents"])
+        self.assertEqual(before, self.snapshot())
+
+    def testPendingSummaryEmptyExactCentsExpressionsNegativeNetsAndInvalidAmounts(self):
+        self.assertEqual({"transactionCents": 0, "transferCents": 0}, ledger.pendingReviewSummary([]))
+        rows = [
+            {"kind": "transaction", "amount": "$1,000.50-125.25"},
+            {"kind": "transaction", "amount": "-1,000.00"},
+            {"kind": "transaction", "amount": ".10+.20"},
+            {"kind": "transfer", "amount": "10.01+2.02"},
+        ]
+        result = self.owner.post("/api/pending/summary", json={"rows": rows}).get_json()
+        self.assertEqual({"transactionCents": -12445, "transferCents": 1203, "transactionDisplay": "-$124.45", "transferDisplay": "$12.03"}, result)
+        # Formatting remains exact beyond the browser's safe integer range.
+        huge = [{"kind": "transaction", "amount": "90071992547409.91"}, {"kind": "transaction", "amount": ".02"}]
+        hugeResult = self.owner.post("/api/pending/summary", json={"rows": huge}).get_json()
+        self.assertEqual(9007199254740993, hugeResult["transactionCents"])
+        self.assertEqual("$90,071,992,547,409.93", hugeResult["transactionDisplay"])
+        for invalid in ("", "broken", "1.001", "1,00", None, True, 3.5):
+            with self.subTest(invalid=invalid):
+                partial = ledger.pendingReviewSummary([*rows, {"kind": "transaction", "amount": invalid}])
+                self.assertEqual({"transactionCents": None, "transferCents": 1203}, partial)
+        for invalid in ("0", "-1", "bad"):
+            with self.subTest(transferAmount=invalid):
+                partial = ledger.pendingReviewSummary([*rows, {"kind": "transfer", "amount": invalid}])
+                self.assertEqual({"transactionCents": -12445, "transferCents": None}, partial)
+        self.assertEqual({"transactionCents": 0, "transferCents": 0}, ledger.pendingReviewSummary([
+            {"kind": "transaction", "amount": "1.00"}, {"kind": "transaction", "amount": "-1.00"},
+        ]))
+
+    def testPendingSummaryRejectsMalformedRequestsAndPreservesPermissions(self):
+        before = self.snapshot()
+        for submitted in (None, [], {}, {"rows": None}, {"rows": {}}, {"rows": [None]}, {"rows": [{"kind": "other", "amount": "1"}]}, {"rows": [{"kind": "transfer"}]}, {"rows": [], "decision": "approve"}):
+            with self.subTest(submitted=submitted):
+                self.assertEqual(400, self.owner.post("/api/pending/summary", json=submitted).status_code)
+        auditor = self.app.test_client()
+        signIn(auditor, "Auditor", "auditor password")
+        request = {"rows": []}
+        self.assertEqual(403, auditor.post("/api/pending/summary", json=request).status_code)
+        self.assertEqual(403, self.agent.post("/api/pending/summary", json=request, headers=self.headers).status_code)
+        self.assertEqual(401, self.app.test_client().post("/api/pending/summary", json=request).status_code)
+        token = self.owner.environ_base.pop("HTTP_X_CSRF_TOKEN")
+        self.assertEqual(403, self.owner.post("/api/pending/summary", json=request).status_code)
+        self.owner.environ_base["HTTP_X_CSRF_TOKEN"] = token
+        self.assertEqual(before, self.snapshot())
+
+    def testPendingSummaryTracksSavedCorrectionsRestartAndTerminalDecisions(self):
+        self.submit({**self.ordinary, "pinned": False}, manual=True)
+        self.submit(self.transfer)
+        correction = self.rows()[0]
+        fields = {key: value for key, value in correction.items() if key != "id"}
+        fields["amount"] = "12.34"
+        self.assertEqual(200, self.owner.patch(f"/api/pending/{correction['id']}", json=fields).status_code)
+        restarted = createApp(self.path).test_client()
+        self.assertEqual(302, signIn(restarted).status_code)
+
+        def summary():
+            review = restarted.get("/api/pending").get_json()
+            rows = [{"kind": row["kind"], "amount": row["amount"]} for row in review["rows"]]
+            return restarted.post("/api/pending/summary", json={"rows": rows}).get_json()
+
+        self.assertEqual((1234, 5000), (summary()["transactionCents"], summary()["transferCents"]))
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
+        ledger.decidePendingTransactions(self.connection, "approve", [self.rows()[0]])
+        self.assertEqual((0, 5000), (summary()["transactionCents"], summary()["transferCents"]))
+        ledger.decidePendingTransactions(self.connection, "reject", self.rows())
+        self.assertEqual({"transactionCents": 0, "transferCents": 0, "transactionDisplay": "$0.00", "transferDisplay": "$0.00"}, summary())
+        self.assertEqual([-1234], [row[0] for row in self.connection.execute("SELECT amountCents FROM transactions")])
+
     def testDocumentedRequestsVersionAndOwnerOnlyContract(self):
         from packageApplication import applicationVersion
         contract = self.owner.get("/openapi.json").get_json()
