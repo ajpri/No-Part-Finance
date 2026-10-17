@@ -15,8 +15,7 @@ let notificationStartedAt = 0;
 let simulatorSavePending = false;
 let browserSession = null;
 let pendingDecisionBusy = false;
-let pendingSummaryRequestId = 0;
-let pendingSummarySignature = null;
+const pendingSummaryState = {all: {requestId: 0, signature: null}, selected: {requestId: 0, signature: null}};
 const currentPath = window.location.pathname;
 
 function localCalendarDate(currentDate = new Date()) {
@@ -1756,25 +1755,37 @@ function pendingReviewElements() {
 }
 
 async function refreshPendingSummary() {
-  const rows = pendingReviewElements().map((row) => ({kind: row.dataset.kind, amount: row.querySelector("[data-pending-field=amount]").value}));
+  await Promise.all([refreshPendingSummaryGroup(false), refreshPendingSummaryGroup(true)]);
+}
+
+async function refreshPendingSummaryGroup(selectedOnly) {
+  const state = pendingSummaryState[selectedOnly ? "selected" : "all"];
+  const rows = pendingReviewElements()
+    .filter((row) => !selectedOnly || row.querySelector("[data-pending-selected]").checked)
+    .map((row) => ({kind: row.dataset.kind, amount: row.querySelector("[data-pending-field=amount]").value}));
   const signature = JSON.stringify(rows);
-  if (signature === pendingSummarySignature) return;
-  pendingSummarySignature = signature;
-  const requestId = ++pendingSummaryRequestId;
-  const transactionTotal = document.querySelector("#pendingTransactionTotal");
-  const transferTotal = document.querySelector("#pendingTransferTotal");
-  const status = document.querySelector("#pendingSummaryStatus");
+  if (signature === state.signature) return;
+  state.signature = signature;
+  const requestId = ++state.requestId;
+  const transactionTotal = document.querySelector(selectedOnly ? "#pendingSelectedTransactionTotal" : "#pendingTransactionTotal");
+  const transferTotal = document.querySelector(selectedOnly ? "#pendingSelectedTransferTotal" : "#pendingTransferTotal");
+  const status = document.querySelector(selectedOnly ? "#pendingSelectedSummaryStatus" : "#pendingSummaryStatus");
+  if (selectedOnly && !rows.length) {
+    transactionTotal.textContent = "$0.00"; transferTotal.textContent = "$0.00";
+    status.textContent = "";
+    return;
+  }
   transactionTotal.textContent = "—"; transferTotal.textContent = "—";
   status.textContent = "Calculating totals…";
   try {
     const summary = await api("/api/pending/summary", {method: "POST", body: JSON.stringify({rows})});
-    if (requestId !== pendingSummaryRequestId) return;
+    if (requestId !== state.requestId) return;
     transactionTotal.textContent = summary.transactionDisplay ?? "Unavailable";
     transferTotal.textContent = summary.transferDisplay ?? "Unavailable";
-    status.textContent = summary.transactionCents === null || summary.transferCents === null ? "Correct invalid amounts to see all totals." : "";
+    status.textContent = summary.transactionCents === null || summary.transferCents === null ? (selectedOnly ? "Correct invalid selected amounts to see selected totals." : "Correct invalid amounts to see all totals.") : "";
   } catch (error) {
-    if (requestId !== pendingSummaryRequestId) return;
-    pendingSummarySignature = null;
+    if (requestId !== state.requestId) return;
+    state.signature = null;
     transactionTotal.textContent = "Unavailable"; transferTotal.textContent = "Unavailable";
     status.textContent = `Totals unavailable: ${error.message}`;
   }
@@ -1868,7 +1879,10 @@ async function previewPendingRow(row, refreshSummary = true) {
 }
 
 async function loadPendingReview() {
-  ++pendingSummaryRequestId; pendingSummarySignature = null;
+  for (const state of Object.values(pendingSummaryState)) { ++state.requestId; state.signature = null; }
+  document.querySelector("#pendingSelectedTransactionTotal").textContent = "$0.00";
+  document.querySelector("#pendingSelectedTransferTotal").textContent = "$0.00";
+  document.querySelector("#pendingSelectedSummaryStatus").textContent = "";
   document.querySelector("#pendingTransactionTotal").textContent = "—";
   document.querySelector("#pendingTransferTotal").textContent = "—";
   document.querySelector("#pendingSummaryStatus").textContent = "Calculating totals…";
@@ -1886,6 +1900,7 @@ async function loadPendingReview() {
     const body = proposal.kind === "transfer" ? transferBody : transactionBody;
     const row = body.insertRow(); row.dataset.kind = proposal.kind; row.dataset.id = proposal.id; row.dataset.originalRole = proposal.originalRole; row.reviewVersion = proposal.reviewVersion;
     const selected = document.createElement("input"); selected.type = "checkbox"; selected.setAttribute("aria-label", `Select proposal ${proposal.id} from ${proposal.label}`); selected.dataset.pendingSelected = "true"; row.insertCell().append(selected);
+    selected.addEventListener("change", () => refreshPendingSummary());
     row.insertCell().textContent = proposal.label;
     for (const [name, label] of (proposal.kind === "transfer" ? [["date", "Date"], ["fromAccountId", "From Account"], ["toAccountId", "To Account"], ["description", "Description"], ["amount", "Positive USD Amount"]] : [["date", "Date"], ["accountId", "Account"], ["description", "Description"], ["categoryId", "Category"], ["amount", "Entered USD Amount"]])) {
       const control = document.createElement(["accountId", "categoryId", "fromAccountId", "toAccountId"].includes(name) ? "select" : "input");
