@@ -938,9 +938,13 @@ def updateTransaction(connection, transactionId, accountId, transactionDate, des
         raise ValidationError("Edit linked transfers through the transfer operation")
     validateDate(transactionDate)
     description = requireText(description, "Description")
+    try:
+        selectedAccountId = int(accountId)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValidationError("Account ID must be an integer") from error
     account = getAccount(
         connection, accountId,
-        activeRequired=int(accountId) != existing["accountId"],
+        activeRequired=selectedAccountId != existing["accountId"],
     )
     if account["accountClass"] == "system":
         raise ValidationError("System Accounts may only be used for transfers")
@@ -1029,14 +1033,19 @@ def updateTransfer(connection, transferId, transactionDate, fromAccountId, toAcc
     validateDate(transactionDate)
     description = requireText(description, "Description")
     amountCents = parseMoneyCents(enteredAmount, positiveOnly=True)
-    if int(fromAccountId) == int(toAccountId):
+    try:
+        selectedFromAccountId = int(fromAccountId)
+        selectedToAccountId = int(toAccountId)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValidationError("Transfer Account IDs must be integers") from error
+    if selectedFromAccountId == selectedToAccountId:
         raise ValidationError("Transfer accounts must be different")
     currentAccountIds = {row["accountId"] for row in transferRows}
     fromAccount = getAccount(
-        connection, fromAccountId, activeRequired=int(fromAccountId) not in currentAccountIds
+        connection, fromAccountId, activeRequired=selectedFromAccountId not in currentAccountIds
     )
     toAccount = getAccount(
-        connection, toAccountId, activeRequired=int(toAccountId) not in currentAccountIds
+        connection, toAccountId, activeRequired=selectedToAccountId not in currentAccountIds
     )
     linkedSimulatorRowIds = [row["id"] for row in connection.execute(
         "SELECT id FROM simulatorRows WHERE executedTransactionId IN (?, ?)",
@@ -2203,7 +2212,12 @@ def recordSimulatorTransfer(connection, planId, rowId, transactionDate, fromAcco
     validateDate(transactionDate)
     description = requireText(description, "Description")
     amountCents = parseMoneyCents(enteredAmount, positiveOnly=True)
-    if int(fromAccountId) == int(toAccountId):
+    try:
+        selectedFromAccountId = int(fromAccountId)
+        selectedToAccountId = int(toAccountId)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValidationError("Transfer Account IDs must be integers") from error
+    if selectedFromAccountId == selectedToAccountId:
         raise ValidationError("Transfer accounts must be different")
     fromAccount = getAccount(connection, fromAccountId, activeRequired=True)
     toAccount = getAccount(connection, toAccountId, activeRequired=True)

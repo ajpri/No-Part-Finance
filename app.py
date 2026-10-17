@@ -6,7 +6,6 @@ import secrets
 import time
 import sys
 import threading
-from calendar import monthrange
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -81,7 +80,6 @@ from database import (
     savePendingReview,
     decidePendingTransactions,
     SubmissionConflict,
-    prepareTransaction,
     preparePending,
     pendingCounts,
     submitPendingEntry,

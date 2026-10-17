@@ -468,6 +468,35 @@ class HistoryReportingTests(unittest.TestCase):
         self.assertEqual({name: expected[name] for name in ("History", "Move", "Invalid categorized link")},
                          {row["description"]: row["displayAmountCents"] for row in dashboard["recentTransactions"]})
 
+    def testRecentEventsLimitFollowsGroupingPinsAndDeterministicDateOrder(self):
+        self.connection.execute("UPDATE transactions SET pinned = 1, date = '2024-03-03' WHERE description = 'Purchase'")
+        self.connection.execute("UPDATE transactions SET date = '2024-03-02' WHERE description = 'Refund'")
+        self.connection.execute("UPDATE transactions SET date = '2024-03-01' WHERE transferId = 'valid'")
+        self.connection.executemany(
+            "INSERT INTO transactions (accountId, date, description, amountCents, categoryId) VALUES (?, ?, ?, ?, ?)",
+            [(self.cashId, "2024-02-28", "Older with higher ID", -300, self.expenseId),
+             (self.cashId, "2024-02-29", "Newest ID on tied date", -400, self.expenseId)],
+        )
+        self.connection.commit()
+        ledgerBefore = [tuple(row) for row in self.connection.execute("SELECT * FROM transactions ORDER BY id")]
+        expectedDescriptions = ["Refund", "Move", "Newest ID on tied date", "Invalid categorized link", "History"]
+
+        for refresh in range(2):
+            with self.subTest(refresh=refresh):
+                response = self.client.get("/api/dashboard")
+                self.assertEqual(200, response.status_code)
+                dashboard = response.get_json()
+                recentEvents = dashboard["recentTransactions"]
+                self.assertEqual(5, len(recentEvents))
+                self.assertEqual(expectedDescriptions, [event["description"] for event in recentEvents])
+                self.assertEqual(["Purchase"], [event["description"] for event in dashboard["quickUpdates"]])
+                self.assertEqual([False, True, False, False, False], [event["combinedTransfer"] for event in recentEvents])
+                self.assertEqual((self.cashId, self.creditId, 700), tuple(recentEvents[1][key] for key in ("fromAccountId", "toAccountId", "displayAmountCents")))
+                eventOrder = [(event["date"], event["id"]) for event in recentEvents]
+                self.assertEqual(sorted(eventOrder, reverse=True), eventOrder)
+
+        self.assertEqual(ledgerBefore, [tuple(row) for row in self.connection.execute("SELECT * FROM transactions ORDER BY id")])
+
 
 class TemplateTests(unittest.TestCase):
     def setUp(self):
@@ -608,7 +637,8 @@ class DashboardUiTests(unittest.TestCase):
         self.assertLess(html.index('id="dashboardPeriod"'), html.index('id="dashboardStartDate"'))
         self.assertLess(html.index('id="dashboardStartDate"'), html.index('id="dashboardEndDate"'))
         self.assertNotIn('data-breakdown-view=', html)
-        self.assertIn("<h3>26.09</h3>", html)
+        self.assertIn("<h3>26.10</h3>", html)
+        self.assertIn("<h3>Earlier versions</h3>", html)
         self.assertIn('data-breakdown-panel="expenseCategory"', html)
         self.assertIn('data-breakdown-panel="expenseAccount" hidden', html)
         self.assertIn('data-breakdown-panel="expenseAccountCategory" hidden', html)
