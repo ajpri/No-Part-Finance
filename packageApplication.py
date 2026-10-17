@@ -44,6 +44,8 @@ includedFiles = (
     "tests/test_budget.py",
     "tests/test_database.py",
     "tests/test_hardening.py",
+    "tests/test_frontend.py",
+    "tests/test_id_validation.py",
     "tests/test_money_operations.py",
     "tests/test_packaging.py",
     "tests/test_reporting.py",

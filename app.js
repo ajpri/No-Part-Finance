@@ -9,6 +9,7 @@ let simulatorRecordingRowId = null;
 let loadedSinkingFundDate = null;
 let minimumHelperRequest = 0;
 let utilizationHelperRequest = 0;
+let transferHelperRequest = 0;
 let notificationTimer = null;
 let notificationRemainingMilliseconds = 0;
 let notificationStartedAt = 0;
@@ -801,14 +802,11 @@ function updateTransferPresentation(updateDescription = true) {
   const destinationSelect = document.querySelector("#transferToAccount");
   const destination = accounts.find((account) => account.id === Number(destinationSelect.value));
   const isPayment = destinationSelect.selectedOptions[0]?.dataset.accountClass === "credit";
-  const destinationSubtype = destinationSelect.selectedOptions[0]?.dataset.accountSubtype;
   const paymentHint = document.querySelector("#transferPaymentHint");
   for(const [selectId,lineId] of [["#transferFromAccount","#transferFromBalance"],["#transferToAccount","#transferToBalance"]]){const selected=accounts.find((account)=>account.id===Number(document.querySelector(selectId).value));const line=document.querySelector(lineId);line.hidden=!selected||selected.accountClass==="system";if(selected&&selected.accountClass!=="system"){const friendly=selected.accountClass==="credit"?(selected.balanceCents>0?`${dollars(selected.balanceCents)} credit`:dollars(-selected.balanceCents)):dollars(selected.balanceCents);line.textContent=`Current Balance: ${friendly}`;}}
   paymentHint.hidden = !isPayment;
   paymentHint.replaceChildren();
   if (isPayment) {
-    const owedCents = Math.max(0, -destination.balanceCents);
-    const friendlyBalance = destination.balanceCents > 0 ? `${dollars(destination.balanceCents)} credit` : destination.balanceCents === 0 ? "No balance owed" : `${dollars(owedCents)} owed`;
     paymentHint.append(`This will be recorded as a payment to ${destination.name}. `);
   }
   if (updateDescription) {
@@ -819,7 +817,33 @@ function updateTransferPresentation(updateDescription = true) {
   refreshTransferAmountHelper();
 }
 
-async function refreshTransferAmountHelper(){const fromAccountId=document.querySelector("#transferFromAccount").value,toAccountId=document.querySelector("#transferToAccount").value;if(!fromAccountId||!toAccountId)return;const result=await api(`/api/transfer-amount-helper?fromAccountId=${encodeURIComponent(fromAccountId)}&toAccountId=${encodeURIComponent(toAccountId)}&editing=${Boolean(document.querySelector("#transferId").value)}`);if(!result.eligible)return;const hint=document.querySelector("#transferPaymentHint");hint.hidden=false;const helper=document.createElement("button");helper.type="button";helper.className="transferAmountHelper";helper.textContent=result.label;helper.setAttribute("aria-label",result.label);helper.addEventListener("click",()=>setMoneyInputValue(document.querySelector("#transferAmount"),(result.amountCents/100).toFixed(2)));hint.append(helper);}
+async function refreshTransferAmountHelper() {
+  // A later account selection or dialog reset invalidates earlier helper responses.
+  const requestId = ++transferHelperRequest;
+  const fromAccountId = document.querySelector("#transferFromAccount").value;
+  const toAccountId = document.querySelector("#transferToAccount").value;
+  const transferId = document.querySelector("#transferId").value;
+  if (!fromAccountId || !toAccountId) return;
+  const isCurrentRequest = () => requestId === transferHelperRequest && document.querySelector("#transferDialog").open
+    && document.querySelector("#transferFromAccount").value === fromAccountId
+    && document.querySelector("#transferToAccount").value === toAccountId
+    && document.querySelector("#transferId").value === transferId;
+  try {
+    const result = await api(`/api/transfer-amount-helper?fromAccountId=${encodeURIComponent(fromAccountId)}&toAccountId=${encodeURIComponent(toAccountId)}&editing=${Boolean(transferId)}`);
+    if (!isCurrentRequest() || !result.eligible) return;
+    const hint = document.querySelector("#transferPaymentHint");
+    hint.hidden = false;
+    const helper = document.createElement("button");
+    helper.type = "button";
+    helper.className = "transferAmountHelper";
+    helper.textContent = result.label;
+    helper.setAttribute("aria-label", result.label);
+    helper.addEventListener("click", () => setMoneyInputValue(document.querySelector("#transferAmount"), (result.amountCents / 100).toFixed(2)));
+    hint.append(helper);
+  } catch (error) {
+    if (isCurrentRequest()) showFormError(document.querySelector("#transferForm"), error);
+  }
+}
 
 async function editTransfer(transferId) {
   try {
