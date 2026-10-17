@@ -1775,8 +1775,6 @@ async function refreshPendingSummaryGroup(selectedOnly) {
     status.textContent = "";
     return;
   }
-  transactionTotal.textContent = "—"; transferTotal.textContent = "—";
-  status.textContent = "Calculating totals…";
   try {
     const summary = await api("/api/pending/summary", {method: "POST", body: JSON.stringify({rows})});
     if (requestId !== state.requestId) return;
@@ -1883,9 +1881,7 @@ async function loadPendingReview() {
   document.querySelector("#pendingSelectedTransactionTotal").textContent = "$0.00";
   document.querySelector("#pendingSelectedTransferTotal").textContent = "$0.00";
   document.querySelector("#pendingSelectedSummaryStatus").textContent = "";
-  document.querySelector("#pendingTransactionTotal").textContent = "—";
-  document.querySelector("#pendingTransferTotal").textContent = "—";
-  document.querySelector("#pendingSummaryStatus").textContent = "Calculating totals…";
+  document.querySelector("#pendingSummaryStatus").textContent = "";
   const review = await api("/api/pending");
   const transactionBody = document.querySelector("#pendingRows"), transferBody = document.querySelector("#pendingTransferRows");
   transactionBody.replaceChildren(); transferBody.replaceChildren();
