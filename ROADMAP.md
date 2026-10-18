@@ -49,7 +49,7 @@ Acceptance criteria:
 
 Explicit non-goals: offline support, service workers, offline snapshots, Cache API storage, write queues/retries, push notifications, background sync, app stores, custom splash images, custom install banners/buttons, new hosting or certificate management, subpath deployment support, new dependencies/build tooling, or unrelated redesign.
 
-Outstanding input: final icon artwork/exports. All other product decisions above are approved. This entry is approved Version Next scope; this planning change does not implement it.
+Implementation status: online-only manifest, public asset routes, shared theme metadata, package inclusion, and installation guidance are implemented and tested with synthetic fixtures. Browser smoke checks verified existing sign-in, an online save, Light/Dark theme-color changes, logout, and theme persistence. The milestone remains open for final icon artwork/exports, PNG dimension/composition validation, and actual installation/launch verification in desktop Chrome and on a real iPhone. Missing icons intentionally return 404 with user approval; no placeholder PNGs are shipped.
 
 ### Set Application Version to 26.10.18
 

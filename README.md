@@ -197,6 +197,16 @@ The documented arrangement is host-computer or trusted-LAN use. Authentication d
 3. Extract the new **application-only** ZIP (filename contains `-no-db-`) into a separate folder. Copy the contents of its `No-Part-Finance` folder into the existing application folder, replacing the packaged application files. Do not replace the existing installation folder wholesale or copy a database-inclusive package over it. Preserve the configured database, `.venv`, `backups`, and local configuration. Configuration stored in SQLite stays with the database; environment overrides and deployment configuration are not included in application-only packages. Reapply any intentional launcher customizations after replacement.
 4. Run the appropriate start script with the same `FINANCE_DATABASE_PATH` override, if used. The launcher reuses `.venv` and installs the new requirements. Check the terminal for startup errors and the expected database path, then sign in again. Check the application version in **Settings → System**, familiar balances, and transaction history. If an existing installation unexpectedly asks you to create an Owner, stop and check the database path before proceeding.
 
+### Install on desktop or iPhone (online only)
+
+PWA metadata is available for an HTTPS installation served at the domain root. HTTPS remains the reverse proxy's responsibility. The app opens in a standalone window where supported, using the existing Dashboard and Sign In flow. Installation does not replace the running server or network connection. There is no offline Dashboard, queued save, service worker, or background sync.
+
+**Artwork is pending.** The four confirmed icon URLs currently return 404 until the artist supplies the files listed in `assets/README.md`. Installation availability and icon appearance are not yet verified on desktop Chrome or a real iPhone. Browser installation controls may remain unavailable until the icons are supplied.
+
+Once the icons are present, desktop Chrome users can use the browser's Install control when offered. On iPhone, open the HTTPS app in Safari, choose Share, then Add to Home Screen (and Open as Web App if that option is offered). Names may be truncated by the platform. Other browsers retain ordinary website access and may provide their own installation controls. Localhost can support development checks, but plain HTTP over a LAN is not equivalent to a secure installation.
+
+The launch background is dark (`#202124`); supported browser UI follows the existing Light/Dark/System theme. Platform launch-screen and installation behavior can differ. This feature does not change the trusted self-hosted deployment boundary or provide production hosting.
+
 ### Automatic schema upgrades and failures
 
 Startup uses SQLite's schema version to apply required supported upgrades automatically before serving requests. Before upgrading an older compatible database, it checks integrity and creates a consistent SQLite backup in `backups` beside the configured database. The unique filename includes the source version, target version, and timestamp, such as `pre-migration-v19-to-v20-<timestamp>.db`. After migration, startup checks foreign keys, integrity, and the final schema version. New databases and databases already at the current schema receive no migration backup.

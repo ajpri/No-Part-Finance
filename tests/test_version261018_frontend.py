@@ -2,6 +2,7 @@
 
 import os
 import html
+import json
 import re
 from pathlib import Path
 import shutil
@@ -125,4 +126,49 @@ assert.equal(controls["#expenseCategoryTable"].hidden,false);
 assert.deepEqual(controls["#expenseCategoryRows"].children,["Child"]);
 '''
         result = subprocess.run([nodePath, "-e", renderFunction + harness], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def testThemeMetadataTracksPreferenceSystemAndStorageFallback(self):
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("JavaScript runtime unavailable")
+        javascript = (projectRoot / "theme.js").read_text(encoding="utf-8")
+        harness = r'''
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+function setup(savedPreference, darkSystem, blockedStorage=false, legacyListener=false) {
+ const root = {dataset:{},removeAttribute(name){assert.equal(name,"data-theme");delete this.dataset.theme;}};
+ const meta = {setAttribute(name,value){assert.equal(name,"content");this.content=value;}};
+ const media = {matches:darkSystem};
+ if(legacyListener)media.addListener=(callback)=>media.change=callback;
+ else media.addEventListener=(name,callback)=>{assert.equal(name,"change");media.change=callback;};
+ const context = {
+  window:{matchMedia(query){assert.equal(query,"(prefers-color-scheme: dark)");return media;}},
+  document:{documentElement:root,querySelector(query){assert.equal(query,'meta[name="theme-color"]');return meta;}},
+  localStorage:{getItem(key){assert.equal(key,"theme");if(blockedStorage)throw new Error("blocked");return savedPreference;},setItem(key,value){if(blockedStorage)throw new Error("blocked");savedPreference=value;}}
+ };
+ vm.runInNewContext(themeSource,context);
+ return {window:context.window,root,meta,media};
+}
+for(const preference of [null,"system","invalid","light","dark"]) {
+ for(const darkSystem of [false,true]) {
+  const state=setup(preference,darkSystem);
+  const effectiveDark=preference==="dark"||(!["light","dark"].includes(preference)&&darkSystem);
+  assert.equal(state.meta.content,effectiveDark?"#202124":"#FFFFFF");
+  assert.equal(state.window.readThemePreference(),["light","dark"].includes(preference)?preference:"system");
+  state.media.matches=!darkSystem;state.media.change();
+  assert.equal(state.meta.content,preference==="dark"||(!["light","dark"].includes(preference)&&!darkSystem)?"#202124":"#FFFFFF");
+  state.window.applyThemePreference("light");assert.equal(state.meta.content,"#FFFFFF");assert.equal(state.root.dataset.theme,"light");
+  state.window.applyThemePreference("dark");assert.equal(state.meta.content,"#202124");assert.equal(state.root.dataset.theme,"dark");
+  state.window.applyThemePreference("system");assert.equal(state.root.dataset.theme,undefined);
+ }
+}
+for(const legacy of [false,true]) {
+ const blocked=setup("light",true,true,legacy);
+ assert.equal(blocked.window.readThemePreference(),"system");assert.equal(blocked.meta.content,"#202124");
+ blocked.window.applyThemePreference("light");assert.equal(blocked.meta.content,"#FFFFFF");
+ blocked.window.applyThemePreference("system");blocked.media.matches=false;blocked.media.change();assert.equal(blocked.meta.content,"#FFFFFF");
+}
+'''
+        result = subprocess.run([nodePath, "-e", "const themeSource=" + json.dumps(javascript) + ";\n" + harness], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

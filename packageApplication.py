@@ -21,6 +21,10 @@ includedFiles = (
     "tests/test_pending_next.py",
     "tests/test_startup_serving.py",
     "app.js",
+    "theme.js",
+    "pwa.webmanifest",
+    "assets/README.md",
+    "tests/test_version261018_pwa.py",
     "database.py",
     "index.html",
     "styles.css",
@@ -55,6 +59,14 @@ includedFiles = (
     "tests/test_version261018_frontend.py",
     "tests/test_version261018_integration.py",
     "tests/test_support.py",
+)
+
+
+pwaIconFiles = (
+    "assets/icon-192.png",
+    "assets/icon-512.png",
+    "assets/icon-maskable-512.png",
+    "assets/apple-touch-icon.png",
 )
 
 
@@ -144,7 +156,9 @@ def createApplicationPackage(repositoryPath=None, databasePath=None, outputPath=
         finalArchiveCreated = False
         try:
             with zipfile.ZipFile(temporaryArchivePath, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for relativePath in includedFiles:
+                # Artwork is optional until supplied; include only the four approved icon paths.
+                packageFiles = (*includedFiles, *(iconPath for iconPath in pwaIconFiles if (repositoryPath / iconPath).is_file()))
+                for relativePath in packageFiles:
                     sourcePath = repositoryPath / relativePath
                     archiveName = f"{archiveRootName}/{relativePath}"
                     if relativePath.endswith(".sh"):

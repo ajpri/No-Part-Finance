@@ -154,7 +154,7 @@ def createApp(databasePathOverride=None):
     dummyPasswordHash = passwordHash(secrets.token_urlsafe(32))
 
     def authenticationPage(message=None, csrfToken=None, status=200):
-        return render_template_string("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>No Part Finance — Sign In</title><script>try{const theme=localStorage.getItem("theme");if(theme==="light"||theme==="dark")document.documentElement.dataset.theme=theme}catch(error){}</script><link rel="stylesheet" href="/styles.css"></head><body><main class="signIn"><h1>No Part Finance</h1>{% if csrfToken %}<h2>Sign In</h2><form method="post" action="/sign-in"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><label>Username <input name="username" autocomplete="username" required maxlength="64"></label><label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="128"></label><p role="alert">{{ message or "" }}</p><button type="submit">Sign In</button></form>{% else %}<p>{{ message }}</p>{% endif %}</main></body></html>""", message=message, csrfToken=csrfToken), status
+        return render_template_string("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>No Part Finance — Sign In</title><meta name="theme-color" content="#202124"><meta name="apple-mobile-web-app-title" content="No Part Finance"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/pwa.webmanifest"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png"><script src="/theme.js"></script><link rel="stylesheet" href="/styles.css"></head><body><main class="signIn"><h1>No Part Finance</h1>{% if csrfToken %}<h2>Sign In</h2><form method="post" action="/sign-in"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><label>Username <input name="username" autocomplete="username" required maxlength="64"></label><label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="128"></label><p role="alert">{{ message or "" }}</p><button type="submit">Sign In</button></form>{% else %}<p>{{ message }}</p>{% endif %}</main></body></html>""", message=message, csrfToken=csrfToken), status
 
     def setSessionCookie(response, token, maxAge):
         response.set_cookie("npfSession", token, max_age=maxAge, httponly=True, secure=request.is_secure, samesite="Lax")
@@ -169,7 +169,7 @@ def createApp(databasePathOverride=None):
         g.user = None
         g.integration = None
         g.browserSession = None
-        if request.endpoint in {"robots", "styles", "javascript", "apiDocumentation", "openApiDocument"} or request.endpoint is None:
+        if request.endpoint in {"robots", "styles", "javascript", "apiDocumentation", "openApiDocument", "webAppManifest", "themeJavascript", "pwaIcon"} or request.endpoint is None:
             return None
         connection = getDatabase()
         if not connection.execute("SELECT 1 FROM users WHERE role = 'owner'").fetchone():
@@ -317,6 +317,20 @@ def createApp(databasePathOverride=None):
     @app.route("/styles.css")
     def styles():
         return send_from_directory(projectDirectory, "styles.css")
+
+    @app.route("/pwa.webmanifest", methods=["GET", "HEAD"])
+    def webAppManifest():
+        return send_from_directory(projectDirectory, "pwa.webmanifest", mimetype="application/manifest+json")
+
+    @app.route("/theme.js", methods=["GET", "HEAD"])
+    def themeJavascript():
+        return send_from_directory(projectDirectory, "theme.js", mimetype="text/javascript")
+
+    @app.route("/assets/<path:filename>", methods=["GET", "HEAD"])
+    def pwaIcon(filename):
+        if filename not in {"icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"}:
+            return Response(status=404)
+        return send_from_directory(projectDirectory / "assets", filename, mimetype="image/png")
 
     @app.route("/app.js")
     def javascript():
