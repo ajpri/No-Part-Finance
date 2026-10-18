@@ -51,18 +51,6 @@ Explicit non-goals: offline support, service workers, offline snapshots, Cache A
 
 Implementation status: online-only manifest, public asset routes, shared theme metadata, package inclusion, and installation guidance are implemented and tested with synthetic fixtures. Browser smoke checks verified existing sign-in, an online save, Light/Dark theme-color changes, logout, and theme persistence. The milestone remains open for final icon artwork/exports, PNG dimension/composition validation, and actual installation/launch verification in desktop Chrome and on a real iPhone. Missing icons intentionally return 404 with user approval; no placeholder PNGs are shipped.
 
-### Set Application Version to 26.10.18
-
-Purpose: set the authoritative application version to the exact string `26.10.18` as a separate release-version milestone, recorded in one logical commit independent of feature commits. Completed feature commits and this version commit may be pushed upstream together.
-
-Approved scope: update the authoritative version and any maintained current-version references or test expectations so Settings, version-bearing portable-package filenames and contents, and command-line version output consistently use `26.10.18`. Preserve the existing shared version source rather than adding independent version constants. Update SPEC.md's implemented version after verification and remove only this completed milestone. Preserve historical release identifiers and the existing grouped `26.10` Release History presentation; do not invent release notes or add a separate patch-version history entry.
-
-Acceptance criteria: verify the exact version in Settings/API metadata, applicable command-line output, and both portable-package variants and their version-bearing contents/filenames. Update and run relevant existing version/package tests with synthetic fixtures and explicit temporary database and backup paths, importing `tests` before application modules to enable the test database guard. Never read, initialize, migrate, or write real `finance.db` during verification. Confirm remaining old-version references are intentionally historical rather than stale current-version values. Keep all version changes, corresponding test/documentation changes, and this milestone's completion update in one commit.
-
-Explicit non-goals: implementing other Version Next milestones, changing database schema versions, changing financial or authentication behavior, redesigning Release History, or introducing automatic versioning/release tooling. This is a planned milestone, not an instruction to change the application version immediately.
-
-Unresolved decisions: none for this scope. Approved for Version Next implementation when explicitly requested.
-
 ### Dashboard and Simulator Utilization Threshold Rounding
 
 Purpose: make Dashboard and Simulator Credit Card utilization badges classify the same ratio consistently. Public Release 5 Part 2 found projected utilization rounded before classification in Simulator, while Dashboard classified the exact ratio. An exact 29.996% displayed as 30.00% with different badge colors across the views.

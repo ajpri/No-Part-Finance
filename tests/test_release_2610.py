@@ -655,7 +655,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 copiedPath = Path(self.directory.name) / "package-database.db"
                 copiedPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
-                self.assertIn('applicationVersion = "26.10.3"', archive.read("No-Part-Finance/packageApplication.py").decode())
+                self.assertIn('applicationVersion = "26.10.18"', archive.read("No-Part-Finance/packageApplication.py").decode())
                 self.assertIn("No-Part-Finance/users.py", archive.namelist())
                 self.assertIn("No-Part-Finance/openapi.json", archive.namelist())
             connection = connectDatabase(copiedPath)
@@ -672,7 +672,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 self.assertNotIn("No-Part-Finance/finance.db", archive.namelist())
                 self.assertFalse(any(self.secret.encode() in archive.read(name) for name in archive.namelist()))
-        self.assertEqual("26.10.3", applicationVersion)
+        self.assertEqual("26.10.18", applicationVersion)
 
     def testAuditorAndIntegrationSimulatorReadsNeverWrite(self):
         planId = createSimulatorPlan(self.connection, "Example Plan", "2026-10-01")

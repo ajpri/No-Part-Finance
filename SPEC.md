@@ -4,7 +4,7 @@
 
 This is the product specification for No Part Finance. It describes implemented behavior by feature rather than by release order. Future work and the approved next milestone live in `ROADMAP.md`.
 
-The authoritative application version is the exact string `26.10.3`. Settings, version-bearing package filenames, and command-line version output use that same value. Release History groups the October changes under `26.10`.
+The authoritative application version is the exact string `26.10.18`. Settings, version-bearing package filenames, and command-line version output use that same value. Release History groups the October changes under `26.10`.
 
 ## Product Intent
 
@@ -1852,7 +1852,7 @@ Use concise errors that distinguish malformed USD syntax, excess decimal places,
 
 ### Application Version and Release Summary
 
-Settings System displays the authoritative application version above Database Status. The existing Release History modal shows `26.10` first with three brief, user-facing bullets: Owner and read-only Auditor sign-in; integrations submitting transactions and transfers for human review and approval; and shared Pending review, account selector pins, and Budget template shortcuts. Combine the former `26.09` and `26.08` summaries under one `Earlier versions` heading with two bullets covering accounts, transactions, transfers, reporting, and backups; and Budget and Simulator planning, templates, and bulk entry. Do not show separate August or September headings. Keep implementation details out of these summaries and do not add a separate `26.10.3` history entry, extra controls, or another page. Keep the displayed version and summaries synchronized.
+Settings System displays the authoritative application version above Database Status. The existing Release History modal shows `26.10` first with three brief, user-facing bullets: Owner and read-only Auditor sign-in; integrations submitting transactions and transfers for human review and approval; and shared Pending review, account selector pins, and Budget template shortcuts. Combine the former `26.09` and `26.08` summaries under one `Earlier versions` heading with two bullets covering accounts, transactions, transfers, reporting, and backups; and Budget and Simulator planning, templates, and bulk entry. Do not show separate August or September headings. Keep implementation details out of these summaries and do not add a separate patch-version history entry, extra controls, or another page. Keep the displayed version and summaries synchronized.
 
 The Release History modal ends with the `About the Name` quotation “The best part is no part, the best process is no process, it weighs nothing, costs nothing, can't go wrong.”, attributed to Elon Musk and identified as the inspiration for No Part Finance. Do not show the version in the application bar or add external loading, tracking, or links.
 

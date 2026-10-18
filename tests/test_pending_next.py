@@ -160,7 +160,7 @@ class PendingNextTests(unittest.TestCase):
     def testDocumentedRequestsVersionAndOwnerOnlyContract(self):
         from packageApplication import applicationVersion
         contract = self.owner.get("/openapi.json").get_json()
-        self.assertEqual("26.10.3", applicationVersion)
+        self.assertEqual("26.10.18", applicationVersion)
         self.assertEqual(applicationVersion, contract["info"]["version"])
         body = contract["paths"]["/api/integration/submissions"]["post"]["requestBody"]["content"]["application/json"]
         shapes = body["schema"]["oneOf"]
@@ -851,7 +851,7 @@ class PendingNextTests(unittest.TestCase):
     def testIntegrationPendingPublishedContractAndExamples(self):
         from packageApplication import applicationVersion
         contract = json.loads((Path(__file__).resolve().parents[1] / "openapi.json").read_text(encoding="utf-8"))
-        self.assertEqual("26.10.3", applicationVersion)
+        self.assertEqual("26.10.18", applicationVersion)
         self.assertEqual(applicationVersion, contract["info"]["version"])
         pending = contract["paths"]["/api/integration/pending"]["get"]
         update = contract["paths"]["/api/integration/submissions/{proposalId}"]["put"]
