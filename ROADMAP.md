@@ -177,24 +177,6 @@ Explicit non-goals: new eligibility rules, fields granting write authority, dire
 
 Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
-### Integration Oversized-Request Error Representation
-
-Purpose: make oversized integration-submission errors readable by integrations and consistent with the published JSON Error contract. Public Release 5 Part 3 found an authenticated request exceeding the configured 1 MiB limit returned HTTP 413 with text/html despite the documented JSON response.
-
-Approved behavior: retain the existing 1 MiB request-size limit and HTTP 413 rejection, but return application/json using the existing documented JSON Error shape for oversized integration submissions. Include a concise message explaining that the request exceeds the 1 MiB limit. Do not introduce another error envelope, expose framework HTML, or include request contents or private diagnostic details. Keep OpenAPI and public agent error guidance aligned with this behavior after implementation and verification.
-
-User-visible behavior: an integration receives a machine-readable error and can report that its submission is too large. No additional confirmation, retry workflow, or browser UI is required.
-
-Financial and data invariants: an oversized submission creates no proposal, ledger row, decision, or financial/planning mutation. Preserve authentication, authorization, revocation, Owner-configuration requirements, existing browser CSRF policy, and ordinary validation/error behavior. The JSON error does not grant access or bypass eligibility and financial validation. Keep the size limit unchanged and apply the smallest explicit handler change needed for the integration-submission route.
-
-Meaningful edge cases: an authenticated valid integration secret with an oversized body; a body exactly at the limit versus above it; oversized malformed JSON; missing, invalid, and revoked credentials; Owner not configured; and unaffected ordinary-size validation failures. Preserve existing access-control outcomes and precedence for unauthorized callers rather than redefining them as part of error formatting. Existing non-integration HTML errors retain their normal behavior.
-
-Acceptance criteria: an authenticated submission above the configured limit returns 413, application/json, and the documented Error shape with a concise size-limit message. Verify boundary handling using body byte sizes; an exactly-at-limit request is not rejected for size but still undergoes normal parsing and validation. Verify oversized malformed content does not leak body text or exception details. Assert no proposal or ledger writes, unchanged authentication/authorization and ordinary errors, and no unrelated HTML error changes. Verify public documentation describes the tested response. Use synthetic fixtures, explicit temporary database and backup paths, and the in-process test database guard; never access real finance.db.
-
-Explicit non-goals: changing the size limit, accepting larger submissions, automatic retries, new error frameworks or envelopes, broad HTTP exception rewrites, new API operations, schema changes, or unrelated browser error handling.
-
-Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
-
 ### Integration History Filter ID Validation
 
 Purpose: make integration history Account and Category filter validation match the published positive-integer ID contract. Public Release 5 Part 3 found zero and negative IDs accepted as successful empty results while nonnumeric IDs were rejected.

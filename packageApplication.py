@@ -51,6 +51,7 @@ includedFiles = (
     "tests/test_reporting.py",
     "tests/test_release_26093.py",
     "tests/test_release_260918.py",
+    "tests/test_version261018_integration.py",
     "tests/test_support.py",
 )
 

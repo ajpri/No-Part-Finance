@@ -2033,6 +2033,8 @@ History includes archived records and groups valid transfers as one event with e
 
 ### Integration proposals and sign conventions
 
+Submission and Pending-update request bodies retain a 1 MiB (1,048,576-byte) maximum. Authenticated oversized bodies return HTTP 413 with the documented JSON Error shape and a concise size-limit message, with no proposal or ledger writes. Bodies exactly at the limit undergo normal parsing and validation. Existing authentication and Owner-configuration failure precedence is preserved.
+
 An ordinary `POST /api/integration/submissions` request contains exactly `submissionId`, `date`, `accountId`, `description`, `categoryId`, and `amount`. The caller-generated ID is a 1–128 character string, IDs are positive integers, Date is an explicit ISO calendar date, and Amount is a user-facing money string parsed by the shared Python USD parser. Missing, malformed, or unsupported fields fail without a partial write. Zero, future dates, leap days, System Accounts, and eligibility follow existing ordinary-transaction rules; no agent-local date is guessed.
 
 Agents must respect the Category's explicit Reporting Role and the entered-amount convention rather than copying a ledger sign or inferring meaning from a name:

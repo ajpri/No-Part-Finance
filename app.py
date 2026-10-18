@@ -11,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory, redirect, render_template_string
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.serving import make_server
 
 from packageApplication import PackagingError, applicationVersion, createApplicationPackage
@@ -288,6 +288,12 @@ def createApp(databasePathOverride=None):
     @app.errorhandler(ValidationError)
     def validationFailure(error):
         return jsonify({"error": str(error)}), 409 if isinstance(error, SubmissionConflict) else 400
+
+    @app.errorhandler(RequestEntityTooLarge)
+    def oversizedSubmission(error):
+        if request.endpoint in {"integrationSubmissions", "updateIntegrationPending"} and request.method in {"POST", "PUT"}:
+            return jsonify({"error": "Request exceeds the 1 MiB limit"}), 413
+        return error
 
     @app.errorhandler(Exception)
     def unexpectedFailure(error):
