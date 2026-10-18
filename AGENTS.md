@@ -30,6 +30,8 @@ After the requested milestone is successfully implemented and verified, merge it
 
 This project is intentionally split into milestones to reduce wasted implementation effort and Codex usage.
 
+Version Next may contain multiple independently scoped feature milestones. Complete and verify one requested milestone at a time, normally recording each feature and its corresponding SPEC.md and ROADMAP.md updates in one logical commit. Multiple completed feature commits may be batched and pushed upstream together. A batch push does not authorize starting another milestone. Move completed behavior into SPEC.md and remove its completed roadmap entry after verification, without waiting for the batch to be pushed.
+
 Keep one logical change per commit. If a small nit surfaces right after committing and it hasn't been pushed yet, fold it in with `git commit --amend` instead of a second commit. Never amend or rewrite anything already on GitHub.
 
 ## 3. Handling Ambiguity
