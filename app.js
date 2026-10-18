@@ -794,7 +794,7 @@ function newTransfer() {
 
 function paymentDescription(account) {
   const name = account.name.trim();
-  const needsCardSuffix = account.accountSubtype !== "Personal Loan" && !/\bcard$/i.test(name);
+  const needsCardSuffix = account.accountSubtype === "Credit Card" && !/\bcard$/i.test(name);
   return `${name}${needsCardSuffix ? " Card" : ""} Payment`;
 }
 
@@ -804,6 +804,7 @@ function updateTransferPresentation(updateDescription = true) {
   const isPayment = destinationSelect.selectedOptions[0]?.dataset.accountClass === "credit";
   const paymentHint = document.querySelector("#transferPaymentHint");
   for(const [selectId,lineId] of [["#transferFromAccount","#transferFromBalance"],["#transferToAccount","#transferToBalance"]]){const selected=accounts.find((account)=>account.id===Number(document.querySelector(selectId).value));const line=document.querySelector(lineId);line.hidden=!selected||selected.accountClass==="system";if(selected&&selected.accountClass!=="system"){const friendly=selected.accountClass==="credit"?(selected.balanceCents>0?`${dollars(selected.balanceCents)} credit`:dollars(-selected.balanceCents)):dollars(selected.balanceCents);line.textContent=`Current Balance: ${friendly}`;}}
+  document.querySelector("#transferSubmitButton").textContent = isPayment ? "Make Payment" : "Save";
   paymentHint.hidden = !isPayment;
   paymentHint.replaceChildren();
   if (isPayment) {

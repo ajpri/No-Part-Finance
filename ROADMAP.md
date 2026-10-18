@@ -121,26 +121,6 @@ Explicit non-goals: configurable badge thresholds, more display precision, new w
 
 Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
-### Other Credit Transfer and Payment Presentation
-
-Purpose: resolve conflicting transfer presentation rules by using destination Account class consistently. Existing passages disagree about whether Other Credit destinations receive payment wording or ordinary Transfer wording.
-
-Approved user-visible behavior: every Credit destination, including Other Credit, uses the existing payment presentation in ordinary transfer/payment forms and Simulator Transfer rows. The ordinary form's primary action reads Make Payment, and its destination note reads This will be recorded as a payment to <Account Name>. Other Credit destinations default Description or Simulator Label to <Account Name> Payment, matching Personal Loan naming.
-
-Preserve the existing Credit Card description rule: use <Account Name> Card Payment unless the Account name already ends in Card, in which case use <Account Name> Payment. Thus Disney defaults to Disney Card Payment, Disney Card remains Disney Card Payment, and Apple Card remains Apple Card Payment; never generate Card Card Payment. Personal Loans retain <Account Name> Payment. Do not change the existing Credit Card naming condition or broaden this item into name normalization.
-
-Apply approved destination-based defaults when selecting or changing destinations in new entry forms and when explicitly changing a Simulator row's destination. Users retain normal editable Description/Label fields. Merely opening or rendering an existing transfer/payment or saved Simulator row preserves its saved Description/Label. Retain Cash defaults of Transfer to <Destination Account Name> and existing External transfer presentation. The Simulator Type remains Transfer; do not introduce a Payment row type or replace its existing recording-action label.
-
-Financial and data invariants: this is presentation only. A payment remains the existing atomic two-row, opposite-signed, zero-sum transfer with no Category and no Income/Expense effect. Preserve positive entered Amount, Account eligibility, External boundaries, balances, reporting, stored descriptions, and existing transfer validation. The ordinary payoff helper remains available only under its existing new-entry Credit Card/Personal Loan, Cash-source, amount-owed, and source-coverage rules; Other Credit does not gain helper eligibility. Do not change Simulator Payoff eligibility or calculations, Planned Debt Payment eligibility, or any other subtype-specific rule.
-
-Meaningful edge cases: Cash, Credit Card, Personal Loan, Other Credit, and External destinations; switching among them; names ending in Card versus names without that ending; new entries, duplicate/prefilled entries, existing transfer editing, saved Simulator rendering, and explicit Simulator destination changes. A saved user description is not replaced merely to conform to the new presentation.
-
-Acceptance criteria: verify Make Payment and the destination payment note for every Credit subtype, and Other Credit defaults of <Account Name> Payment in both ordinary forms and Simulator rows. Verify Disney, Disney Card, and Apple Card naming without duplicated Card wording; retain Personal Loan naming, Cash defaults, and External presentation. Verify existing saved descriptions and labels survive opening, rendering, refresh, and unrelated edits. Verify destination changes follow the established generated-default behavior, fields remain editable, and Other Credit receives no ordinary payoff helper. Assert unchanged helper/Payoff/Planned Debt Payment eligibility, transfer validation, integer-cent signs, zero sum, atomicity, balances, and reporting. Use explicit temporary database and backup paths with the test database guard, and verify narrow-screen forms, accessible wording, and safe Account-name rendering.
-
-Explicit non-goals: a separate payment transaction or Simulator row type, payoff-helper expansion, new debt accounting, changes to Payoff or Budget destination eligibility, automatic rewriting of saved descriptions, name normalization, schema changes, or unrelated transfer behavior.
-
-Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
-
 ### Simulator Transfer Summary Label
 
 Purpose: resolve the conflicting Simulator summary labels Payments & Cash Transfers and Transfers & Payments with one consistent label.
