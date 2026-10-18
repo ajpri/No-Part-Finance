@@ -143,3 +143,112 @@ class UpgradeBackupTests(unittest.TestCase):
         newPath = Path(self.directory.name) / "new-installation" / "explicit-new.db"
         database.initializeDatabase(newPath)
         self.assertFalse((newPath.parent / "backups").exists())
+
+
+class CategoryRollupTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.databasePath = Path(self.directory.name) / "explicit-rollups.db"
+        database.initializeDatabase(self.databasePath)
+        self.connection = database.connectDatabase(self.databasePath)
+        self.addCleanup(self.connection.close)
+        self.accountId = database.createAccount(self.connection, "Fictional Cash", "cash")
+        self.parentId = database.createCategory(self.connection, "Fictional Parent")
+        self.childId = database.createCategory(self.connection, "Fictional Child")
+
+    def addExpense(self, categoryId, amount="10.00", transactionDate="2020-01-01"):
+        return database.createTransaction(self.connection, self.accountId, transactionDate, "Fictional purchase", categoryId, amount)
+
+    def testAnyHistoryBlocksCreationAndReparentingWithoutChanges(self):
+        self.addExpense(self.parentId)
+        self.addExpense(self.parentId, "-10.00")
+        with self.connection:
+            self.connection.execute("UPDATE categories SET active = 0 WHERE id = ?", (self.parentId,))
+        originalState = list(self.connection.iterdump())
+        for operation in [lambda: database.createCategory(self.connection, "Another Child", self.parentId), lambda: database.updateCategory(self.connection, self.childId, "Fictional Child", self.parentId)]:
+            with self.assertRaisesRegex(database.ValidationError, "transaction history.*empty parent"):
+                operation()
+            self.assertEqual(originalState, list(self.connection.iterdump()))
+
+    def testAllTemplateAndFlexibleReferencesBlockConversion(self):
+        for referenceType in ["template", "flexible"]:
+            with self.subTest(referenceType=referenceType):
+                with self.connection:
+                    if referenceType == "template":
+                        self.connection.execute("INSERT INTO transactionTemplates (name, categoryId, active) VALUES ('Archived fictional', ?, 0)", (self.parentId,))
+                    else:
+                        self.connection.execute("INSERT INTO flexibleCategoryBudgets (categoryId, monthlyTargetCents, active) VALUES (?, 1000, 0)", (self.parentId,))
+                with self.assertRaisesRegex(database.ValidationError, "references"):
+                    database.createCategory(self.connection, "Blocked child", self.parentId)
+                with self.assertRaisesRegex(database.ValidationError, "references"):
+                    database.updateCategory(self.connection, self.childId, "Fictional Child", self.parentId)
+                with self.connection:
+                    self.connection.execute("DELETE FROM transactionTemplates")
+                    self.connection.execute("DELETE FROM flexibleCategoryBudgets")
+
+    def testEmptyExistingParentRollupPreservesChildHistory(self):
+        transactionId = self.addExpense(self.childId)
+        self.addExpense(self.childId, "-2.00")
+        database.updateCategory(self.connection, self.childId, "Fictional Child", self.parentId)
+        report = database.dashboardReport(self.connection, "custom", "2020-01-01", "2020-01-10")
+        self.assertIsNone(report["categoryReportingError"])
+        parent = next(row for row in report["categories"] if row["id"] == self.parentId)
+        self.assertEqual((800, 10000, 80), (parent["amountCents"], parent["percentageHundredths"], parent["perDayCents"]))
+        self.assertEqual(self.childId, self.connection.execute("SELECT categoryId FROM transactions WHERE id = ?", (transactionId,)).fetchone()[0])
+        with self.assertRaisesRegex(database.ValidationError, "Rollup"):
+            self.addExpense(self.parentId)
+
+    def testLegacyRollupErrorIsIndependentOfPeriodAndCanBeCorrected(self):
+        purchaseId = self.addExpense(self.parentId)
+        refundId = self.addExpense(self.parentId, "-10.00")
+        with self.connection:
+            self.connection.execute("UPDATE categories SET parentCategoryId = ? WHERE id = ?", (self.parentId, self.childId))
+            self.connection.execute("UPDATE categories SET active = 0 WHERE id = ?", (self.parentId,))
+        report = database.dashboardReport(self.connection, "custom", "2026-10-01", "2026-10-17")
+        self.assertIn('"Fictional Parent"', report["categoryReportingError"])
+        self.assertEqual([], report["categories"])
+        self.assertEqual(0, report["expensesCents"])
+        self.assertTrue(report["accountsByExpense"])
+        database.updateTransaction(self.connection, purchaseId, self.accountId, "2020-01-01", "Fictional purchase", self.childId, "10.00")
+        self.assertIsNotNone(database.dashboardReport(self.connection)["categoryReportingError"])
+        database.updateTransaction(self.connection, refundId, self.accountId, "2020-01-01", "Fictional refund", self.childId, "-10.00")
+        self.assertIsNone(database.dashboardReport(self.connection)["categoryReportingError"])
+        self.assertEqual(0, sum(row[0] for row in self.connection.execute("SELECT amountCents FROM transactions")))
+
+    def testWriteLockProtectsHierarchyAndTransactionRevalidation(self):
+        originalPrepare = database.prepareTransaction
+        def stalePrepare(*arguments, **keywords):
+            transactionValues = originalPrepare(*arguments, **keywords)
+            # A second connection establishes a rollup after preflight but before the write lock.
+            otherConnection = database.connectDatabase(self.databasePath)
+            try:
+                database.createCategory(otherConnection, "Concurrent child", self.parentId)
+            finally:
+                otherConnection.close()
+            return transactionValues
+        with patch.object(database, "prepareTransaction", side_effect=stalePrepare):
+            with self.assertRaisesRegex(database.ValidationError, "Rollup"):
+                self.addExpense(self.parentId)
+        self.assertFalse(self.connection.in_transaction)
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
+        observedStatements = []
+        self.connection.set_trace_callback(observedStatements.append)
+        database.createCategory(self.connection, "Empty rollup")
+        self.assertIn("BEGIN IMMEDIATE", observedStatements)
+
+    def testTemplatePreflightRaceCannotReferenceNewRollup(self):
+        originalValues = database.optionalTemplateValues
+        def staleTemplateValues(*arguments, **keywords):
+            templateValues = originalValues(*arguments, **keywords)
+            otherConnection = database.connectDatabase(self.databasePath)
+            try:
+                database.createCategory(otherConnection, "Concurrent template child", self.parentId)
+            finally:
+                otherConnection.close()
+            return templateValues
+        with patch.object(database, "optionalTemplateValues", side_effect=staleTemplateValues):
+            with self.assertRaisesRegex(database.ValidationError, "Rollup"):
+                database.createTemplate(self.connection, "Stale template", None, None, self.parentId, None)
+        self.assertFalse(self.connection.in_transaction)
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM transactionTemplates").fetchone()[0])

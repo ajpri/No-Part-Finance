@@ -976,6 +976,11 @@ function utilizationBadge(owedCents, limitCents, label) {
 
 function renderDashboardCategories(dashboard) {
   const body = document.querySelector("#expenseCategoryRows"); body.replaceChildren();
+  const categoryError = document.querySelector("#categoryReportingError");
+  categoryError.textContent = dashboard.categoryReportingError || "";
+  categoryError.hidden = !dashboard.categoryReportingError;
+  document.querySelector("#expenseCategoryTable").hidden = Boolean(dashboard.categoryReportingError);
+  if (dashboard.categoryReportingError) return;
   const hideZero = document.querySelector("#hideZeroBalances").checked;
   for (const category of dashboard.categories.filter((item) => item.parentCategoryId === null)) {
     const children = dashboard.categories.filter((item) => item.parentCategoryId === category.id);

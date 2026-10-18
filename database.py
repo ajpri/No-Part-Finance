@@ -856,6 +856,8 @@ def createTransaction(connection, accountId, transactionDate, description, categ
         connection, accountId, transactionDate, description, categoryId, enteredAmount, pinned
     )
     with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        getSelectableCategory(connection, transactionValues[4])
         cursor = connection.execute(
             """
             INSERT INTO transactions (accountId, date, description, amountCents, categoryId, pinned)
@@ -891,6 +893,9 @@ def createTransactionWithReimbursement(
         reimbursementCategory["id"], reimbursementAmount, False,
     )
     with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        getSelectableCategory(connection, expenseValues[4])
+        getSelectableCategory(connection, reimbursementValues[4])
         cursors = []
         for transactionValues in (expenseValues, reimbursementValues):
             cursors.append(connection.execute(
@@ -938,6 +943,9 @@ def createBulkTransactions(connection, transactionRows):
     if not preparedRows:
         raise ValidationError("Enter at least one transaction")
     with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for transactionValues in preparedRows:
+            getSelectableCategory(connection, transactionValues[4])
         connection.executemany(
             """
             INSERT INTO transactions
@@ -982,6 +990,9 @@ def updateTransaction(connection, transactionId, accountId, transactionDate, des
         )
         storedAmountCents = storedAmountForCategory(category["reportingRole"], enteredAmountCents)
     with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if category is not None:
+            getSelectableCategory(connection, category["id"], allowArchived=category["id"] == existing["categoryId"])
         connection.execute(
             """
             UPDATE transactions
@@ -1285,6 +1296,20 @@ def reconcileAccountBalance(connection, accountId, actualBalance):
     return newOffsetCents, differenceCents
 
 
+def validateRollupParent(connection, parentCategoryId):
+    if not parentCategoryId:
+        return
+    parent = connection.execute("SELECT * FROM categories WHERE id = ?", (parentCategoryId,)).fetchone()
+    if not parent or parent["parentCategoryId"] is not None or parent["reportingRole"] != "expense":
+        raise ValidationError("Parent must be an existing top-level category")
+    if connection.execute("SELECT 1 FROM transactions WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
+        raise ValidationError("A category with transaction history cannot become a rollup. Create an empty parent and move this category beneath it instead.")
+    if connection.execute("SELECT 1 FROM transactionTemplates WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
+        raise ValidationError("Change or remove Template references before making this category a rollup")
+    if connection.execute("SELECT 1 FROM flexibleCategoryBudgets WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
+        raise ValidationError("Change or remove Flexible Category Budget references before making this category a rollup")
+
+
 def createCategory(connection, name, parentCategoryId=None, displayOrder=0, offerReimbursement=False, reportingRole="expense"):
     name = requireText(name, "Category name")
     parentCategoryId = int(parentCategoryId) if parentCategoryId not in (None, "") else None
@@ -1309,11 +1334,15 @@ def createCategory(connection, name, parentCategoryId=None, displayOrder=0, offe
             raise ValidationError("Parent must be an existing top-level category")
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            validateRollupParent(connection, parentCategoryId)
             cursor = connection.execute(
                 "INSERT INTO categories (name, parentCategoryId, displayOrder, offerReimbursement, reportingRole) VALUES (?, ?, ?, ?, ?)",
                 (name, parentCategoryId, int(displayOrder), 1 if offerReimbursement else 0, reportingRole),
             )
         return cursor.lastrowid
+    except ValidationError:
+        raise
     except (sqlite3.IntegrityError, ValueError) as error:
         raise ValidationError("Category name must be unique and display order must be an integer") from error
 
@@ -1370,6 +1399,8 @@ def updateCategory(connection, categoryId, name, parentCategoryId=None, displayO
             raise ValidationError("Parent must be an existing top-level category")
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            validateRollupParent(connection, parentCategoryId)
             connection.execute(
                 """
                 UPDATE categories
@@ -1378,6 +1409,8 @@ def updateCategory(connection, categoryId, name, parentCategoryId=None, displayO
                 """,
                 (name, parentCategoryId, int(displayOrder), 1 if active else 0, 1 if offerReimbursement else 0, reportingRole, categoryId),
             )
+    except ValidationError:
+        raise
     except (sqlite3.IntegrityError, ValueError) as error:
         raise ValidationError("Category name must be unique and display order must be an integer") from error
 
@@ -1453,6 +1486,19 @@ def percentageHundredths(numerator, denominator):
 
 def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None, today=None):
     periodStart, periodEnd, dayCount = reportingPeriod(period, startDate, endDate, today)
+    invalidRollups = connection.execute(
+        """SELECT c.name FROM categories c
+           WHERE EXISTS (SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id)
+             AND EXISTS (SELECT 1 FROM transactions t WHERE t.categoryId = c.id)
+           ORDER BY c.displayOrder, c.name, c.id"""
+    ).fetchall()
+    categoryReportingError = None
+    if invalidRollups:
+        categoryNames = ", ".join(f'"{row["name"]}"' for row in invalidRollups)
+        categoryReportingError = (
+            f"Category {categoryNames} has transactions assigned directly to a rollup. "
+            "Edit those transactions to select valid categories before viewing this category breakdown."
+        )
     categoryRows = connection.execute(
         """
         SELECT c.id, c.name, c.parentCategoryId, c.displayOrder, c.reportingRole,
@@ -1672,7 +1718,8 @@ def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None
         "netCents": incomeCents - expensesCents,
         "spendingPercentageHundredths": percentageHundredths(expensesCents, incomeCents),
         "perDayCents": roundedPerDayCents(expensesCents, dayCount),
-        "categories": categoryResults,
+        "categories": [] if categoryReportingError else categoryResults,
+        "categoryReportingError": categoryReportingError,
         "accountsByExpense": accountResults,
         "expensesByAccountAndCategory": expensesByAccountAndCategory,
         "expensesByCategoryAndAccount": expensesByCategoryAndAccount,
@@ -1703,6 +1750,9 @@ def createTemplate(connection, name, accountId, description, categoryId, entered
     )
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if category is not None:
+                getSelectableCategory(connection, category["id"])
             cursor = connection.execute(
                 """
                 INSERT INTO transactionTemplates
@@ -1713,6 +1763,8 @@ def createTemplate(connection, name, accountId, description, categoryId, entered
                  category["id"] if category else None, amountCents, int(displayOrder), 1 if prefillAmount else 0),
             )
         return cursor.lastrowid
+    except ValidationError:
+        raise
     except (sqlite3.IntegrityError, ValueError) as error:
         raise ValidationError("Template name must be unique and display order must be an integer") from error
 
@@ -1747,6 +1799,9 @@ def updateTemplate(connection, templateId, name, accountId, description, categor
             raise ValidationError("Archive or remove the active expected income plan before making this template incomplete")
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if category is not None:
+                getSelectableCategory(connection, category["id"])
             connection.execute(
                 """
                 UPDATE transactionTemplates
@@ -1758,6 +1813,8 @@ def updateTemplate(connection, templateId, name, accountId, description, categor
                  category["id"] if category else None, amountCents,
                  int(displayOrder), 1 if active else 0, 1 if prefillAmount else 0, templateId),
             )
+    except ValidationError:
+        raise
     except (sqlite3.IntegrityError, ValueError) as error:
         raise ValidationError("Template name must be unique and display order must be an integer") from error
 
@@ -1880,6 +1937,8 @@ def createFlexibleCategoryBudget(connection, categoryId, monthlyTarget):
     targetCents = parseMoneyCents(monthlyTarget, positiveOnly=True)
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            validateFlexibleCategory(connection, categoryId)
             cursor = connection.execute(
                 "INSERT INTO flexibleCategoryBudgets (categoryId, monthlyTargetCents) VALUES (?, ?)",
                 (category["id"], targetCents),
@@ -1897,6 +1956,10 @@ def updateFlexibleCategoryBudget(connection, budgetId, categoryId, monthlyTarget
     targetCents = parseMoneyCents(monthlyTarget, positiveOnly=True)
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            getSelectableCategory(connection, categoryId, allowArchived=not active)
+            if active:
+                validateFlexibleCategory(connection, categoryId)
             connection.execute(
                 "UPDATE flexibleCategoryBudgets SET categoryId = ?, monthlyTargetCents = ?, active = ? WHERE id = ?",
                 (categoryId, targetCents, 1 if active else 0, budgetId),
@@ -2212,6 +2275,8 @@ def recordSimulatorTransaction(connection, planId, rowId, accountId, transaction
         connection, accountId, transactionDate, description, categoryId, enteredAmount, pinned
     )
     with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        getSelectableCategory(connection, transactionValues[4])
         cursor = connection.execute(
             "INSERT INTO transactions (accountId,date,description,amountCents,categoryId,pinned) VALUES (?,?,?,?,?,?)",
             transactionValues,

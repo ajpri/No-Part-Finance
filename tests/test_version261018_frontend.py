@@ -94,3 +94,35 @@ for (const transferCents of [0, -5000, 5000]) {
 '''
         result = subprocess.run([nodePath, "-e", renderFunction + harness], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def testLegacyRollupErrorSuppressesOnlyCategoryFiguresAndRecovers(self):
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("JavaScript runtime unavailable")
+        javascript = (projectRoot / "app.js").read_text(encoding="utf-8")
+        renderFunction = "function renderDashboardCategories(dashboard)" + javascript.split(
+            "function renderDashboardCategories(dashboard)", 1
+        )[1].split("function renderDashboardExpenseAccounts", 1)[0]
+        harness = r'''
+const assert = require("node:assert/strict");
+const controls = {
+ "#expenseCategoryRows":{children:["old figures"],replaceChildren(){this.children=[]}},
+ "#categoryReportingError":{}, "#expenseCategoryTable":{}, "#hideZeroBalances":{checked:true}
+};
+const document = {querySelector(selector){return controls[selector]}};
+function addDashboardAmountRow(body,name){body.children.push(name)}
+const dashboard = {categoryReportingError:'Category "<script>" needs manual correction.',categories:[{id:1,name:"Child",parentCategoryId:null,amountCents:100}]};
+renderDashboardCategories(dashboard);
+assert.equal(controls["#categoryReportingError"].textContent,dashboard.categoryReportingError);
+assert.equal(controls["#categoryReportingError"].hidden,false);
+assert.equal(controls["#expenseCategoryTable"].hidden,true);
+assert.deepEqual(controls["#expenseCategoryRows"].children,[]);
+dashboard.categoryReportingError=null;
+renderDashboardCategories(dashboard);
+assert.equal(controls["#categoryReportingError"].textContent,"");
+assert.equal(controls["#categoryReportingError"].hidden,true);
+assert.equal(controls["#expenseCategoryTable"].hidden,false);
+assert.deepEqual(controls["#expenseCategoryRows"].children,["Child"]);
+'''
+        result = subprocess.run([nodePath, "-e", renderFunction + harness], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)

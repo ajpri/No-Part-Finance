@@ -1185,6 +1185,10 @@
                 "schema": {
                   "type": "object",
                   "properties": {
+                    "categoryReportingError": {
+                      "type": ["string", "null"],
+                      "description": "Null normally. If legacy rollups contain directly assigned transactions, identifies the categories needing manual correction; categories is empty while totals and other breakdowns remain valid."
+                    },
                     "accounts": {
                       "type": "array",
                       "items": {
