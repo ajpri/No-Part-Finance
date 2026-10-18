@@ -2442,9 +2442,10 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
         elif row["rowType"] == "transfer":
             fromIsLiveCash = row["fromAccountId"] in liveAccountIds
             toIsLiveCash = row["toAccountId"] in liveAccountIds
-            if balances[row["fromAccountId"]]["accountClass"] == "cash" and balances[row["toAccountId"]]["accountClass"] == "cash":
-                # A cash transfer changes available money only when it crosses
-                # the selected Live Balance pool; direction determines its sign.
+            transferClasses = {balances[accountId]["accountClass"] for accountId in (row["fromAccountId"], row["toAccountId"])}
+            if transferClasses <= {"cash", "system"}:
+                # Cash and External transfers change allocation only when crossing
+                # the selected Live Balance pool; External is always outside it.
                 if fromIsLiveCash and not toIsLiveCash:
                     paymentAndCashTransferTotal += amount
                 elif toIsLiveCash and not fromIsLiveCash:

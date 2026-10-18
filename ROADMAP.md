@@ -63,24 +63,6 @@ Explicit non-goals: implementing other Version Next milestones, changing databas
 
 Unresolved decisions: none for this scope. Approved for Version Next implementation when explicitly requested.
 
-### External Transfers in Simulator Allocation
-
-Purpose: make External transfers follow the Simulator's existing selected Cash Live Balance pool allocation rule. Public Release 5 Part 2 reproduced $90 Starting Cash plus a $50 incoming External transfer projecting Cash at $140 while incorrectly reducing Unallocated Money to $40.
-
-Approved user-visible behavior: an External-to-Cash transfer increases Unallocated Money by its positive Amount only when the tracked destination Cash Account is selected by a Live balance row. A selected Live balance Cash Account-to-External transfer decreases Unallocated Money by Amount. External transfers involving a Cash Account outside the selected Live Balance pool do not change the allocation summary. In every case, the tracked Account's projected balance still reflects its signed transfer side. With no other planned rows, $90 Starting Cash plus $50 External-to-selected-Cash produces $140 projected Cash and $140 Unallocated Money; a $50 selected-Cash-to-External transfer produces $40 for both.
-
-Use the existing signed Transfers/Payments summary contribution: incoming money to the selected Cash pool contributes negative Amount to that deduction, outgoing money contributes positive Amount, and an unselected Cash side contributes zero. Do not classify External inflows as Planned Income or outflows as Planned Spending. External-to-Credit payments retain the existing Credit-payment allocation rule; this item changes only the External/Cash selected-pool treatment, without changing other transfer or Payoff rules.
-
-Financial and data invariants: Python owns selected-pool membership, projected balances, integer-cent signs, summary contributions, and Unallocated Money. Preserve atomic two-row zero-sum ledger transfers, positive entered transfer Amount, distinct eligible Accounts, existing External selector boundaries, reporting exclusions, and the distinction between planning and authoritative ledger activity. External never appears in Results or exposed balance totals. Executed financial rows remain excluded from planned calculations; their recorded effects appear through refreshed live balances. Store no derived balances or allocation totals.
-
-Meaningful edge cases: both directions with selected and unselected Cash Accounts; no Live balance rows; multiple selected Cash Accounts; adding or removing a Live balance selection; multiple incoming and outgoing transfers that offset; negative Unallocated Money; executed rows; archived saved references under existing rules; External-to-Credit payments and unaffected ordinary Cash/Credit transfers. Never infer pool membership from names or from merely appearing in Results.
-
-Acceptance criteria: verify explicit expected projected balances, signed transfer-summary contributions, Starting Cash, Planned Income, Planned Spending & Buffer, and Unallocated Money in both directions and selected/unselected cases. Adding or removing the tracked Cash Account's Live balance row changes the allocation basis consistently without altering saved transfer fields or ledger data. Verify refresh and persistence, executed-row exclusion, existing Credit-payment behavior, External exclusion from Results and financial reporting, and unchanged transfer signs and zero-sum atomicity. Use synthetic fixtures with explicit temporary database and backup paths and the test database guard; never test against real finance.db.
-
-Explicit non-goals: new allocation pools or controls, automatically selecting Live balance Accounts, treating External transfers as Income/Expenses, exposing External balances, changing the summary label, new ledger operations, stored totals, automatic recording, matching, or unrelated transfer rules.
-
-Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
-
 ### Dashboard and Simulator Utilization Threshold Rounding
 
 Purpose: make Dashboard and Simulator Credit Card utilization badges classify the same ratio consistently. Public Release 5 Part 2 found projected utilization rounded before classification in Simulator, while Dashboard classified the exact ratio. An exact 29.996% displayed as 30.00% with different badge colors across the views.

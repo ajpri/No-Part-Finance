@@ -252,3 +252,89 @@ class CategoryRollupTests(unittest.TestCase):
                 database.createTemplate(self.connection, "Stale template", None, None, self.parentId, None)
         self.assertFalse(self.connection.in_transaction)
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM transactionTemplates").fetchone()[0])
+
+
+class ExternalSimulatorAllocationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.databasePath = Path(self.directory.name) / "explicit-external-allocation.db"
+        database.initializeDatabase(self.databasePath)
+        self.connection = database.connectDatabase(self.databasePath)
+        self.addCleanup(self.connection.close)
+        self.cashId = database.createAccount(self.connection, "Fictional Cash", "cash", openingBalance="90.00")
+        self.externalId = self.connection.execute("SELECT id FROM accounts WHERE systemIdentity = 'external'").fetchone()[0]
+        self.planId = database.createSimulatorPlan(self.connection, "Fictional allocation", "2026-10-17")
+
+    def workspace(self):
+        return database.simulatorWorkspace(self.connection, self.planId)["plan"]
+
+    def transfer(self, incoming, amount="50.00", cashId=None):
+        cashId = cashId or self.cashId
+        return database.saveSimulatorRow(self.connection, self.planId, None, "transfer", self.externalId if incoming else cashId, cashId if incoming else self.externalId, label="Fictional boundary transfer", amount=amount)
+
+    def testBothDirectionsSelectedAndUnselected(self):
+        for selected in [False, True]:
+            for incoming in [False, True]:
+                with self.subTest(selected=selected, incoming=incoming):
+                    with self.connection:
+                        self.connection.execute("DELETE FROM simulatorRows")
+                    if selected:
+                        database.saveSimulatorRow(self.connection, self.planId, None, "live", self.cashId)
+                    self.transfer(incoming)
+                    plan = self.workspace()
+                    totals = plan["totals"]
+                    expectedContribution = (-5000 if incoming else 5000) if selected else 0
+                    self.assertEqual(9000 if selected else 0, totals["startingCashCents"])
+                    self.assertEqual(expectedContribution, totals["transfersPaymentsCents"])
+                    self.assertEqual((9000 if selected else 0) - expectedContribution, totals["unallocatedMoneyCents"])
+                    self.assertEqual((0, 0), (totals["plannedIncomeCents"], totals["plannedSpendingCents"]))
+                    self.assertEqual([self.cashId], [row["id"] for row in plan["results"]])
+                    self.assertEqual(14000 if incoming else 4000, plan["results"][0]["projectedBalanceCents"])
+                    self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
+
+    def testChangingLivePoolAndRefreshPreservesTransfer(self):
+        rowId = self.transfer(True)
+        before = dict(self.connection.execute("SELECT * FROM simulatorRows WHERE id = ?", (rowId,)).fetchone())
+        self.assertEqual(0, self.workspace()["totals"]["unallocatedMoneyCents"])
+        liveId = database.saveSimulatorRow(self.connection, self.planId, None, "live", self.cashId)
+        self.assertEqual(14000, self.workspace()["totals"]["unallocatedMoneyCents"])
+        database.deleteSimulatorRow(self.connection, self.planId, liveId)
+        self.assertEqual(0, self.workspace()["totals"]["unallocatedMoneyCents"])
+        self.assertEqual(before, dict(self.connection.execute("SELECT * FROM simulatorRows WHERE id = ?", (rowId,)).fetchone()))
+        otherConnection = database.connectDatabase(self.databasePath)
+        try:
+            self.assertEqual(0, database.simulatorWorkspace(otherConnection, self.planId)["plan"]["totals"]["unallocatedMoneyCents"])
+        finally:
+            otherConnection.close()
+
+    def testMultipleCashAccountsOffsetAndNegativeAllocation(self):
+        secondCash = database.createAccount(self.connection, "Second fictional cash", "cash", openingBalance="10.00")
+        for cashId in [self.cashId, secondCash]:
+            database.saveSimulatorRow(self.connection, self.planId, None, "live", cashId)
+        self.transfer(True)
+        self.transfer(False, cashId=secondCash)
+        self.assertEqual(0, self.workspace()["totals"]["transfersPaymentsCents"])
+        self.transfer(False, "150.00")
+        self.assertEqual(-5000, self.workspace()["totals"]["unallocatedMoneyCents"])
+        with self.connection:
+            self.connection.execute("UPDATE accounts SET active = 0 WHERE id = ?", (secondCash,))
+        self.assertEqual(-5000, self.workspace()["totals"]["unallocatedMoneyCents"])
+
+    def testRecordedTransferIsZeroSumAndExcludedFromPlannedTotals(self):
+        database.saveSimulatorRow(self.connection, self.planId, None, "live", self.cashId)
+        rowId = self.transfer(True)
+        database.recordSimulatorTransfer(self.connection, self.planId, rowId, "2026-10-17", self.externalId, self.cashId, "50.00", "Fictional boundary transfer")
+        plan = self.workspace()
+        self.assertEqual((14000, 0, 14000), (plan["totals"]["startingCashCents"], plan["totals"]["transfersPaymentsCents"], plan["totals"]["unallocatedMoneyCents"]))
+        self.assertEqual((2, 0), tuple(self.connection.execute("SELECT COUNT(*), SUM(amountCents) FROM transactions").fetchone()))
+        self.assertEqual((0, 0), (database.dashboardReport(self.connection)["incomeCents"], database.dashboardReport(self.connection)["expensesCents"]))
+
+    def testExternalCreditPaymentRetainsAllocationDeduction(self):
+        creditId = database.createAccount(self.connection, "Fictional Card", "credit", "Credit Card", openingBalance="100.00")
+        database.saveSimulatorRow(self.connection, self.planId, None, "live", self.cashId)
+        database.saveSimulatorRow(self.connection, self.planId, None, "transfer", self.externalId, creditId, label="Fictional card payment", amount="50.00")
+        plan = self.workspace()
+        self.assertEqual((5000, 4000), (plan["totals"]["transfersPaymentsCents"], plan["totals"]["unallocatedMoneyCents"]))
+        self.assertEqual(-5000, next(row for row in plan["results"] if row["id"] == creditId)["projectedBalanceCents"])
+        self.assertNotIn(self.externalId, [row["id"] for row in plan["results"]])
