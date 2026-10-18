@@ -947,7 +947,7 @@ function renderDashboardAccounts(dashboard) {
       const row = creditRows.insertRow(); const accountCell = row.insertCell(); accountCell.textContent = account.name;
       const balance = row.insertCell(); balance.className = "amount";
       balance.textContent = account.balanceCents > 0 ? `${dollars(account.balanceCents)} credit` : dollars(-account.balanceCents);
-      if (account.accountSubtype === "Credit Card" && account.creditLimitCents) accountCell.append(" ", utilizationBadge(Math.max(0, -account.balanceCents), account.creditLimitCents, `${account.name} utilization`));
+      if (account.utilization) accountCell.append(" ", statusBadge(account.utilization));
     }
   }
   const banner=document.querySelector("#minimumBalanceBanner"),lines=document.querySelector("#minimumBalanceAlertLines");lines.replaceChildren();for(const alert of dashboard.minimumBalanceAlerts){const line=document.createElement("div");line.textContent=`${alert.accountName}: ${alert.label}`;lines.append(line);}banner.hidden=dashboard.minimumBalanceAlerts.length===0;
@@ -957,21 +957,13 @@ function renderDashboardAccounts(dashboard) {
     ? dollars(dashboard.totalCreditBalanceCents)
     : `${dollars(-dashboard.totalCreditBalanceCents)} credit`;
   const totalBadge = document.querySelector("#totalCreditUtilization");
-  document.querySelector("#totalCreditUtilizationRow").hidden = !dashboard.totalCreditLimitCents;
-  if (dashboard.totalCreditLimitCents) setUtilizationBadge(totalBadge, dashboard.totalRevolvingOwedCents, dashboard.totalCreditLimitCents, "Total revolving utilization");
-}
-
-function setUtilizationBadge(element, owedCents, limitCents, label) {
-  const value = owedCents * 100 / limitCents;
-  element.textContent = `${value.toFixed(2)}%`;
-  element.className = `utilizationBadge ${value < 30 ? "utilizationGreen" : value < 50 ? "utilizationYellow" : "utilizationRed"}`;
-  element.setAttribute("aria-label", `${label}: ${value.toFixed(2)}%`);
-}
-
-function utilizationBadge(owedCents, limitCents, label) {
-  const badge = document.createElement("span");
-  setUtilizationBadge(badge, owedCents, limitCents, label);
-  return badge;
+  document.querySelector("#totalCreditUtilizationRow").hidden = !dashboard.totalUtilization;
+  if (dashboard.totalUtilization) {
+    const badge = statusBadge(dashboard.totalUtilization);
+    totalBadge.textContent = badge.textContent;
+    totalBadge.className = badge.className;
+    totalBadge.setAttribute("aria-label", badge.getAttribute("aria-label"));
+  }
 }
 
 function renderDashboardCategories(dashboard) {

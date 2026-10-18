@@ -338,3 +338,55 @@ class ExternalSimulatorAllocationTests(unittest.TestCase):
         self.assertEqual((5000, 4000), (plan["totals"]["transfersPaymentsCents"], plan["totals"]["unallocatedMoneyCents"]))
         self.assertEqual(-5000, next(row for row in plan["results"] if row["id"] == creditId)["projectedBalanceCents"])
         self.assertNotIn(self.externalId, [row["id"] for row in plan["results"]])
+
+
+class UtilizationThresholdTests(unittest.TestCase):
+    def testExactThresholdsAndRoundedLabels(self):
+        for owedCents, expectedState, expectedLabel in [
+            (0, "green", "0.00%"), (-100, "green", "0.00%"),
+            (29995, "green", "30.00%"), (29996, "green", "30.00%"),
+            (30000, "yellow", "30.00%"), (30001, "yellow", "30.00%"),
+            (49996, "yellow", "50.00%"), (50000, "red", "50.00%"),
+            (50001, "red", "50.00%"), (125000, "red", "125.00%"),
+        ]:
+            with self.subTest(owedCents=owedCents):
+                status = database.utilizationStatus(owedCents, 100000, "Fictional utilization")
+                self.assertEqual((expectedState, expectedLabel), (status["state"], status["label"]))
+                self.assertEqual(f"Fictional utilization: {expectedLabel}", status["accessibleLabel"])
+        self.assertIsNone(database.utilizationStatus(100, None, "Unavailable"))
+        self.assertIsNone(database.utilizationStatus(0, 0, "Unavailable"))
+        self.assertEqual("green", database.utilizationStatus(29996000000000000000000, 100000000000000000000000, "Large exact")["state"])
+
+    def testSimulatorUsesSameExactClassificationAtProjectedBoundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            databasePath = Path(directory) / "explicit-utilization.db"
+            database.initializeDatabase(databasePath)
+            connection = database.connectDatabase(databasePath)
+            try:
+                planId = database.createSimulatorPlan(connection, "Fictional limits", "2026-10-17")
+                cardId = database.createAccount(connection, "Fictional Card", "credit", "Credit Card", openingBalance="299.96", creditLimit="1000.00", utilizationWarning="30.00")
+                database.saveSimulatorRow(connection, planId, None, "spend", cardId, label="Small fictional charge", amount="200.00")
+                result = database.simulatorWorkspace(connection, planId)["plan"]["results"][0]
+                self.assertEqual((-49996, "50.00%", "yellow"), (result["projectedBalanceCents"], result["projectedUtilization"]["label"], result["projectedUtilization"]["state"]))
+                expected = database.utilizationStatus(49996, 100000, "Fictional Card projected utilization")
+                self.assertEqual(expected, result["projectedUtilization"])
+                with connection:
+                    connection.execute("UPDATE simulatorRows SET amountCents = 20004 WHERE planId = ?", (planId,))
+                self.assertEqual("red", database.simulatorWorkspace(connection, planId)["plan"]["results"][0]["projectedUtilization"]["state"])
+                self.assertEqual(3000, connection.execute("SELECT utilizationWarningBasisPoints FROM accounts WHERE id = ?", (cardId,)).fetchone()[0])
+            finally:
+                connection.close()
+
+    def testIneligibleProjectedAccountsHaveNoBadge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            databasePath = Path(directory) / "explicit-ineligible-utilization.db"
+            database.initializeDatabase(databasePath)
+            connection = database.connectDatabase(databasePath)
+            try:
+                planId = database.createSimulatorPlan(connection, "Fictional ineligible", "2026-10-17")
+                for name, accountClass, subtype in [("Fictional Cash", "cash", None), ("Fictional Loan", "credit", "Personal Loan"), ("Fictional Other", "credit", "Other"), ("Fictional Unlimited", "credit", "Credit Card")]:
+                    accountId = database.createAccount(connection, name, accountClass, subtype)
+                    database.saveSimulatorRow(connection, planId, None, "spend", accountId, label="Fictional charge", amount="10.00")
+                self.assertTrue(all(row["projectedUtilization"] is None for row in database.simulatorWorkspace(connection, planId)["plan"]["results"]))
+            finally:
+                connection.close()

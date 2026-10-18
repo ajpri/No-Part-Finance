@@ -1155,6 +1155,22 @@ def cashMinimumValues(accountClass, minimumBalance, minimumCautionPercent):
     return minimumBalanceCents, cautionPercent
 
 
+def utilizationStatus(owedCents, limitCents, accessibleLabel):
+    if not limitCents:
+        return None
+    owedCents = max(0, owedCents)
+    basisPoints = (owedCents * 10000 + limitCents // 2) // limitCents
+    percentageLabel = f"{basisPoints // 100}.{basisPoints % 100:02d}%"
+    # Classify the exact ratio; display rounding must never change threshold state.
+    state = "green" if owedCents * 100 < limitCents * 30 else "yellow" if owedCents * 100 < limitCents * 50 else "red"
+    return {
+        "basisPoints": basisPoints,
+        "label": percentageLabel,
+        "accessibleLabel": f"{accessibleLabel}: {percentageLabel}",
+        "state": state,
+    }
+
+
 def minimumStatus(minimumBalanceCents, cautionPercent, balanceCents):
     if minimumBalanceCents is None:
         return None
@@ -2490,13 +2506,9 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
         result["minimumStatus"] = minimumStatus(account["minimumBalanceCents"], account["minimumCautionPercent"], projectedBalanceCents)
         if account["accountClass"] == "credit" and account["accountSubtype"] == "Credit Card" and account["creditLimitCents"]:
             owedCents = max(0, -projectedBalanceCents)
-            basisPoints = (owedCents * 10000 + account["creditLimitCents"] // 2) // account["creditLimitCents"]
-            result["projectedUtilization"] = {
-                "basisPoints": basisPoints,
-                "label": f"{basisPoints // 100}.{basisPoints % 100:02d}%",
-                "accessibleLabel": f"{account['name']} projected utilization: {basisPoints // 100}.{basisPoints % 100:02d}%",
-                "state": "green" if basisPoints < 3000 else "yellow" if basisPoints < 5000 else "red",
-            }
+            result["projectedUtilization"] = utilizationStatus(
+                owedCents, account["creditLimitCents"], f"{account['name']} projected utilization"
+            )
         else:
             result["projectedUtilization"] = None
         results.append(result)

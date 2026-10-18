@@ -72,6 +72,7 @@ from database import (
     updateTransfer,
     updateSimulatorPlan,
     utilizationWarningHelper,
+    utilizationStatus,
     createIntegrationSecret,
     updateIntegrationLabel,
     submitPendingTransaction,
@@ -448,6 +449,9 @@ def createApp(databasePathOverride=None):
         eligibleCards = [row for row in accountRows if row["accountClass"] == "credit" and row["accountSubtype"] == "Credit Card" and row["creditLimitCents"]]
         report["totalCreditLimitCents"] = sum(row["creditLimitCents"] for row in eligibleCards)
         report["totalRevolvingOwedCents"] = sum(max(0, -row["balanceCents"]) for row in eligibleCards)
+        report["totalUtilization"] = utilizationStatus(
+            report["totalRevolvingOwedCents"], report["totalCreditLimitCents"], "Total revolving utilization"
+        )
         recentRows = connection.execute(
             """
             SELECT t.*, a.name AS accountName, c.name AS categoryName, c.reportingRole AS categoryRole
@@ -470,6 +474,11 @@ def createApp(databasePathOverride=None):
         ).fetchall()
         report["accounts"] = [dict(row) for row in accountRows]
         for account in report["accounts"]:
+            account["utilization"] = (
+                utilizationStatus(max(0, -account["balanceCents"]), account["creditLimitCents"], f"{account['name']} utilization")
+                if account["accountClass"] == "credit" and account["accountSubtype"] == "Credit Card"
+                else None
+            )
             account["minimumStatus"] = minimumStatus(
                 account["minimumBalanceCents"], account["minimumCautionPercent"], account["balanceCents"]
             )

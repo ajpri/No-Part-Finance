@@ -286,6 +286,8 @@ Only a credit account with subtype `Credit Card` may have an optional credit lim
 
 For each active Credit Card with a limit, amount owed is `max(0, -internal balance)` and utilization is amount owed divided by credit limit. Display two decimal places with readable text and accessible labeling. Use compact solid badges: green below 30%, yellow from 30% through below 50%, and red at 50% or higher. Use dark text on green and yellow and white text on red with sufficient contrast. Keep the percentage and accessible label so color is not the only signal, and keep badges visually secondary to balances. Overpaid cards show 0.00%; utilization may exceed 100%.
 
+Python classifies individual Dashboard cards, total revolving utilization, and Simulator projected-card badges using the exact integer ratio before rounding the displayed percentage to two decimals: owedCents * 100 < limitCents * 30 is Green, below limitCents * 50 is Yellow, and otherwise Red. Thus 29.996% displays 30.00% with Green and 49.996% displays 50.00% with Yellow. The Dashboard returns account utilization and totalUtilization status objects containing state, display label, basis points, and accessible label; ineligible or missing-limit statuses are null. JavaScript renders backend states without recalculating ratios or badge thresholds. Account-specific Utilization Warning comparisons and helper rounding remain unchanged.
+
 Total revolving utilization divides eligible active cards' summed amount owed by their summed limits. Exclude cards without limits, Personal Loans, and Other credit accounts. This does not change the combined credit-account debt Total.
 
 ### Opening Balances

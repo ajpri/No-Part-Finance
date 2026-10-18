@@ -172,3 +172,40 @@ for(const legacy of [false,true]) {
 '''
         result = subprocess.run([nodePath, "-e", "const themeSource=" + json.dumps(javascript) + ";\n" + harness], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def testDashboardUsesBackendUtilizationStateAndLabel(self):
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("JavaScript runtime unavailable")
+        javascript = (projectRoot / "app.js").read_text(encoding="utf-8")
+        renderFunction = "function renderDashboardAccounts(dashboard)" + javascript.split(
+            "function renderDashboardAccounts(dashboard)", 1
+        )[1].split("function renderDashboardCategories", 1)[0]
+        badgeFunction = next(line for line in javascript.splitlines() if line.startswith("function statusBadge("))
+        harness = r'''
+const assert = require("node:assert/strict");
+function element(){return {children:[],attributes:{},replaceChildren(){this.children=[];},append(...children){this.children.push(...children);},setAttribute(name,value){this.attributes[name]=value;},getAttribute(name){return this.attributes[name];},insertRow(){const row=element();this.children.push(row);row.insertCell=()=>{const cell=element();row.children.push(cell);return cell;};return row;}};}
+const controls = {};
+const document = {querySelector(selector){return controls[selector] ||= element();},createElement(){return element();}};
+function dollars(cents){return `$${(cents/100).toFixed(2)}`;}
+const status = (label,state)=>({label,state,accessibleLabel:`Backend ${state} utilization: ${label}`});
+const dashboard = {
+ accounts:[{id:1,name:"Near boundary",accountClass:"credit",accountSubtype:"Credit Card",creditLimitCents:2500000,balanceCents:-749900,utilization:status("30.00%","green")}],
+ minimumBalanceAlerts:[],creditUtilizationAlerts:[],totalCreditBalanceCents:749900,
+ totalUtilization:status("50.00%","yellow")
+};
+renderDashboardAccounts(dashboard);
+const accountBadge=controls["#creditAccountRows"].children[0].children[0].children[1];
+assert.equal(accountBadge.textContent,"30.00%");assert.equal(accountBadge.className,"utilizationBadge utilizationGreen");
+assert.equal(accountBadge.getAttribute("aria-label"),"Backend green utilization: 30.00%");
+assert.equal(controls["#totalCreditUtilization"].textContent,"50.00%");
+assert.equal(controls["#totalCreditUtilization"].className,"utilizationBadge utilizationYellow");
+assert.equal(controls["#totalCreditUtilization"].getAttribute("aria-label"),"Backend yellow utilization: 50.00%");
+assert.equal(controls["#totalCreditUtilizationRow"].hidden,false);
+dashboard.accounts[0].utilization=null;dashboard.totalUtilization=null;
+renderDashboardAccounts(dashboard);
+assert.equal(controls["#creditAccountRows"].children[0].children[0].children.length,0);
+assert.equal(controls["#totalCreditUtilizationRow"].hidden,true);
+'''
+        result = subprocess.run([nodePath, "-e", badgeFunction + "\n" + renderFunction + harness], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)

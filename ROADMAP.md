@@ -51,24 +51,6 @@ Explicit non-goals: offline support, service workers, offline snapshots, Cache A
 
 Implementation status: online-only manifest, public asset routes, shared theme metadata, package inclusion, and installation guidance are implemented and tested with synthetic fixtures. Browser smoke checks verified existing sign-in, an online save, Light/Dark theme-color changes, logout, and theme persistence. The milestone remains open for final icon artwork/exports, PNG dimension/composition validation, and actual installation/launch verification in desktop Chrome and on a real iPhone. Missing icons intentionally return 404 with user approval; no placeholder PNGs are shipped.
 
-### Dashboard and Simulator Utilization Threshold Rounding
-
-Purpose: make Dashboard and Simulator Credit Card utilization badges classify the same ratio consistently. Public Release 5 Part 2 found projected utilization rounded before classification in Simulator, while Dashboard classified the exact ratio. An exact 29.996% displayed as 30.00% with different badge colors across the views.
-
-Approved user-visible behavior: classify badges using the exact ratio, then round only the displayed percentage to two decimal places. Green is below 30%; Yellow is at least 30% and below 50%; Red is at least 50%. A ratio just below a boundary may therefore display 30.00% with Green or 50.00% with Yellow. Retain concise visible percentages and descriptive accessible labels; do not add another displayed precision, tooltip, or explanatory control.
-
-Financial and data invariants: Python owns badge eligibility and state for individual Dashboard cards, Dashboard total revolving utilization, and Simulator projected cards. Derive amount owed as max(0, -internalBalanceCents), using current balances on Dashboard and final projected balances in Simulator. Compare integer amounts against limits without floating point or rounded display values: below 30% means amountOwedCents * 100 < creditLimitCents * 30; below 50% means amountOwedCents * 100 < creditLimitCents * 50. Dashboard total uses the existing sums of eligible card amounts owed and limits. Preserve all eligibility, total inclusion, two-decimal percentage formatting, account balances, credit limits, ledger signs, projections, and reporting. The frontend renders the authoritative state instead of independently classifying the displayed percentage.
-
-Account-specific Utilization Warning alerts retain their existing exact integer/basis-point comparisons and helper rounding; this item does not change those thresholds or their configuration.
-
-Meaningful edge cases: exact values below, at, and above 30% and 50%; ratios that display-round across either boundary; zero debt, overpayments, utilization above 100%, missing limits, ineligible subtypes, total revolving utilization, and differences between live and projected debt. Cards absent from Simulator Results remain absent; there is no projected total-utilization badge.
-
-Acceptance criteria: verify exact-ratio classification at both boundaries and near-boundary ratios such as 29.996% and 49.996%, while retaining two-decimal display values. Identical eligible current/projected amounts and limits yield identical states in Dashboard and Simulator. Verify the Dashboard aggregate ratio from summed eligible amounts/limits, frontend use of backend-provided states, readable narrow-screen badges, accessible labeling, unchanged account-specific warning behavior, overpayment handling, and utilization above 100%. Use synthetic fixtures, explicit temporary database and backup paths, and the test database guard; never test against real finance.db.
-
-Explicit non-goals: configurable badge thresholds, more display precision, new warnings or tooltips, total projected utilization, schema changes, changes to account-specific warning comparisons, financial calculations beyond badge classification, or unrelated presentation work.
-
-Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
-
 ### Dashboard Response Fields Required by the OpenAPI Contract
 
 Purpose: make Dashboard JSON responses satisfy their published OpenAPI contract so integrations can interpret Account eligibility and displayed events without guessing. Public Release 5 Part 3 found required ordinaryEligible and transferEligible absent from Dashboard Account records and required combinedTransfer absent from pinned quickUpdates records.
