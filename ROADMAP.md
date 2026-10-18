@@ -8,9 +8,60 @@ Only Version Next is approved implementation scope. Implement one named Version 
 
 ## Version Next
 
-No implementation milestone is currently approved.
+### Progressive Web App Support (Online Only)
 
-## Version Soon
+Purpose: make No Part Finance installable wherever supported while preserving the existing online application. Primary verification targets are desktop Chrome and iPhone Safari. Use standard web capabilities for broad compatibility; installation behavior depends on the browser and operating system.
+
+Approved metadata and launch behavior:
+
+- Full name, short name, and iOS home-screen name: `No Part Finance`. Platforms may truncate the displayed label.
+- Description: `A simple, self-hosted personal finance app for tracking accounts, transactions, and spending.` The GitHub repository description has already been updated to this wording.
+- Display mode: `standalone`.
+- Start URL, scope, and stable manifest identity: `/`, without a hard-coded installation domain.
+- Preserve the existing Dashboard launch flow, including Sign In or Owner-configuration handling when required.
+- Manifest launch background: `#202124`. This is a browser launch hint, not a guarantee about every platform's launch screen; preserve the application's light-theme background.
+- Manifest theme-color fallback: `#202124`. Supported browser/system UI theme color follows the existing effective application theme: `#FFFFFF` for Light and `#202124` for Dark. Honor saved Light/Dark preferences, System changes, and the existing browser-storage fallback and pre-stylesheet theme initialization, including authentication pages.
+
+Implementation scope: add a web app manifest, page metadata, and minimal explicit public static-asset serving. Manifest and icons must be available before sign-in, with appropriate content types and no private information. Expose only intended public files, never arbitrary repository or runtime files. Preserve search-indexing restrictions. Include the assets in portable application packages under existing package permissions. Use native browser installation controls and document desktop Chrome installation and iPhone Safari Add to Home Screen; no custom install UI is required. The approved deployment is HTTPS at the domain root, with HTTPS handled by the existing reverse proxy. Preserve local development behavior and document applicable browser installation limits.
+
+Confirmed asset paths (filenames are final):
+
+| Path | Dimensions | Purpose |
+| --- | --- | --- |
+| `assets/icon-192.png` | 192 × 192 | Standard manifest icon |
+| `assets/icon-512.png` | 512 × 512 | Standard manifest icon |
+| `assets/icon-maskable-512.png` | 512 × 512 | Separate maskable icon with an opaque edge-to-edge background |
+| `assets/apple-touch-icon.png` | 180 × 180 | iPhone/iPad home-screen icon |
+
+Artwork is intentionally pending. Keep `assets/README.md` as the placeholder and handoff instructions; do not invent artwork or generate placeholder PNGs. A square SVG or high-quality 1024 × 1024 PNG source may be supplied later. Essential maskable artwork stays inside the centered circle with diameter 80% of the image width; do not bake rounded corners into artwork. The user explicitly approved wiring the confirmed icon URLs while artwork is pending; these URLs may return 404 until the artist supplies the exports. Implement metadata and serving now without placeholder images. Icon-dependent acceptance and complete installability remain pending supplied artwork and device verification.
+
+Financial and security invariants: preserve Python authority, integer-cent amounts, balances, transfer atomicity, history, reporting, Owner/Auditor permissions, sessions and invalidation, CSRF protection, and trusted self-hosted hosting assumptions. Installation grants no additional access and changes no ledger or planning state. Add no schema or financial state. Public metadata and assets must disclose no financial records, credentials, configuration secrets, or session values.
+
+Acceptance criteria:
+
+- Verify manifest JSON, content type, identity, names, description, standalone display, root start URL/scope, colors, and page links on relevant application and authentication pages. Verify only intended public files are accessible before sign-in.
+- After artwork is supplied, verify all four exact asset paths, actual PNG dimensions and content types, standard versus maskable purposes, iOS touch-icon metadata, maskable composition, and portable-package inclusion.
+- Verify theme-color initialization and updates for Light, Dark, and System, including operating-system changes, refresh, Sign In, Owner configuration, and unavailable browser storage, without changing existing theme behavior.
+- Verify installation and launch in desktop Chrome and on a real iPhone through Safari: name/icon, standalone presentation, Dashboard launch, authentication when needed, logout, and ordinary navigation/forms. Record browser/device versions and any unavailable manual checks; never claim unperformed device verification. Ordinary browser access remains available where installation is unsupported.
+- Verify online reads and an authorized save retain existing backend validation, authorization, and CSRF protection. Disconnected launch or requests use ordinary browser/network failure behavior, with no cached Dashboard snapshot, queued writes, or automatic replay. Introduce no service worker or PWA-specific financial cache.
+- Run focused metadata/static-route/package and theme checks plus relevant existing regression tests. Application tests use synthetic fixtures, explicit temporary database and backup paths, and import `tests` before application modules to enable the test database guard. Never read, initialize, migrate, or write real `finance.db` during verification.
+- Update maintained installation documentation. Merge enduring behavior into canonical SPEC.md sections only after implementation and verification. Missing artwork or device verification remains explicitly unresolved rather than being marked complete.
+
+Explicit non-goals: offline support, service workers, offline snapshots, Cache API storage, write queues/retries, push notifications, background sync, app stores, custom splash images, custom install banners/buttons, new hosting or certificate management, subpath deployment support, new dependencies/build tooling, or unrelated redesign.
+
+Outstanding input: final icon artwork/exports. All other product decisions above are approved. This entry is approved Version Next scope; this planning change does not implement it.
+
+### Set Application Version to 26.10.18
+
+Purpose: set the authoritative application version to the exact string `26.10.18` as a separate release-version milestone, recorded in one logical commit independent of feature commits. Completed feature commits and this version commit may be pushed upstream together.
+
+Approved scope: update the authoritative version and any maintained current-version references or test expectations so Settings, version-bearing portable-package filenames and contents, and command-line version output consistently use `26.10.18`. Preserve the existing shared version source rather than adding independent version constants. Update SPEC.md's implemented version after verification and remove only this completed milestone. Preserve historical release identifiers and the existing grouped `26.10` Release History presentation; do not invent release notes or add a separate patch-version history entry.
+
+Acceptance criteria: verify the exact version in Settings/API metadata, applicable command-line output, and both portable-package variants and their version-bearing contents/filenames. Update and run relevant existing version/package tests with synthetic fixtures and explicit temporary database and backup paths, importing `tests` before application modules to enable the test database guard. Never read, initialize, migrate, or write real `finance.db` during verification. Confirm remaining old-version references are intentionally historical rather than stale current-version values. Keep all version changes, corresponding test/documentation changes, and this milestone's completion update in one commit.
+
+Explicit non-goals: implementing other Version Next milestones, changing database schema versions, changing financial or authentication behavior, redesigning Release History, or introducing automatic versioning/release tooling. This is a planned milestone, not an instruction to change the application version immediately.
+
+Unresolved decisions: none for this scope. Approved for Version Next implementation when explicitly requested.
 
 ### Historical Category Activity When a Category Becomes a Rollup
 
@@ -24,13 +75,15 @@ Financial and data invariants: enforce the zero-reference check authoritatively 
 
 Meaningful edge cases: a purchase and full refund still constitute transaction history; activity outside the selected reporting period still blocks conversion; archived historical references still count. Both creating a child and changing an existing child's parent require the same check. A rejected hierarchy change leaves all configuration and history unchanged. Concurrent transaction creation and hierarchy changes must not allow direct activity to appear on a newly established rollup.
 
-Acceptance criteria: verify that a new empty parent and an existing unused compatible category can become rollups; categories with any direct transaction references cannot, including net-zero, refunded, old, and archived activity. Verify both child creation and reparenting, clear correction guidance, unchanged state on rejection, and concurrent-write protection. Grouping an existing category beneath an empty parent preserves its transactions and IDs and produces correct child-derived rollup amounts, percentages, per-day values, refunds, archived activity, and Hide zeros behavior. Use explicit temporary database and backup paths with the test database guard; never test against real finance.db. Cover the unresolved cases below after their behavior is decided.
+Acceptance criteria: verify that a new empty parent and an existing unused compatible category can become rollups; categories with any direct transaction references cannot, including net-zero, refunded, old, and archived activity. Verify both child creation and reparenting, clear correction guidance, unchanged state on rejection, and concurrent-write protection. Grouping an existing category beneath an empty parent preserves its transactions and IDs and produces correct child-derived rollup amounts, percentages, per-day values, refunds, archived activity, and Hide zeros behavior. Use explicit temporary database and backup paths with the test database guard; never test against real finance.db. Verify that Template and Flexible Category Budget references block conversion without changing or clearing those references. Verify that an existing rollup with direct transaction references produces a clear category-identifying reporting error instead of incomplete rollup figures. Verify that deliberate correction through existing transaction editing preserves normal financial validation and that rollup reporting resumes after all direct references are removed. Include old, archived, and net-zero direct activity; the check is not limited to the selected reporting period. Unaffected views remain usable.
 
 Explicit non-goals: direct-parent activity reporting rows, selectable rollups, deeper hierarchy, automatic recategorization or configuration repair, new category types, stored rollup totals, and unrelated reporting changes.
 
-Unresolved decisions: determine how to handle an unused prospective parent referenced by Templates or Flexible Category Budgets, without silently clearing or remapping references. Determine safe handling of any existing rollup that already has direct historical transactions; do not hide, rewrite, or automatically move that history, and do not assume none exist. Resolve these cases before implementing affected behavior.
+Approved reference protection: block conversion of a prospective parent referenced by any Template or Flexible Category Budget, including inactive or archived references where present. Explain that the user must manually change or remove those references before converting the category. Enforce the checks in the same backend transaction as the hierarchy change; never silently clear or remap references.
 
-This item remains Version Soon planning only; it is not approved implementation scope.
+Approved existing-rollup handling: if an existing rollup has any directly assigned transactions, require deliberate manual correction through existing transaction editing before reporting that rollup normally. Affected reporting must show a clear error identifying the category instead of silently omitting direct activity or presenting incomplete rollup figures as valid. Do not display a normal rollup breakdown until its direct references are removed, including references outside the selected period or with net-zero amounts. Keep transaction history and existing editing available so the user can intentionally select valid categories. Never automatically move, recategorize, delete, or rewrite transactions, and do not add a repair wizard or Direct activity row. Preserve unaffected views and existing backend validation; once no direct transaction references remain, resume ordinary child-derived reporting.
+
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
 ### External Transfers in Simulator Allocation
 
@@ -48,7 +101,7 @@ Acceptance criteria: verify explicit expected projected balances, signed transfe
 
 Explicit non-goals: new allocation pools or controls, automatically selecting Live balance Accounts, treating External transfers as Income/Expenses, exposing External balances, changing the summary label, new ledger operations, stored totals, automatic recording, matching, or unrelated transfer rules.
 
-Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
 ### Dashboard and Simulator Utilization Threshold Rounding
 
@@ -66,7 +119,7 @@ Acceptance criteria: verify exact-ratio classification at both boundaries and ne
 
 Explicit non-goals: configurable badge thresholds, more display precision, new warnings or tooltips, total projected utilization, schema changes, changes to account-specific warning comparisons, financial calculations beyond badge classification, or unrelated presentation work.
 
-Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
 ### Other Credit Transfer and Payment Presentation
 
@@ -86,7 +139,7 @@ Acceptance criteria: verify Make Payment and the destination payment note for ev
 
 Explicit non-goals: a separate payment transaction or Simulator row type, payoff-helper expansion, new debt accounting, changes to Payoff or Budget destination eligibility, automatic rewriting of saved descriptions, name normalization, schema changes, or unrelated transfer behavior.
 
-Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
 ### Simulator Transfer Summary Label
 
@@ -102,7 +155,7 @@ Acceptance criteria: verify the exact label and five-value order in visible and 
 
 Explicit non-goals: changing allocation math, API field names, transaction-history summary labels, transfer types, stored values, new controls, tooltips, or unrelated presentation.
 
-Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
 ### Dashboard Response Fields Required by the OpenAPI Contract
 
@@ -122,7 +175,7 @@ Acceptance criteria: validate populated Dashboard Account, recent-event, and pin
 
 Explicit non-goals: new eligibility rules, fields granting write authority, direct integration ledger writes, changing Dashboard collections or financial calculations, exposing External balances, new API operations, schema changes, credential disclosure, or unrelated contract cleanup.
 
-Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
 ### Integration Oversized-Request Error Representation
 
@@ -140,7 +193,7 @@ Acceptance criteria: an authenticated submission above the configured limit retu
 
 Explicit non-goals: changing the size limit, accepting larger submissions, automatic retries, new error frameworks or envelopes, broad HTTP exception rewrites, new API operations, schema changes, or unrelated browser error handling.
 
-Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
 ### Integration History Filter ID Validation
 
@@ -158,7 +211,7 @@ Acceptance criteria: verify explicit expected 200 or 400 outcomes and the existi
 
 Explicit non-goals: new history filters, lookup endpoints, new not-found errors, automatic correction/remapping, changed proposal ID rules, changes to browser filter URLs, financial calculations, schema changes, or unrelated query validation.
 
-Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
 ### Preserve the Database When a Pre-Upgrade Backup Fails
 
@@ -178,15 +231,19 @@ Acceptance criteria: isolated fault-injection tests cover each backup creation/c
 
 Explicit non-goals: new schema migrations, an updater, scheduled/automatic backups, a restore wizard, backup-retention features, automatic recovery retries, deployment changes, unrelated refactoring, or changes to financial behavior.
 
-Unresolved decisions: none for this scope. Approved for Version Soon planning only; not promoted to Version Next or approved for implementation.
+Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
+
+## Version Soon
+
+No milestones are currently listed.
 
 ## Version Later
 
 These ideas preserve product direction but are not approved implementation scope. Promote and fully design one before implementation.
 
-### Progressive Web App
+### Read-Only Offline Dashboard (Separate from PWA Installation)
 
-Consider an installable manifest and a read-only offline Dashboard snapshot. Offline mode would cache the latest balances, reporting state, and seven days of recent events on the current browser, clearly label stale data, disable writes and unavailable features, and recover only after a real API refresh. It must not queue writes or create server-side state. HTTPS remains the reverse proxy's responsibility unless separately designed.
+Deferred and not approved as part of online-only PWA support. Consider a read-only offline Dashboard snapshot. Offline mode would cache the latest balances, reporting state, and seven days of recent events on the current browser, clearly label stale data, disable writes and unavailable features, and recover only after a real API refresh. It must not queue writes or create server-side state. HTTPS remains the reverse proxy's responsibility unless separately designed.
 
 ### Automatic Backups and Production Server
 
