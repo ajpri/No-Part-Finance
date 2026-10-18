@@ -117,3 +117,67 @@ class DashboardUtilizationTests(unittest.TestCase):
         self.assertEqual(401, signedOut.get("/api/integration/read/dashboard").status_code)
         self.assertEqual(401, signedOut.get("/api/integration/read/simulator").status_code)
         self.assertEqual(before, self.snapshot())
+
+    def testDashboardRequiredContractFieldsAndEventGrouping(self):
+        import json
+        contract = json.loads((Path(__file__).resolve().parents[1] / "openapi.json").read_text())
+        dashboardShape = contract["paths"]["/api/integration/read/dashboard"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        cashId = ledger.createAccount(self.connection, "Example Cash", "cash", openingBalance="100.00")
+        archivedId = ledger.createAccount(self.connection, "Archived Cash", "cash")
+        with self.connection:
+            self.connection.execute("UPDATE accounts SET active = 0 WHERE id = ?", (archivedId,))
+        expenseId = ledger.createCategory(self.connection, "Example Expense")
+        incomeId = ledger.createCategory(self.connection, "Example Income", reportingRole="income")
+        pinnedIds = []
+        for categoryId, amount in ((expenseId, "10.00"), (expenseId, "-2.00"), (incomeId, "20.00"), (incomeId, "-3.00")):
+            pinnedIds.append(ledger.createTransaction(self.connection, cashId, "2026-10-01", "Example pinned", categoryId, amount, True))
+        ordinaryId = ledger.createTransaction(self.connection, cashId, "2026-10-01", "Example ordinary", expenseId, "4.00")
+        transferId = ledger.createTransfer(self.connection, "2026-10-01", cashId, self.cardId, "5.00", "Example payment")
+        with self.connection:
+            invalidId = self.connection.execute("INSERT INTO transactions (accountId,date,description,amountCents,transferId) VALUES (?, '2026-10-01', 'Invalid linked fixture', -123, 'invalid-fixture')", (cashId,)).lastrowid
+        before = self.snapshot()
+        reference = None
+        for client, path, headers in ((self.owner, "/api/dashboard", {}), (self.auditor, "/api/dashboard", {}), (self.agent, "/api/integration/read/dashboard", self.headers)):
+            response = client.get(path, headers=headers)
+            self.assertEqual(200, response.status_code)
+            report = response.get_json()
+            for collection in ("accounts", "recentTransactions", "quickUpdates"):
+                shape = dashboardShape["properties"][collection]["items"]
+                for item in report[collection]:
+                    self.assertTrue(set(shape["required"]) <= item.keys())
+                    for field in shape["required"]:
+                        if shape["properties"][field].get("type") == "boolean":
+                            self.assertIs(type(item[field]), bool, field)
+            self.assertEqual({cashId, self.cardId}, {account["id"] for account in report["accounts"]})
+            self.assertTrue(all(account["ordinaryEligible"] and account["transferEligible"] for account in report["accounts"]))
+            self.assertEqual(set(pinnedIds), {event["id"] for event in report["quickUpdates"]})
+            self.assertTrue(all(event["combinedTransfer"] is False for event in report["quickUpdates"]))
+            self.assertEqual([1000, -200, 2000, -300], [next(item["displayAmountCents"] for item in report["quickUpdates"] if item["id"] == pinnedId) for pinnedId in pinnedIds])
+            self.assertTrue(next(event for event in report["recentTransactions"] if event["transferId"] == transferId)["combinedTransfer"])
+            self.assertFalse(next(event for event in report["recentTransactions"] if event["id"] == ordinaryId)["combinedTransfer"])
+            invalidEvent = next(event for event in report["recentTransactions"] if event["id"] == invalidId)
+            self.assertFalse(invalidEvent["combinedTransfer"])
+            self.assertEqual(-123, invalidEvent["displayAmountCents"])
+            self.assertNotIn(self.secret, response.get_data(as_text=True))
+            self.assertNotIn("passwordHash", response.get_data(as_text=True))
+            self.assertEqual(reference or report, report)
+            reference = report
+        catalog = self.agent.get("/api/integration/read/accounts", headers=self.headers).get_json()
+        archived = next(account for account in catalog if account["id"] == archivedId)
+        external = next(account for account in catalog if account["accountClass"] == "system")
+        self.assertFalse(archived["ordinaryEligible"])
+        self.assertFalse(archived["transferEligible"])
+        self.assertFalse(external["ordinaryEligible"])
+        self.assertTrue(external["transferEligible"])
+        self.assertNotIn("balanceCents", external)
+        self.assertEqual(before, self.snapshot())
+
+    def testDashboardEmptyCollectionsRemainReadOnly(self):
+        with self.connection:
+            self.connection.execute("DELETE FROM accounts WHERE id = ?", (self.cardId,))
+        before = self.snapshot()
+        for client, path, headers in ((self.owner, "/api/dashboard", {}), (self.auditor, "/api/dashboard", {}), (self.agent, "/api/integration/read/dashboard", self.headers)):
+            report = client.get(path, headers=headers).get_json()
+            for collection in ("accounts", "recentTransactions", "quickUpdates"):
+                self.assertEqual([], report[collection])
+        self.assertEqual(before, self.snapshot())

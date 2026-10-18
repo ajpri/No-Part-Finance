@@ -142,6 +142,13 @@ def combinedRecentEvents(rows, limit=5):
     return events
 
 
+def accountEligibility(account):
+    return {
+        "ordinaryEligible": bool(account["active"] and account["accountClass"] != "system"),
+        "transferEligible": bool(account["active"]),
+    }
+
+
 def createApp(databasePathOverride=None):
     app = Flask(__name__)
     activeDatabasePath = Path(databasePathOverride or databasePath)
@@ -474,6 +481,7 @@ def createApp(databasePathOverride=None):
         ).fetchall()
         report["accounts"] = [dict(row) for row in accountRows]
         for account in report["accounts"]:
+            account.update(accountEligibility(account))
             account["utilization"] = (
                 utilizationStatus(max(0, -account["balanceCents"]), account["creditLimitCents"], f"{account['name']} utilization")
                 if account["accountClass"] == "credit" and account["accountSubtype"] == "Credit Card"
@@ -501,14 +509,7 @@ def createApp(databasePathOverride=None):
                     "warningLabel": f"{warningLabel}%",
                 })
         report["recentTransactions"] = combinedRecentEvents(recentRows)
-        report["quickUpdates"] = []
-        for row in quickUpdateRows:
-            item = dict(row)
-            item["displayAmountCents"] = (
-                row["amountCents"] if not row["categoryName"] or row["categoryRole"] == "income"
-                else -row["amountCents"]
-            )
-            report["quickUpdates"].append(item)
+        report["quickUpdates"] = combinedRecentEvents(quickUpdateRows, limit=len(quickUpdateRows))
         return jsonify(report)
 
     @app.get("/api/report-periods")
@@ -1419,8 +1420,7 @@ def createApp(databasePathOverride=None):
         result = app.make_response(readView()).get_json()
         if resource == "accounts":
             for account in result:
-                account["ordinaryEligible"] = bool(account["active"] and account["accountClass"] != "system")
-                account["transferEligible"] = bool(account["active"])
+                account.update(accountEligibility(account))
                 if account["accountClass"] == "system":
                     account.pop("balanceCents", None)
                     account.pop("balanceOffsetCents", None)

@@ -51,26 +51,6 @@ Explicit non-goals: offline support, service workers, offline snapshots, Cache A
 
 Implementation status: online-only manifest, public asset routes, shared theme metadata, package inclusion, and installation guidance are implemented and tested with synthetic fixtures. Browser smoke checks verified existing sign-in, an online save, Light/Dark theme-color changes, logout, and theme persistence. The milestone remains open for final icon artwork/exports, PNG dimension/composition validation, and actual installation/launch verification in desktop Chrome and on a real iPhone. Missing icons intentionally return 404 with user approval; no placeholder PNGs are shipped.
 
-### Dashboard Response Fields Required by the OpenAPI Contract
-
-Purpose: make Dashboard JSON responses satisfy their published OpenAPI contract so integrations can interpret Account eligibility and displayed events without guessing. Public Release 5 Part 3 found required ordinaryEligible and transferEligible absent from Dashboard Account records and required combinedTransfer absent from pinned quickUpdates records.
-
-Approved behavior: return the promised Boolean fields rather than remove or weaken their required status in the published contract. Dashboard Account records expose ordinaryEligible and transferEligible from the existing authoritative Account eligibility rules. Active/archive status and System boundaries remain authoritative: External is ineligible for ordinary entry and eligible only under existing transfer rules wherever an applicable response includes it. Do not add External to Dashboard financial Account lists to expose these fields.
-
-Dashboard recent-event and pinned-event records expose combinedTransfer according to existing event grouping. A valid combined transfer event has true; an ordinary pinned transaction has false. Visible invalid linked rows remain underlying rows rather than being falsely marked as combined events. Preserve existing response collections, event grouping, IDs, fields, and eligibility semantics; reuse established backend metadata rather than add a second eligibility calculation.
-
-User-visible behavior: integrations receive the documented yes/no answers consistently. The browser Dashboard retains its existing appearance and workflows. These fields describe existing eligibility and grouping; they do not grant permission or replace backend write validation.
-
-Financial and data invariants: preserve balances, integer-cent ledger and display signs, reports, transfer zero-sum integrity, Account eligibility, active/archive behavior, External exclusions, recent/pinned inclusion and ordering, and existing role permissions. Financial JSON never exposes integration secrets, user password hashes, session tokens, or other credentials. Reading Dashboard performs no database or planning-state mutation.
-
-Meaningful edge cases: populated and empty responses; active Cash and Credit Accounts; archived Accounts where an existing response legitimately includes them; System Account boundaries; ordinary Income/Expense/refund/reversal events; valid combined transfers/payments; invalid linked rows; ordinary pinned events; Owner, Auditor, and Bearer read access under their existing permissions. Missing optional configuration must not omit these required Boolean fields.
-
-Acceptance criteria: validate populated Dashboard Account, recent-event, and pinned quickUpdates records against the published required fields and Boolean types, including ordinary events and valid combined transfers. Verify values agree with existing authoritative eligibility/grouping rules and that invalid linked rows remain visible without combined classification. Verify empty responses, External exclusions, unchanged financial values and browser presentation, read-only behavior, permissions, and credential isolation. Test the integration Dashboard response against the approved OpenAPI contract and applicable shared Dashboard response paths using synthetic fixtures, explicit temporary database and backup paths, and the test database guard; never test against real finance.db. Align maintained public documentation after implementation without weakening the contract.
-
-Explicit non-goals: new eligibility rules, fields granting write authority, direct integration ledger writes, changing Dashboard collections or financial calculations, exposing External balances, new API operations, schema changes, credential disclosure, or unrelated contract cleanup.
-
-Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
-
 ## Version Soon
 
 No milestones are currently listed.
