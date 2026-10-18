@@ -157,24 +157,6 @@ Explicit non-goals: new eligibility rules, fields granting write authority, dire
 
 Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
-### Integration History Filter ID Validation
-
-Purpose: make integration history Account and Category filter validation match the published positive-integer ID contract. Public Release 5 Part 3 found zero and negative IDs accepted as successful empty results while nonnumeric IDs were rejected.
-
-Approved behavior: an omitted accountId or categoryId applies no corresponding filter. A supplied ID must be an integer of at least 1. Zero, negative, nonnumeric, blank, and other malformed supplied values return the existing JSON validation error with HTTP 400 rather than silently clearing the filter or producing a successful empty result. A syntactically valid positive ID with no matching record returns HTTP 200 with an empty result using the existing history envelope; no new not-found error or lookup workflow is added. Apply the same rule to both filters, including when other filters are present.
-
-User-visible behavior: integrations can distinguish an invalid filter request from a valid search that finds nothing. Archived Account and Category IDs remain valid historical filters under existing rules. Preserve existing integer query syntax; do not coerce fractional values, remap names, or guess intended IDs.
-
-Financial and data invariants: filtering reads existing history and writes nothing. Preserve matching either side of a valid combined transfer for Account filters, Category-filter exclusion of transfers, invalid linked-row visibility, all other filter semantics, sorting, pagination, total and nextOffset, optional summary over all matching events, integer-cent signs, financial totals, and existing read permissions. Positive unavailable IDs never silently broaden results. Do not change proposal/submission ID validation or browser stable-ID URL behavior.
-
-Meaningful edge cases: omitted, positive existing, positive unavailable, zero, negative, blank, nonnumeric, and fractional values for each filter; active and archived references; simultaneous Account and Category filters; combination with period, type, description, amount, and pagination; either transfer side; empty matching history and optional summary.
-
-Acceptance criteria: verify explicit expected 200 or 400 outcomes and the existing JSON shapes for all supplied/omitted cases. Existing and archived positive IDs retain correct matching; unavailable positive IDs yield an empty successful envelope with zero matching total, no next page, and normal zero semantic summary when requested. Invalid IDs fail without partial or broadened results. Verify transfer-side matching, Category transfer exclusion, pagination, totals, optional summary, permissions, and read-only behavior remain unchanged. Align maintained public documentation and OpenAPI with tested behavior after implementation. Use synthetic fixtures, explicit temporary database and backup paths, and the in-process test database guard; never access real finance.db.
-
-Explicit non-goals: new history filters, lookup endpoints, new not-found errors, automatic correction/remapping, changed proposal ID rules, changes to browser filter URLs, financial calculations, schema changes, or unrelated query validation.
-
-Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
-
 ## Version Soon
 
 No milestones are currently listed.

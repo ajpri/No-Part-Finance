@@ -775,6 +775,7 @@
             "name": "accountId",
             "in": "query",
             "required": false,
+            "description": "Optional positive integer Account ID; archived IDs are valid. Blank, zero, negative and malformed values return 400. A valid positive ID with no matches returns an empty successful history envelope.",
             "schema": {
               "type": "integer",
               "minimum": 1
@@ -785,6 +786,7 @@
             "name": "categoryId",
             "in": "query",
             "required": false,
+            "description": "Optional positive integer Category ID; archived IDs are valid. Blank, zero, negative and malformed values return 400. A valid positive ID with no matches returns an empty successful history envelope.",
             "schema": {
               "type": "integer",
               "minimum": 1

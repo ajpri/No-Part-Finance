@@ -2029,6 +2029,8 @@ The read endpoints are `/api/integration/read/accounts`, `/categories`, `/templa
 
 Catalogue, settings, and report-period reads accept no filters. Dashboard accepts `period`, `startDate`, and `endDate`; Budget accepts `date`; Simulator accepts `plan`. Transaction history accepts `period`, `startDate`, `endDate`, `type`, `accountId`, `categoryId`, `description`, `sort`, `direction`, `amountMode`, `amount`, `amountMin`, `amountMax`, and `includeSummary`, plus `limit` and `offset`. Unsupported filters are rejected. History defaults to 100 results with a maximum of 500 and a nonnegative offset; its envelope includes total and nextOffset, and optional summary covers all matching events. Catalogue and planning snapshots are complete and unpaginated.
 
+History accountId and categoryId filters are optional positive integers using the existing integer query syntax. Omitted IDs apply no filter; supplied blank, zero, negative, fractional, or nonnumeric IDs return the existing JSON validation error with HTTP 400. A valid positive ID without matches returns the normal HTTP 200 empty history envelope, total zero, null nextOffset, and zero optional summary. Invalid IDs never silently clear or broaden results.
+
 History includes archived records and groups valid transfers as one event with explicit source and destination IDs; an Account filter matches either side. Grouping requires exactly two zero-sum, opposite-signed rows with matching date and description, distinct Accounts, and no Category. Invalid linked transfers remain visible as signed ledger rows. Reporting signs, date boundaries, and External exclusions remain authoritative under the existing rules.
 
 ### Integration proposals and sign conventions

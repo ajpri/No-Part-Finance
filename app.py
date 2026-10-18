@@ -1384,6 +1384,15 @@ def createApp(databasePathOverride=None):
             raise ValidationError("Unsupported read filter")
         if "includeSummary" in request.args and request.args["includeSummary"] not in {"true", "false"}:
             raise ValidationError("includeSummary must be true or false")
+        if resource == "transactions":
+            for filterName, label in (("accountId", "Account"), ("categoryId", "Category")):
+                if filterName in request.args:
+                    try:
+                        selectedId = int(request.args[filterName])
+                    except ValueError as error:
+                        raise ValidationError(f"{label} ID must be a positive integer") from error
+                    if selectedId < 1:
+                        raise ValidationError(f"{label} ID must be a positive integer")
         result = app.make_response(readView()).get_json()
         if resource == "accounts":
             for account in result:
