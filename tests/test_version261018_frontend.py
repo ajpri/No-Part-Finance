@@ -1,6 +1,8 @@
 """Focused executable checks for release presentation and PWA metadata."""
 
 import os
+import html
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -57,4 +59,38 @@ for (const account of accounts) {
 }
 '''
         result = subprocess.run([nodePath, "-e", presentation + harness], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def testSimulatorSummaryLabelOrderAndSignedValues(self):
+        source = (projectRoot / "index.html").read_text(encoding="utf-8")
+        summary = source.split('class="summaryTable simulatorSummary"', 1)[1].split("</dl>", 1)[0]
+        self.assertEqual(
+            [html.unescape(label) for label in re.findall(r"<dt>(.*?)</dt>", summary)],
+            ["Starting Cash", "Planned Income", "Planned Spending & Buffer", "Transfers & Payments", "Unallocated Money"],
+        )
+        self.assertEqual(re.findall(r'<dd id="(.*?)"', summary), [
+            "simulatorStartingCash", "simulatorIncomeTotal", "simulatorSpendingTotal", "simulatorTransferTotal", "simulatorUnallocated",
+        ])
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("JavaScript runtime unavailable")
+        javascript = (projectRoot / "app.js").read_text(encoding="utf-8")
+        renderFunction = "function renderSimulatorResults()" + javascript.split(
+            "function renderSimulatorResults()", 1
+        )[1].split("\n", 1)[0]
+        harness = r'''
+const assert = require("node:assert/strict");
+const controls = {};
+const document = {querySelector(selector){return controls[selector] ||= {replaceChildren(){}};}};
+function dollars(cents){return `$${(cents/100).toFixed(2)}`;}
+const simulator = {plan:{results:[],totals:{startingCashCents:9000,plannedIncomeCents:0,plannedSpendingCents:0,transfersPaymentsCents:0,unallocatedMoneyCents:9000}}};
+for (const transferCents of [0, -5000, 5000]) {
+ simulator.plan.totals.transfersPaymentsCents=transferCents;
+ simulator.plan.totals.unallocatedMoneyCents=9000-transferCents;
+ renderSimulatorResults();
+ assert.equal(controls["#simulatorTransferTotal"].textContent,dollars(transferCents));
+ assert.equal(controls["#simulatorUnallocated"].textContent,dollars(9000-transferCents));
+}
+'''
+        result = subprocess.run([nodePath, "-e", renderFunction + harness], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

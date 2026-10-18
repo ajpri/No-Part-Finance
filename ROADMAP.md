@@ -121,22 +121,6 @@ Explicit non-goals: configurable badge thresholds, more display precision, new w
 
 Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
-### Simulator Transfer Summary Label
-
-Purpose: resolve the conflicting Simulator summary labels Payments & Cash Transfers and Transfers & Payments with one consistent label.
-
-Approved user-visible behavior: use Transfers & Payments for the existing Simulator allocation-summary value. Preserve the five-value order: Starting Cash, Planned Income, Planned Spending & Buffer, Transfers & Payments, Unallocated Money. Use the approved label consistently in maintained Simulator presentation, accessible labels, current user guidance, and canonical specification wording when implementation is completed and verified. Preserve historical release summaries.
-
-Financial and data invariants: wording only. Preserve the existing transfersPaymentsCents API field, integer-cent values, signed selected-Cash-pool contribution, Credit/Payoff payment contributions, executed-row exclusions, and Unallocated Money formula. The summary remains an allocation deduction that can be signed; renaming it must not turn it into a gross unsigned transfer total or change which rows contribute. Preserve the separately approved External allocation rules without implicitly implementing that milestone.
-
-Meaningful edge cases: a zero summary, negative net deduction from incoming selected-pool Cash transfers, offsetting Cash transfers, Credit payments, Payoff rows, External cases, and narrow-screen wrapping. These cases do not require alternative labels.
-
-Acceptance criteria: verify the exact label and five-value order in visible and accessible Simulator presentation, with normal responsive wrapping and no overflow. Verify current documentation is aligned after implementation while historical release summaries remain intact. Assert unchanged API field, summary values, selected-pool direction, Credit/Payoff calculations, and Unallocated Money against existing fixtures; no database writes or schema change are introduced by renaming.
-
-Explicit non-goals: changing allocation math, API field names, transaction-history summary labels, transfer types, stored values, new controls, tooltips, or unrelated presentation.
-
-Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
-
 ### Dashboard Response Fields Required by the OpenAPI Contract
 
 Purpose: make Dashboard JSON responses satisfy their published OpenAPI contract so integrations can interpret Account eligibility and displayed events without guessing. Public Release 5 Part 3 found required ordinaryEligible and transferEligible absent from Dashboard Account records and required combinedTransfer absent from pinned quickUpdates records.

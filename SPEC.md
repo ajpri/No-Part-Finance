@@ -2437,15 +2437,15 @@ Show the five-value summary with Starting Cash first, using the compact responsi
 ```text
 Planned Income
 Planned Spending & Buffer
-Payments & Cash Transfers
+Transfers & Payments
 Unallocated Money
 ```
 
 ```text
-Unallocated Money = Cash Live Balances + Planned Income - Planned Spending & Buffer - Payments & Cash Transfers
+Unallocated Money = Cash Live Balances + Planned Income - Planned Spending & Buffer - Transfers & Payments
 ```
 
-Cash Live Balances is the sum of every selected Live balance row. Planned Income is the sum of every Income-row amount. Planned Spending & Buffer is the sum of every Spend-row amount, including Credit charges, plus every Buffer-row amount. Payments & Cash Transfers contains all Credit and Payoff payments plus the signed net effect of Cash transfers crossing the selected Cash Live Balance pool. A Cash transfer between two selected Live Balance accounts is neutral. A transfer out of the pool reduces Unallocated Money; a transfer into the pool increases it. This supports a zero-based allocation workflow in which the user assigns all selected available Cash and planned income. A negative Unallocated Money remains visible as a negative amount; do not block the plan, automatically rebalance rows, or invent a warning category.
+Cash Live Balances is the sum of every selected Live balance row. Planned Income is the sum of every Income-row amount. Planned Spending & Buffer is the sum of every Spend-row amount, including Credit charges, plus every Buffer-row amount. Transfers & Payments contains all Credit and Payoff payments plus the signed net effect of Cash transfers crossing the selected Cash Live Balance pool. A Cash transfer between two selected Live Balance accounts is neutral. A transfer out of the pool reduces Unallocated Money; a transfer into the pool increases it. This supports a zero-based allocation workflow in which the user assigns all selected available Cash and planned income. A negative Unallocated Money remains visible as a negative amount; do not block the plan, automatically rebalance rows, or invent a warning category.
 
 #### Data Integrity and Archived Configuration
 
