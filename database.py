@@ -234,12 +234,25 @@ def initializeDatabase(databasePath):
             backupsDirectory = databasePath.parent / "backups"
             backupsDirectory.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-            backupPath = backupsDirectory / f"pre-migration-v{currentVersion}-to-v{schemaVersion}-{timestamp}.db"
-            backupConnection = sqlite3.connect(backupPath)
+            candidateBackupPath = backupsDirectory / f"pre-migration-v{currentVersion}-to-v{schemaVersion}-{timestamp}.db"
             try:
-                connection.backup(backupConnection)
-            finally:
-                backupConnection.close()
+                backupConnection = sqlite3.connect(candidateBackupPath)
+                try:
+                    connection.backup(backupConnection)
+                    backupIntegrity = backupConnection.execute("PRAGMA integrity_check").fetchall()
+                    backupVersion = backupConnection.execute("PRAGMA user_version").fetchone()[0]
+                    backupHasSchema = backupConnection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'accounts'"
+                    ).fetchone()
+                    if backupIntegrity != [("ok",)] or backupVersion != currentVersion or not backupHasSchema:
+                        raise RuntimeError("Pre-migration backup verification failed")
+                finally:
+                    backupConnection.close()
+            except Exception:
+                logging.exception("Pre-migration backup creation or verification failed: %s", candidateBackupPath)
+                raise
+            # Only a completed, verified snapshot may ever replace the source database.
+            backupPath = candidateBackupPath
             logging.info(
                 "Upgrading database schema from %s to %s; backup: %s",
                 currentVersion, schemaVersion, backupPath,
@@ -304,15 +317,23 @@ def initializeDatabase(databasePath):
         finalVersion = connection.execute("PRAGMA user_version").fetchone()[0]
         if foreignKeyFailure or integrityResult != "ok" or finalVersion != schemaVersion:
             raise RuntimeError("Database migration verification failed")
-    except Exception:
+    except Exception as upgradeError:
         connection.rollback()
         if backupPath is not None:
-            restoreConnection = sqlite3.connect(backupPath)
             try:
-                restoreConnection.backup(connection)
-                connection.commit()
-            finally:
-                restoreConnection.close()
+                restoreConnection = sqlite3.connect(f"{backupPath.resolve().as_uri()}?mode=ro", uri=True)
+                try:
+                    restoreConnection.backup(connection)
+                    connection.commit()
+                finally:
+                    restoreConnection.close()
+            except Exception as recoveryError:
+                logging.exception("Database upgrade failed (%s); recovery also failed; verified backup retained: %s", upgradeError, backupPath)
+                raise RuntimeError(
+                    f"Database upgrade failed: {upgradeError}; recovery failed: {recoveryError}; "
+                    f"verified backup retained at {backupPath}"
+                ) from upgradeError
+            logging.error("Database upgrade failed (%s); original database restored; verified backup retained: %s", upgradeError, backupPath)
         raise
     finally:
         connection.close()

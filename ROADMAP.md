@@ -175,26 +175,6 @@ Explicit non-goals: new history filters, lookup endpoints, new not-found errors,
 
 Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
 
-### Preserve the Database When a Pre-Upgrade Backup Fails
-
-Purpose: fix the data-loss defect found during Public Release 3 documentation verification. initializeDatabase records backupPath before SQLite's backup operation succeeds and then attempts recovery from that path after a failure. An isolated injected backup failure reproduced replacement of the original database with an empty database at schema version 0.
-
-Approved behavior: distinguish a candidate backup path from a completed, integrity-verified recovery snapshot. Before any migration, create the pre-upgrade snapshot using SQLite's supported backup mechanism and verify its integrity. Only successful completion and verification make it eligible for recovery; file existence alone does not. A backup-file creation failure, interrupted/failed backup operation, or invalid completed snapshot stops startup before migrations and leaves the original database unchanged. Never restore from an incomplete, empty, or invalid snapshot.
-
-If migration or post-migration verification fails after a verified backup exists, restore the original state from that verified snapshot using the existing recovery workflow, retain the snapshot, and stop startup clearly. If recovery also fails, leave the installation stopped, retain the verified backup for manual recovery, and report both the original upgrade failure and recovery failure without claiming successful restoration. Do not proceed with a partial upgrade or retry startup automatically.
-
-User-visible behavior: concise startup diagnostics explain whether backup creation/verification, migration, or recovery failed and identify a verified recovery snapshot when available. Preserve the original error when reporting a secondary recovery error. Remove the README and SPEC known-defect descriptions only after the corrective implementation and failure-preservation tests are verified; retain ordinary independent manual-backup guidance.
-
-Financial and data invariants: failed pre-upgrade backup cases preserve the original database's records and schema version and never enter migrations. Recovery after a migration failure restores all original financial, configuration, user, integration-secret, revocation, proposal, and planning records, relationships, and schema version from the verified snapshot. Preserve integer-cent values, balances, ledger history, foreign keys, and credential state without recalculation or repair. Retain newer-schema rejection, unique migration-backup naming, source integrity checks, ordered migrations, post-upgrade verification, and existing no-backup behavior for new/current databases. Keep one shared initialization path and use the smallest explicit change.
-
-Meaningful edge cases: failure to create the backup file; backup failure before completion, including a partial file; a completed but invalid snapshot; migration failure after verification; post-migration verification failure; recovery failure; successful older-schema upgrades; new/current databases; and rejection of a newer unsupported schema. A failed snapshot is never promoted to a recovery source, regardless of whether its file remains present.
-
-Acceptance criteria: isolated fault-injection tests cover each backup creation/completion/verification failure and assert unchanged original records and schema, no migration entry, and no recovery attempt from the failed candidate. Tests cover migration and post-migration verification failure after a verified snapshot, proving original-state restoration and snapshot retention. Recovery-failure tests prove startup remains stopped, the verified snapshot remains available, and diagnostics preserve both failures without claiming recovery succeeded. Successful upgrades, new/current initialization, and newer-schema rejection continue to pass. Use synthetic fixtures, explicit temporary database and backup paths, and the in-process test database guard before application imports; never read, initialize, migrate, or write real finance.db. Verify the exact documentation update only after the fix passes these checks.
-
-Explicit non-goals: new schema migrations, an updater, scheduled/automatic backups, a restore wizard, backup-retention features, automatic recovery retries, deployment changes, unrelated refactoring, or changes to financial behavior.
-
-Unresolved decisions: none for this scope. Promoted to Version Next and approved for implementation by user approval.
-
 ## Version Soon
 
 No milestones are currently listed.
