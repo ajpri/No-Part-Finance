@@ -2991,6 +2991,20 @@ def insertPending(connection, integrationId, submitted, originalContent, role, s
     return dict(connection.execute("SELECT * FROM pendingSubmissions WHERE id = ?", (cursor.lastrowid,)).fetchone())
 
 
+def integrationTransferReview(connection, submitted):
+    setting = connection.execute("SELECT value FROM applicationSettings WHERE key = 'integrationTransferDefaultDescription'").fetchone()
+    if not setting or setting["value"] != "1":
+        return submitted
+    destination = getAccount(connection, submitted.get("toAccountId"), activeRequired=True)
+    name = destination["name"].strip()
+    if destination["accountClass"] == "credit":
+        suffix = " Card" if destination["accountSubtype"] == "Credit Card" and not re.search(r"\bcard$", name, re.IGNORECASE | re.ASCII) else ""
+        description = f"{name}{suffix} Payment"
+    else:
+        description = f"Transfer to {name}"
+    return {**submitted, "description": description}
+
+
 def submitPendingTransaction(connection, integrationId, submitted):
     return submitPendingEntry(connection, integrationId, submitted)
 
@@ -3004,8 +3018,14 @@ def submitPendingEntry(connection, integrationId, submitted):
             if existing["originalContent"] != originalContent:
                 raise SubmissionConflict("Submission ID already used with different content")
             return dict(existing), False
-        values, role = preparePending(connection, pendingKind(submitted), submitted, submitted.get("pinned", False))
-        return insertPending(connection, integrationId, submitted, originalContent, role), True
+        review = integrationTransferReview(connection, submitted) if integrationId is not None and pendingKind(submitted) == "transfer" else submitted
+        values, role = preparePending(connection, pendingKind(submitted), review, submitted.get("pinned", False))
+        proposal = insertPending(connection, integrationId, submitted, originalContent, role)
+        if review != submitted:
+            # Keep original request content for retry identity; only review content is normalized.
+            connection.execute("UPDATE pendingSubmissions SET reviewContent = ? WHERE id = ?", (json.dumps(review, ensure_ascii=False, sort_keys=True), proposal["id"]))
+            proposal = dict(connection.execute("SELECT * FROM pendingSubmissions WHERE id = ?", (proposal["id"],)).fetchone())
+        return proposal, True
 
 
 def pendingCounts(rows):
@@ -3093,6 +3113,10 @@ def savePendingReview(connection, proposalId, row, integrationUpdate=False):
         if set(row) != requiredFields:
             raise ValidationError("Submit only the fields for this proposal kind and review metadata")
         validatePendingReviewVersion(proposal, row["reviewVersion"])
+        if integrationUpdate and proposal["kind"] == "transfer":
+            # Validate the request shape/types before replacing only its description.
+            submissionContent({"submissionId": proposal["submissionId"], "type": "transfer", **{key: row[key] for key in pendingFields("transfer")}})
+            row = integrationTransferReview(connection, row)
         content, values = validatedReview(connection, proposal, row)
         nextVersion = proposal["reviewVersion"] + 1
         connection.execute("UPDATE pendingSubmissions SET reviewContent = ?, reviewVersion = ? WHERE id = ?", (json.dumps(content, ensure_ascii=False, sort_keys=True), nextVersion, proposalId))

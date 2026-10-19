@@ -646,10 +646,21 @@ def createApp(databasePathOverride=None):
     def listSettings():
         rows = getDatabase().execute("SELECT key, value FROM applicationSettings").fetchall()
         settings = {row["key"]: row["value"] for row in rows}
+        settings.setdefault("integrationTransferDefaultDescription", "0")
         settings.setdefault("monthlySuggestionWindowDays", "3")
         settings.setdefault("quarterlySuggestionWindowMonths", "1")
         settings.setdefault("annualSuggestionWindowMonths", "3")
         return jsonify(settings)
+
+    @app.put("/api/settings/integration-transfers")
+    def saveIntegrationTransferSettings():
+        settingsRequest = request.get_json(silent=True)
+        if not isinstance(settingsRequest, dict) or set(settingsRequest) != {"useDefaultDescription"} or type(settingsRequest["useDefaultDescription"]) is not bool:
+            raise ValidationError("Submit useDefaultDescription as a Boolean")
+        connection = getDatabase()
+        with connection:
+            connection.execute("INSERT INTO applicationSettings (key, value) VALUES ('integrationTransferDefaultDescription', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", ("1" if settingsRequest["useDefaultDescription"] else "0",))
+        return jsonify({"useDefaultDescription": settingsRequest["useDefaultDescription"]})
 
     @app.get("/api/simulator")
     def getSimulator():
