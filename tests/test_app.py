@@ -156,13 +156,13 @@ class ApplicationTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(200, response.status_code)
         self.assertEqual(
-            {"applicationVersion": "26.10.18", "schemaVersion": 21, "status": "ok"},
+            {"applicationVersion": "26.10.19", "schemaVersion": 21, "status": "ok"},
             response.get_json(),
         )
 
     def testApplicationIdentityIsExposedFromOneVersionValue(self):
         details = self.client.get("/api/application").get_json()
-        self.assertEqual({"name": "No Part Finance", "version": "26.10.18"}, details)
+        self.assertEqual({"name": "No Part Finance", "version": "26.10.19"}, details)
         response = self.client.get("/")
         html = response.get_data(as_text=True)
         response.close()

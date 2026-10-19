@@ -4,7 +4,7 @@
 
 This is the product specification for No Part Finance. It describes implemented behavior by feature rather than by release order. Future work and the approved next milestone live in `ROADMAP.md`.
 
-The authoritative application version is the exact string `26.10.18`. Settings, version-bearing package filenames, and command-line version output use that same value. Release History groups the October changes under `26.10`.
+The authoritative application version is the exact string `26.10.19`. Settings, version-bearing package filenames, and command-line version output use that same value. Release History groups the October changes under `26.10`.
 
 ## Product Intent
 
@@ -2053,11 +2053,11 @@ History includes archived records and groups valid transfers as one event with e
 
 ### Integration Transfer Default Descriptions
 
-Owner Settings System includes an Integrations section with `Always use default descriptions for integration transfers`, a native checkbox and Save action. It defaults to off, persists in SQLite, and may be changed only by the Owner through session authentication and CSRF protection.
+Owner Settings System includes an Integrations section with `Always use default descriptions for integration transfers`, a native checkbox and Save action. It defaults to off, persists in SQLite, and may be changed only by the Owner through session authentication and CSRF protection. Its existing helper text reads: `Automatically uses default descriptions for transfers submitted or updated by integrations. Your own entries and Pending edits keep the description you enter. Transfers still require approval.`
 
 When enabled, Python replaces the Description on each new integration transfer submission and each integration Pending-transfer update with the existing destination-based `Use default description` naming rule: Cash/External uses `Transfer to <Destination Account Name>`; Credit uses the shared Card/Payment convention. It silently normalizes the saved review content before Pending displays it, while preserving the immutable original submission for retry identity. Required request shape and types, Account eligibility, dates, amounts, stale-review protection, and explicit Owner approval remain enforced. Integration updates apply this rule to any Pending transfer they update, including Manual entries.
 
-Changing the setting never rewrites existing Pending or historical records. Ordinary transactions, Manual creation, Owner edits and approval retain their normal description behavior. Every Pending transfer retains its existing `Use default description` button and editable draft behavior. Automatic normalization writes no ledger rows and changes no amounts, signs, balances, or reports.
+Changing the setting never rewrites existing Pending or historical records. Ordinary transactions, Manual creation (including Save to Pending), Owner edits and approval retain their normal description behavior and preserve the entered description. Save remains enabled for Owner entries and edits. Every Pending transfer retains its existing `Use default description` button and editable draft behavior. Automatic normalization writes no ledger rows and changes no amounts, signs, balances, or reports.
 
 ### Integration proposals and sign conventions
 
