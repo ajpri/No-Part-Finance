@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-applicationVersion = "26.10.18"
+applicationVersion = "26.10.19"
 archiveRootName = "No-Part-Finance"
 includedFiles = (
     "app.py",
