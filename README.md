@@ -2,6 +2,10 @@
 
 A small Flask and SQLite personal finance application with one shared personal ledger, a required Owner, and an optional read-only Auditor.
 
+## Development status
+
+Multi-user, multi-ledger development is starting with the planned 26.11 ledger-isolation foundation. The current application still supports one shared ledger with one Owner and an optional Auditor. Additional independent Owners and ledgers, web account management, and household sharing are future milestones. See [ROADMAP.md](ROADMAP.md) for scope and sequencing.
+
 ## License
 
 Copyright (C) 2026 Austin Pritchett.
