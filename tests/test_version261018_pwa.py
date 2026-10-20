@@ -1,3 +1,4 @@
+from tests.test_support import snapshotWithoutLoginTime
 import tests  # Enable the production database guard before application imports.
 import base64
 import json
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from app import createApp
 import database as ledger
 from tests.test_support import ownerClient
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class PwaServerTests(unittest.TestCase):
@@ -19,7 +21,7 @@ class PwaServerTests(unittest.TestCase):
         self.backupsPath.mkdir()
         self.application = createApp(self.databasePath)
         self.client = self.application.test_client()
-        self.connection = ledger.connectDatabase(self.databasePath)
+        self.connection = connectDatabase(self.databasePath)
         self.iconPaths = {
             "/assets/icon-192.png", "/assets/icon-512.png",
             "/assets/icon-maskable-512.png", "/assets/apple-touch-icon.png",

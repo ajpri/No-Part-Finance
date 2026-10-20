@@ -18,6 +18,7 @@ from database import (
     sinkingFundSummary,
     updateAccount,
 )
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class Release26093Tests(unittest.TestCase):

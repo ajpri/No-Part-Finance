@@ -14,6 +14,7 @@ from werkzeug.serving import make_server
 from app import createApp, runApplication
 from database import connectDatabase
 from users import configureOnStartup
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class StartupServingTests(unittest.TestCase):
@@ -71,7 +72,7 @@ class StartupServingTests(unittest.TestCase):
                 runApplication(application)
             connection = connectDatabase(path)
             try:
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM users")])
+                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
                 self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:

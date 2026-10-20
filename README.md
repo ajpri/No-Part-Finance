@@ -4,7 +4,7 @@ A small Flask and SQLite personal finance application with one shared personal l
 
 ## Development status
 
-Multi-user, multi-ledger development is starting with the planned 26.10.21 ledger-isolation foundation. The current application still supports one shared ledger with one Owner and an optional Auditor. Additional independent Owners and ledgers, web account management, and household sharing are future milestones. See [ROADMAP.md](ROADMAP.md) for scope and sequencing.
+Version 26.10.21 establishes the multi-ledger database and authorization foundation, per-ledger audit recording, and portable ledger downloads. Supported setup still creates one ledger with one Owner and an optional Auditor. CLI provisioning of additional Owners and ledgers, web account management, and household sharing remain future milestones. See [ROADMAP.md](ROADMAP.md) for scope and sequencing.
 
 ## License
 
@@ -122,6 +122,18 @@ To keep the database elsewhere, provide a platform-appropriate path:
 FINANCE_DATABASE_PATH=/srv/personal-finance/finance.db python app.py
 ```
 
+## Ledger isolation and portable downloads
+
+Financial records, settings, integration keys, and audit history belong to a ledger. The server resolves ledger access from the signed-in User or integration credential; request IDs cannot select another ledger. Existing records are migrated into one UUID-identified ledger, preserving financial values, IDs, credentials, and history. Its initial name comes from the Owner's username. The application creates a verified pre-migration backup before upgrading; failure stops startup. Users sign in again after restart.
+
+Owner-only **Download Backup** and **Download with database** include only the current ledger, its Owner and optional Auditor, password hashes, integration keys and states, pending submissions, and audit history. They exclude unrelated ledgers and Users, active sessions, and deployment configuration. Downloads are assembled in temporary storage and are not retained in the server's `packages` directory. Store completed downloads securely.
+
+**Disable integration keys in downloaded copy** is unchecked by default. Checking it disables enabled keys only in the downloaded database; their values remain available for later re-enabling. Disabled and revoked keys stay blocked. Live keys are unchanged. Without this option, enabled keys continue to work on both copies. Existing passwords work in the standalone copy, but active browser sessions are never copied.
+
+To run a downloaded copy, stop the destination application and place its database at the configured database path, preserving any old database and sidecars first. Start a compatible application version and sign in again. This is a standalone copy or recovery, not a merge or synchronization with another populated installation. Use the same application and existing trusted hosting arrangement. Command-line database-inclusive packaging and pre-migration backups retain the complete installation database, including all ledgers.
+
+Persistent ledger changes are recorded atomically in append-only audit history with actor identity, time, and relevant before/after values. Passwords, password hashes, integration secret values, and session tokens are excluded from audit content. Logging starts with this feature and does not invent past changes. An audit viewer is a future feature.
+
 ## Users and integrations
 
 One **Owner is required** to sign in and use the application. On first startup, type `y` at the command-line setup prompt, choose an Owner username, and enter the same password twice. Passwords must contain 8–128 characters; spaces are allowed and preserved. Typing a password displays no characters, including asterisks. Use an interactive Command Prompt or terminal that supports protected password input. There are no default credentials.
@@ -142,9 +154,11 @@ To retry setup, run the appropriate command above from the application folder (W
 
 The menu lists users, creates missing users, resets passwords with confirmation, removes the optional Auditor, and exits. Exiting the menu does not start the server. If it is stopped, run `startWindows.bat` or `./startLinux.sh` without `manage-users`. Once the server is running, open `http://127.0.0.1:5000` in your browser and sign in with your configured username and password; if the browser showed incomplete setup, reload it. Keep the server terminal open.
 
+Sign-in records the last successful login in UTC; failed attempts and ordinary session activity do not change it. CLI display comes in a later milestone. Five consecutive failed attempts for a normalized username trigger a five-minute cooldown, alongside the existing per-IP limit. Successful sign-in resets failures; cooldown expires automatically and blocked attempts do not extend it. No permanent account disabling is introduced here.
+
 Sign-in sessions expire 168 hours after login without renewal; logout, password reset, and server restart invalidate them earlier. Settings provides Log Out.
 
-The Owner can create labeled Integration Secrets in Settings → System. Public `/docs` and `/openapi.json` describe authenticated reads, ordinary and transfer/payment proposals, explicit entered signs, retries, and each integration's own status. Bearer integrations can read every current Pending item through GET /api/integration/pending and update one through PUT /api/integration/submissions/{proposalId}, including Manual entries, moved events, other integrations’ proposals, and Owner-edited items. Updates reuse Python validation and existing reviewVersion checks and leave the item Pending; only the Owner approves or rejects. Integrations cannot delete proposals, create Manual entries, move ledger events, update terminal items, or write directly to the ledger. The existing submission-status endpoint retains each integration’s own history.
+The Owner can create labeled Integration Secrets in Settings → Integrations. Each key belongs permanently to that ledger. Disable/Enable reversibly blocks/restores authentication with the same key; Revoke is permanent. Existing revoked keys remain revoked after upgrade, and proposals remain available for review. Public `/docs` and `/openapi.json` describe authenticated reads, ordinary and transfer/payment proposals, explicit entered signs, retries, and each integration's own status. Bearer integrations can read every current Pending item through GET /api/integration/pending and update one through PUT /api/integration/submissions/{proposalId}, including Manual entries, moved events, other integrations’ proposals, and Owner-edited items. Updates reuse Python validation and existing reviewVersion checks and leave the item Pending; only the Owner approves or rejects. Integrations cannot delete proposals, create Manual entries, move ledger events, update terminal items, or write directly to the ledger. The existing submission-status endpoint retains each integration’s own history.
 
 New Transaction and New Transfer/Payment offer **Save as Pending** alongside normal ledger **Save**. Pending saves close the form and label the proposal **Manual**, preserving the entered Date (including future dates), editable Template prefills, and ordinary Pin. Uncheck **Also log reimbursement** to save a single Pending item. Positive Expense/Income entries use their Category Reporting Role; negative Expense entries are refunds and negative Income entries are reversals. Transfer Amount is always positive and direction comes from From/To Accounts.
 
@@ -258,6 +272,12 @@ Command-line packaging always selects `finance.db` beside `packageApplication.py
 On Windows, packaging errors can return exit code 0; check terminal errors and the reported `Archive:` path rather than relying on the exit status.
 
 **Warning:** A default database-included package contains the complete unencrypted financial database and recoverable credentials. Store and transfer it accordingly. A package created with `--no-db` does not contain `finance.db`.
+
+## Release verification — 2026-10-20
+
+Version 26.10.21 full unittest discovery ran 293 tests: 280 passed and 13 were skipped. A final 14-test ledger/security suite also passed, covering migration preservation and late-failure recovery, concurrent Auditor setup, known foreign IDs, database write guards, concurrent request isolation, current access/roles, integration states, audit attribution and rollback, cooldowns, last-login metadata, and standalone exports. All seven JavaScript checks initially skipped for unavailable PATH-based Node passed using the bundled verification runtime; no application dependency was added. The six real-data integration checks remained skipped, and verification used guarded synthetic temporary databases without opening the real financial database.
+
+Browser verification against a temporary synthetic server exercised sign-in, Settings version, integration Disable/Enable presentation, the shared export-only checkbox and both download URLs, and desktop/390px sign-in footer placement without page overflow. Application packages were tested after extraction with temporary startup servers. Live server restart and its verified pre-migration backup are operational deployment steps, separate from these tests.
 
 ## Release verification — 2026-10-02
 

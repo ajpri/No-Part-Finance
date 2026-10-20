@@ -49,7 +49,7 @@ def ownerClient(application, copiedDatabase=False):
     username = "Test Owner"
     connection = connectDatabaseForOwner(application)
     try:
-        owner = connection.execute("SELECT username FROM users WHERE role = 'owner'").fetchone()
+        owner = connection.execute("SELECT username FROM scopedusers WHERE role = 'owner'").fetchone()
         if not owner:
             createUser(connection, "owner", "Test Owner", "test-owner-password")
         elif copiedDatabase:
@@ -71,8 +71,7 @@ def ownerClient(application, copiedDatabase=False):
 
 
 def connectDatabaseForOwner(application):
-    from database import connectDatabase
-    return connectDatabase(application.config["DATABASE_PATH"])
+    return connectFixtureDatabase(application.config["DATABASE_PATH"])
 
 
 def openReadOnlyDatabase(databasePath):
@@ -103,3 +102,52 @@ def copyProductionDatabase(testCase, destinationPath):
         targetConnection.close()
     sourceHashAfter = hashlib.sha256(sourcePath.read_bytes()).digest()
     testCase.assertEqual(sourceHashBefore, sourceHashAfter, "Production finance.db changed during read-only backup")
+
+
+def connectFixtureDatabase(databasePath):
+    """Explicit single-ledger synthetic fixtures; legacy migration inputs stay raw."""
+    from database import connectDatabase, bindInitialLedger
+    connection = connectDatabase(databasePath)
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'ledgers'").fetchone():
+        bindInitialLedger(connection)
+    return connection
+
+
+def useHistoricalSchema21(connection):
+    """Rebuild a synthetic fixture in its genuine pre-ledger schema before downgrades."""
+    if not connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'ledgers'").fetchone():
+        return
+    connection.commit()
+    historical = sqlite3.connect(":memory:")
+    historical.row_factory = sqlite3.Row
+    historical.executescript((Path(__file__).parent / "schema21.sql").read_text())
+    historicalTriggers = [row[0] for row in historical.execute("SELECT sql FROM sqlite_master WHERE type='trigger'")]
+    for row in historical.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
+        historical.execute(f'DROP TRIGGER "{row[0]}"')
+    for row in historical.execute("SELECT name FROM sqlite_master WHERE type='table' AND name != 'sqlite_sequence'").fetchall():
+        table = row[0]
+        columns = [column["name"] for column in historical.execute(f"PRAGMA table_info({table})")]
+        if table == "users":
+            source = "SELECT u.id, a.role, u.username, u.usernameKey, u.passwordHash, u.authVersion FROM users u JOIN ledgerAccess a ON a.userId=u.id"
+        else:
+            source = "SELECT " + ", ".join(columns) + f" FROM {table}"
+        records = connection.execute(source).fetchall()
+        if records:
+            historical.executemany(f"INSERT INTO {table} VALUES ({', '.join('?' for _ in columns)})", [tuple(record) for record in records])
+    for statement in historicalTriggers:
+        historical.execute(statement)
+    historical.commit()
+    for row in connection.execute("SELECT name FROM sqlite_temp_master WHERE type='view'").fetchall():
+        connection.execute(f'DROP VIEW "{row[0]}"')
+    historical.backup(connection)
+    historical.close()
+
+
+def snapshotWithoutLoginTime(connection):
+    """Financial/state assertions exclude the separately tested sign-in timestamp."""
+    import re
+    hasLoginTime = any(row[1] == "lastLoginAt" for row in connection.execute("PRAGMA table_info(users)"))
+    statements = list(connection.iterdump())
+    if hasLoginTime:
+        statements = [re.sub(r",(?:NULL|'[^']*')\);$", ",NULL);", statement) if statement.startswith('INSERT INTO "users"') else statement for statement in statements]
+    return statements

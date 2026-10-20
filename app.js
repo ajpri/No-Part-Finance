@@ -1548,8 +1548,10 @@ async function saveReimbursementCategory(event) {
 }
 
 function showSettingsSection() {
-  const section = ["accounts", "categories", "templates", "budget", "system"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "accounts";
-  for (const name of ["accounts", "categories", "templates", "budget", "system"]) {
+  const sections = ["accounts", "categories", "templates", "budget", "integrations", "system"];
+  const requested = location.hash.slice(1);
+  const section = sections.includes(requested) && (requested !== "integrations" || browserSession?.role === "owner") ? requested : "accounts";
+  for (const name of sections) {
     document.querySelector(`#settings${name[0].toUpperCase()}${name.slice(1)}`).hidden = name !== section;
     const link = document.querySelector(`.settingsNavigation a[href="#${name}"]`);
     if (name === section) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
@@ -1703,8 +1705,9 @@ async function loadIntegrationSecrets() {
   body.replaceChildren();
   for (const secret of secrets) {
     const row = body.insertRow();
-    row.insertCell().textContent = secret.label + (secret.active ? "" : " (revoked)");
+    row.insertCell().textContent = secret.label;
     const value = row.insertCell(); value.textContent = "••••••••"; value.className = "integrationSecretValue";
+    row.insertCell().textContent = secret.status;
     const actions = row.insertCell();
     const reveal = document.createElement("button"); reveal.type = "button"; reveal.textContent = "Reveal";
     reveal.addEventListener("click", async () => {
@@ -1738,7 +1741,16 @@ async function loadIntegrationSecrets() {
       } catch (error) { document.querySelector("#integrationSecretStatus").textContent = error.message; }
     });
     actions.append(editLabel, " ", reveal, " ", copy);
-    if (secret.active) {
+    if (!secret.revoked) {
+      const toggle = document.createElement("button"); toggle.type = "button"; toggle.textContent = secret.active ? "Disable" : "Enable";
+      toggle.addEventListener("click", async () => {
+        toggle.disabled = true;
+        try {
+          await api(`/api/integration-secrets/${secret.id}/state`, {method: "POST", body: JSON.stringify({enabled: !secret.active})});
+          await loadIntegrationSecrets();
+        } catch (error) { document.querySelector("#integrationSecretStatus").textContent = error.message; toggle.disabled = false; }
+      });
+      actions.append(" ", toggle);
       const revoke = document.createElement("button"); revoke.type = "button"; revoke.textContent = "Revoke";
       revoke.addEventListener("click", async () => {
         if (!confirm(`Revoke "${secret.label}"? Existing proposals remain reviewable.`)) return;
@@ -2132,3 +2144,14 @@ function highlightSettingsTemplate() {
 for (const [prefix, id] of [["sinkingFund", "sinkingFundId"], ["expectedIncome", "expectedIncomeId"]]) {
   document.querySelector(`#${prefix}Template`).addEventListener("change", () => updateRequiredTemplateLink(prefix, Boolean(document.querySelector(`#${id}`).value)));
 }
+
+// Both database-inclusive downloads share one explicit export-only option.
+function updateLedgerDownloadOptions() {
+  const disableKeys = document.querySelector("#disableExportIntegrationKeys").checked;
+  for (const endpoint of ["/api/backup", "/api/package"]) {
+    document.querySelector(`a[href^="${endpoint}"]:not([href^="/api/package-no-db"])`).href = endpoint + (disableKeys ? "?disableIntegrationKeys=true" : "");
+  }
+}
+document.querySelector("#disableExportIntegrationKeys").addEventListener("change", updateLedgerDownloadOptions);
+window.addEventListener("pageshow", updateLedgerDownloadOptions);
+updateLedgerDownloadOptions();

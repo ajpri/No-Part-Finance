@@ -19,6 +19,7 @@ from database import (
     updateTemplate,
 )
 from tests.test_support import copyProductionDatabase, createScenarioCategories
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class PeriodTests(unittest.TestCase):

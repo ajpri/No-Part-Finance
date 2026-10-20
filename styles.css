@@ -171,3 +171,7 @@ body[data-role="auditor"] a[href="/api/backup"], body[data-role="auditor"] a[hre
 #integrationSecretLabel { width: 24ch; max-width: 100%; min-width: 0; }
 
 .templateHighlight { background: #fff1a8; color: #111; }
+
+.signInVersion { text-align: center; margin: 1rem; color: var(--muted); }
+body:has(.signIn) { min-height: 100dvh; display: flex; flex-direction: column; }
+body:has(.signIn) .signIn { flex: 1; width: min(100%, 28rem); box-sizing: border-box; }

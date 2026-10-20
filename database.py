@@ -5,6 +5,7 @@ stored only as integer cents.
 """
 
 import sqlite3
+import tempfile
 import logging
 import re
 import json
@@ -16,7 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-schemaVersion = 21
+schemaVersion = 22
 
 
 class ValidationError(ValueError):
@@ -205,9 +206,10 @@ def connectDatabase(databasePath):
     productionDatabasePath = (Path(__file__).resolve().parent / "finance.db").resolve()
     if testDatabaseGuardEnabled and resolvedDatabasePath == productionDatabasePath:
         raise RuntimeError("Tests may not open the production finance.db through a writable connection")
-    connection = sqlite3.connect(databasePath)
+    connection = sqlite3.connect(databasePath, factory=LedgerConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    installLedgerContext(connection)
     return connection
 
 
@@ -307,9 +309,11 @@ def initializeDatabase(databasePath):
             connection.execute(
                 "ALTER TABLE accounts ADD COLUMN balanceOffsetCents INTEGER NOT NULL DEFAULT 0"
             )
-        if not hasSchema:
-            createExternalSystemAccount(connection)
-        validateExternalSystemAccount(connection)
+        if currentVersion < 22:
+            if not hasSchema:
+                createExternalSystemAccount(connection)
+            validateExternalSystemAccount(connection)
+            migrateToVersion22(connection)
         connection.execute(f"PRAGMA user_version = {schemaVersion}")
         connection.commit()
         foreignKeyFailure = connection.execute("PRAGMA foreign_key_check").fetchone()
@@ -449,14 +453,21 @@ def migrateToVersion17(connection):
 
 
 def createExternalSystemAccount(connection):
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 22:
+        requireLedger(connection)
     connection.execute(
         "INSERT INTO accounts (name, accountClass, systemIdentity) VALUES ('External', 'system', 'external')"
     )
 
 
 def validateExternalSystemAccount(connection):
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 22:
+        requireLedger(connection)
+        table = "scopedaccounts"
+    else:
+        table = "accounts"
     external = connection.execute(
-        "SELECT id FROM accounts WHERE systemIdentity = 'external' AND accountClass = 'system' AND name = 'External' AND active = 1"
+        f"SELECT id FROM {table} WHERE systemIdentity = 'external' AND accountClass = 'system' AND name = 'External' AND active = 1"
     ).fetchone()
     if not external:
         raise RuntimeError("Required External System Account is missing or invalid; restore a backup or contact support")
@@ -800,8 +811,9 @@ def requireText(rawText, fieldName):
 
 
 def getAccount(connection, accountId, activeRequired=False):
+    requireLedger(connection)
     account = connection.execute(
-        "SELECT * FROM accounts WHERE id = ?", (accountId,)
+        "SELECT * FROM scopedaccounts WHERE id = ?", (accountId,)
     ).fetchone()
     if not account:
         raise ValidationError("Account does not exist")
@@ -811,12 +823,13 @@ def getAccount(connection, accountId, activeRequired=False):
 
 
 def getSelectableCategory(connection, categoryId, allowArchived=False):
+    requireLedger(connection)
     category = connection.execute(
         """
         SELECT c.*, EXISTS(
-            SELECT 1 FROM categories AS child WHERE child.parentCategoryId = c.id
+            SELECT 1 FROM scopedcategories AS child WHERE child.parentCategoryId = c.id
         ) AS hasChildren
-        FROM categories AS c
+        FROM scopedcategories AS c
         WHERE c.id = ?
         """,
         (categoryId,),
@@ -837,6 +850,7 @@ def storedAmountForCategory(reportingRole, enteredAmountCents):
 
 
 def prepareTransaction(connection, accountId, transactionDate, description, categoryId, enteredAmount, pinned=False):
+    requireLedger(connection)
     validateDate(transactionDate)
     description = requireText(description, "Description")
     account = getAccount(connection, accountId, activeRequired=True)
@@ -852,6 +866,7 @@ def prepareTransaction(connection, accountId, transactionDate, description, cate
 
 
 def createTransaction(connection, accountId, transactionDate, description, categoryId, enteredAmount, pinned=False):
+    requireLedger(connection)
     transactionValues = prepareTransaction(
         connection, accountId, transactionDate, description, categoryId, enteredAmount, pinned
     )
@@ -872,19 +887,20 @@ def createTransactionWithReimbursement(
     connection, accountId, transactionDate, description, categoryId, enteredAmount, pinned,
     reimbursementAccountId, reimbursementDate, reimbursementDescription, reimbursementAmount,
 ):
+    requireLedger(connection)
     expenseValues = prepareTransaction(
         connection, accountId, transactionDate, description, categoryId, enteredAmount, pinned
     )
     expenseCategory = connection.execute(
-        "SELECT name, offerReimbursement FROM categories WHERE id = ?", (expenseValues[4],)
+        "SELECT name, offerReimbursement FROM scopedcategories WHERE id = ?", (expenseValues[4],)
     ).fetchone()
     if not expenseCategory["offerReimbursement"]:
         raise ValidationError("Reimbursement shortcut is not enabled for this category")
     reimbursementCategory = connection.execute(
-        """SELECT c.id FROM applicationSettings AS s JOIN categories AS c ON c.id = CAST(s.value AS INTEGER)
+        """SELECT c.id FROM scopedapplicationSettings AS s JOIN scopedcategories AS c ON c.id = CAST(s.value AS INTEGER)
            WHERE s.key = 'reimbursementCategoryId' AND c.active = 1 AND c.reportingRole = 'income'
              AND c.parentCategoryId IS NULL
-             AND NOT EXISTS (SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id)"""
+             AND NOT EXISTS (SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id)"""
     ).fetchone()
     if not reimbursementCategory:
         raise ValidationError("Select a valid Reimbursement Category in Settings")
@@ -910,6 +926,7 @@ def createTransactionWithReimbursement(
 
 
 def createBulkTransactions(connection, transactionRows):
+    requireLedger(connection)
     if not isinstance(transactionRows, list):
         raise ValidationError("Bulk rows must be a list")
     preparedRows = []
@@ -958,8 +975,9 @@ def createBulkTransactions(connection, transactionRows):
 
 
 def updateTransaction(connection, transactionId, accountId, transactionDate, description, categoryId, enteredAmount, pinned=False):
+    requireLedger(connection)
     existing = connection.execute(
-        "SELECT * FROM transactions WHERE id = ?", (transactionId,)
+        "SELECT * FROM scopedtransactions WHERE id = ?", (transactionId,)
     ).fetchone()
     if not existing:
         raise ValidationError("Transaction does not exist")
@@ -997,16 +1015,17 @@ def updateTransaction(connection, transactionId, accountId, transactionDate, des
             """
             UPDATE transactions
             SET accountId = ?, date = ?, description = ?, amountCents = ?, categoryId = ?, pinned = ?
-            WHERE id = ?
-            """,
+            WHERE ledgerId = currentLedgerId() AND (id = ?
+            )""",
             (account["id"], transactionDate, description, storedAmountCents,
              category["id"] if category else None, 1 if pinned else 0, transactionId),
         )
 
 
 def deleteTransaction(connection, transactionId):
+    requireLedger(connection)
     existing = connection.execute(
-        "SELECT transferId FROM transactions WHERE id = ?", (transactionId,)
+        "SELECT transferId FROM scopedtransactions WHERE id = ?", (transactionId,)
     ).fetchone()
     if not existing:
         raise ValidationError("Transaction does not exist")
@@ -1014,21 +1033,22 @@ def deleteTransaction(connection, transactionId):
         linkedIds = [transactionId]
         if existing["transferId"]:
             linkedIds = [row[0] for row in connection.execute(
-                "SELECT id FROM transactions WHERE transferId = ?", (existing["transferId"],)
+                "SELECT id FROM scopedtransactions WHERE transferId = ?", (existing["transferId"],)
             )]
         connection.executemany(
-            "UPDATE simulatorRows SET executed = 0, executedTransactionId = NULL WHERE executedTransactionId = ?",
+            "UPDATE simulatorRows SET executed = 0, executedTransactionId = NULL WHERE ledgerId = currentLedgerId() AND (executedTransactionId = ?)",
             ((linkedId,) for linkedId in linkedIds),
         )
         if existing["transferId"]:
             connection.execute(
-                "DELETE FROM transactions WHERE transferId = ?", (existing["transferId"],)
+                "DELETE FROM transactions WHERE ledgerId = currentLedgerId() AND (transferId = ?)", (existing["transferId"],)
             )
         else:
-            connection.execute("DELETE FROM transactions WHERE id = ?", (transactionId,))
+            connection.execute("DELETE FROM transactions WHERE ledgerId = currentLedgerId() AND (id = ?)", (transactionId,))
 
 
 def prepareTransfer(connection, transactionDate, fromAccountId, toAccountId, enteredAmount, description):
+    requireLedger(connection)
     validateDate(transactionDate)
     description = requireText(description, "Description")
     amountCents = parseMoneyCents(enteredAmount, positiveOnly=True)
@@ -1040,6 +1060,7 @@ def prepareTransfer(connection, transactionDate, fromAccountId, toAccountId, ent
 
 
 def insertTransfer(connection, values):
+    requireLedger(connection)
     fromId, toId, transactionDate, description, amountCents = values
     transferId = str(uuid4())
     for accountId, signedAmount in ((fromId, -amountCents), (toId, amountCents)):
@@ -1051,14 +1072,16 @@ def insertTransfer(connection, values):
 
 
 def createTransfer(connection, transactionDate, fromAccountId, toAccountId, enteredAmount, description="Transfer"):
+    requireLedger(connection)
     values = prepareTransfer(connection, transactionDate, fromAccountId, toAccountId, enteredAmount, description)
     with connection:
         return insertTransfer(connection, values)
 
 
 def updateTransfer(connection, transferId, transactionDate, fromAccountId, toAccountId, enteredAmount, description="Transfer"):
+    requireLedger(connection)
     transferRows = connection.execute(
-        "SELECT * FROM transactions WHERE transferId = ? ORDER BY amountCents", (transferId,)
+        "SELECT * FROM scopedtransactions WHERE transferId = ? ORDER BY amountCents", (transferId,)
     ).fetchall()
     if len(transferRows) != 2 or sum(row["amountCents"] for row in transferRows) != 0:
         raise ValidationError("Transfer is incomplete or invalid")
@@ -1080,11 +1103,11 @@ def updateTransfer(connection, transferId, transactionDate, fromAccountId, toAcc
         connection, toAccountId, activeRequired=selectedToAccountId not in currentAccountIds
     )
     linkedSimulatorRowIds = [row["id"] for row in connection.execute(
-        "SELECT id FROM simulatorRows WHERE executedTransactionId IN (?, ?)",
+        "SELECT id FROM scopedsimulatorRows WHERE executedTransactionId IN (?, ?)",
         (transferRows[0]["id"], transferRows[1]["id"]),
     )]
     with connection:
-        connection.execute("DELETE FROM transactions WHERE transferId = ?", (transferId,))
+        connection.execute("DELETE FROM transactions WHERE ledgerId = currentLedgerId() AND (transferId = ?)", (transferId,))
         fromCursor = connection.execute(
             """
             INSERT INTO transactions
@@ -1101,7 +1124,7 @@ def updateTransfer(connection, transferId, transactionDate, fromAccountId, toAcc
         )
         if linkedSimulatorRowIds:
             connection.executemany(
-                "UPDATE simulatorRows SET executed = 1, executedTransactionId = ? WHERE id = ?",
+                "UPDATE simulatorRows SET executed = 1, executedTransactionId = ? WHERE ledgerId = currentLedgerId() AND (id = ?)",
                 ((fromCursor.lastrowid, rowId) for rowId in linkedSimulatorRowIds),
             )
 
@@ -1188,6 +1211,7 @@ def minimumStatus(minimumBalanceCents, cautionPercent, balanceCents):
 
 
 def createAccount(connection, name, accountClass, accountSubtype=None, displayOrder=0, openingBalance=None, creditLimit=None, minimumBalance=None, minimumCautionPercent=None, utilizationWarning=None, pinnedForSelection=False):
+    requireLedger(connection)
     if type(pinnedForSelection) is not bool:
         raise ValidationError("Pin in account selectors must be Boolean")
     name = requireText(name, "Account name")
@@ -1234,6 +1258,7 @@ def createAccount(connection, name, accountClass, accountSubtype=None, displayOr
 
 
 def updateAccount(connection, accountId, name, accountClass, accountSubtype=None, displayOrder=0, active=True, creditLimit=None, minimumBalance=None, minimumCautionPercent=None, utilizationWarning=None, pinnedForSelection=None):
+    requireLedger(connection)
     existingAccount = getAccount(connection, accountId)
     if pinnedForSelection is None:
         pinnedForSelection = bool(existingAccount["pinnedForSelection"])
@@ -1257,17 +1282,17 @@ def updateAccount(connection, accountId, name, accountClass, accountSubtype=None
     utilizationWarningBasisPoints = utilizationWarningValue(accountClass, accountSubtype, creditLimitCents, utilizationWarning)
     minimumBalanceCents, minimumCautionPercent = cashMinimumValues(accountClass, minimumBalance, minimumCautionPercent)
     if not active and connection.execute(
-        """SELECT 1 FROM sinkingFundPlans p JOIN transactionTemplates tt ON tt.id = p.templateId
+        """SELECT 1 FROM scopedsinkingFundPlans p JOIN scopedtransactionTemplates tt ON tt.id = p.templateId
            WHERE p.active = 1 AND tt.accountId = ?""", (accountId,)
     ).fetchone():
         raise ValidationError("Archive or remove the active Sinking Fund plan before archiving this account")
     if not active and connection.execute(
-        """SELECT 1 FROM expectedIncomePlans p JOIN transactionTemplates tt ON tt.id = p.templateId
+        """SELECT 1 FROM scopedexpectedIncomePlans p JOIN scopedtransactionTemplates tt ON tt.id = p.templateId
            WHERE p.active = 1 AND tt.accountId = ?""", (accountId,)
     ).fetchone():
         raise ValidationError("Archive or remove the active expected income plan before archiving this account")
     if connection.execute(
-        "SELECT 1 FROM plannedCreditPayments WHERE active = 1 AND accountId = ?", (accountId,)
+        "SELECT 1 FROM scopedplannedCreditPayments WHERE active = 1 AND accountId = ?", (accountId,)
     ).fetchone() and (not active or accountClass != "credit" or accountSubtype not in {"Credit Card", "Personal Loan"}):
         raise ValidationError("Archive or remove the active planned debt payment before changing this account")
     try:
@@ -1279,8 +1304,8 @@ def updateAccount(connection, accountId, name, accountClass, accountSubtype=None
                 UPDATE accounts
                 SET name = ?, accountClass = ?, accountSubtype = ?, displayOrder = ?, active = ?, creditLimitCents = ?,
                     minimumBalanceCents = ?, minimumCautionPercent = ?, utilizationWarningBasisPoints = ?, pinnedForSelection = ?
-                WHERE id = ?
-                """,
+                WHERE ledgerId = currentLedgerId() AND (id = ?
+                )""",
                 (name, accountClass, accountSubtype, displayOrder, activeValue, creditLimitCents,
                  minimumBalanceCents, minimumCautionPercent, utilizationWarningBasisPoints, int(pinnedForSelection and active), accountId),
             )
@@ -1289,6 +1314,7 @@ def updateAccount(connection, accountId, name, accountClass, accountSubtype=None
 
 
 def reconcileAccountBalance(connection, accountId, actualBalance):
+    requireLedger(connection)
     account = getAccount(connection, accountId)
     if account["accountClass"] == "system":
         raise ValidationError("System Accounts cannot be reconciled")
@@ -1298,7 +1324,7 @@ def reconcileAccountBalance(connection, accountId, actualBalance):
             raise ValidationError("Credit amount owed cannot be negative")
         actualBalanceCents = -actualBalanceCents
     transactionBalanceCents = connection.execute(
-        "SELECT COALESCE(SUM(amountCents), 0) FROM transactions WHERE accountId = ?",
+        "SELECT COALESCE(SUM(amountCents), 0) FROM scopedtransactions WHERE accountId = ?",
         (accountId,),
     ).fetchone()[0]
     currentBalanceCents = account["balanceOffsetCents"] + transactionBalanceCents
@@ -1306,27 +1332,29 @@ def reconcileAccountBalance(connection, accountId, actualBalance):
     newOffsetCents = account["balanceOffsetCents"] + differenceCents
     with connection:
         connection.execute(
-            "UPDATE accounts SET balanceOffsetCents = ? WHERE id = ?",
+            "UPDATE accounts SET balanceOffsetCents = ? WHERE ledgerId = currentLedgerId() AND (id = ?)",
             (newOffsetCents, accountId),
         )
     return newOffsetCents, differenceCents
 
 
 def validateRollupParent(connection, parentCategoryId):
+    requireLedger(connection)
     if not parentCategoryId:
         return
-    parent = connection.execute("SELECT * FROM categories WHERE id = ?", (parentCategoryId,)).fetchone()
+    parent = connection.execute("SELECT * FROM scopedcategories WHERE id = ?", (parentCategoryId,)).fetchone()
     if not parent or parent["parentCategoryId"] is not None or parent["reportingRole"] != "expense":
         raise ValidationError("Parent must be an existing top-level category")
-    if connection.execute("SELECT 1 FROM transactions WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
+    if connection.execute("SELECT 1 FROM scopedtransactions WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
         raise ValidationError("A category with transaction history cannot become a rollup. Create an empty parent and move this category beneath it instead.")
-    if connection.execute("SELECT 1 FROM transactionTemplates WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
+    if connection.execute("SELECT 1 FROM scopedtransactionTemplates WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
         raise ValidationError("Change or remove Template references before making this category a rollup")
-    if connection.execute("SELECT 1 FROM flexibleCategoryBudgets WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
+    if connection.execute("SELECT 1 FROM scopedflexibleCategoryBudgets WHERE categoryId = ? LIMIT 1", (parentCategoryId,)).fetchone():
         raise ValidationError("Change or remove Flexible Category Budget references before making this category a rollup")
 
 
 def createCategory(connection, name, parentCategoryId=None, displayOrder=0, offerReimbursement=False, reportingRole="expense"):
+    requireLedger(connection)
     name = requireText(name, "Category name")
     parentCategoryId = int(parentCategoryId) if parentCategoryId not in (None, "") else None
     if reportingRole not in {"expense", "income"}:
@@ -1335,16 +1363,16 @@ def createCategory(connection, name, parentCategoryId=None, displayOrder=0, offe
         raise ValidationError("Income categories must be standalone")
     if parentCategoryId:
         if connection.execute(
-            """SELECT 1 FROM sinkingFundPlans p JOIN transactionTemplates tt ON tt.id = p.templateId
+            """SELECT 1 FROM scopedsinkingFundPlans p JOIN scopedtransactionTemplates tt ON tt.id = p.templateId
                WHERE p.active = 1 AND tt.categoryId = ?""", (parentCategoryId,)
         ).fetchone():
             raise ValidationError("Archive or remove the active Sinking Fund plan before making its category a rollup")
         if connection.execute(
-            "SELECT 1 FROM flexibleCategoryBudgets WHERE active = 1 AND categoryId = ?", (parentCategoryId,)
+            "SELECT 1 FROM scopedflexibleCategoryBudgets WHERE active = 1 AND categoryId = ?", (parentCategoryId,)
         ).fetchone():
             raise ValidationError("Remove the active flexible category budget before making its category a rollup")
         parent = connection.execute(
-            "SELECT * FROM categories WHERE id = ?", (parentCategoryId,)
+            "SELECT * FROM scopedcategories WHERE id = ?", (parentCategoryId,)
         ).fetchone()
         if not parent or parent["parentCategoryId"] is not None or parent["reportingRole"] != "expense":
             raise ValidationError("Parent must be an existing top-level category")
@@ -1364,8 +1392,9 @@ def createCategory(connection, name, parentCategoryId=None, displayOrder=0, offe
 
 
 def updateCategory(connection, categoryId, name, parentCategoryId=None, displayOrder=0, active=True, offerReimbursement=False, reportingRole="expense"):
+    requireLedger(connection)
     category = connection.execute(
-        "SELECT * FROM categories WHERE id = ?", (categoryId,)
+        "SELECT * FROM scopedcategories WHERE id = ?", (categoryId,)
     ).fetchone()
     if not category:
         raise ValidationError("Category does not exist")
@@ -1376,32 +1405,32 @@ def updateCategory(connection, categoryId, name, parentCategoryId=None, displayO
     if parentCategoryId == int(categoryId):
         raise ValidationError("A category cannot be its own parent")
     hasChildren = connection.execute(
-        "SELECT 1 FROM categories WHERE parentCategoryId = ? LIMIT 1", (categoryId,)
+        "SELECT 1 FROM scopedcategories WHERE parentCategoryId = ? LIMIT 1", (categoryId,)
     ).fetchone()
-    configured = connection.execute("SELECT 1 FROM applicationSettings WHERE key = 'reimbursementCategoryId' AND value = ?", (str(categoryId),)).fetchone()
+    configured = connection.execute("SELECT 1 FROM scopedapplicationSettings WHERE key = 'reimbursementCategoryId' AND value = ?", (str(categoryId),)).fetchone()
     if configured and (not active or reportingRole != "income" or parentCategoryId):
         raise ValidationError("Choose another Reimbursement Category before changing this category")
-    if reportingRole != category["reportingRole"] and connection.execute("SELECT 1 FROM transactions WHERE categoryId = ? LIMIT 1", (categoryId,)).fetchone():
+    if reportingRole != category["reportingRole"] and connection.execute("SELECT 1 FROM scopedtransactions WHERE categoryId = ? LIMIT 1", (categoryId,)).fetchone():
         raise ValidationError("Reporting Role cannot change after a category has transactions")
     if reportingRole == "income" and (parentCategoryId or hasChildren):
         raise ValidationError("Income categories must be standalone")
     referencedByActivePlan = connection.execute(
-        """SELECT 1 FROM sinkingFundPlans p JOIN transactionTemplates tt ON tt.id = p.templateId
+        """SELECT 1 FROM scopedsinkingFundPlans p JOIN scopedtransactionTemplates tt ON tt.id = p.templateId
            WHERE p.active = 1 AND tt.categoryId = ?""", (categoryId,)
     ).fetchone()
     if referencedByActivePlan and (not active or reportingRole != "expense" or parentCategoryId):
         raise ValidationError("Archive or remove the active Sinking Fund plan before changing this category")
     if connection.execute(
-        "SELECT 1 FROM flexibleCategoryBudgets WHERE active = 1 AND categoryId = ?", (categoryId,)
+        "SELECT 1 FROM scopedflexibleCategoryBudgets WHERE active = 1 AND categoryId = ?", (categoryId,)
     ).fetchone() and (not active or reportingRole != "expense" or parentCategoryId or hasChildren):
         raise ValidationError("Remove the active flexible category budget before changing this category")
     if connection.execute(
-        """SELECT 1 FROM expectedIncomePlans p JOIN transactionTemplates tt ON tt.id = p.templateId
+        """SELECT 1 FROM scopedexpectedIncomePlans p JOIN scopedtransactionTemplates tt ON tt.id = p.templateId
            WHERE p.active = 1 AND tt.categoryId = ?""", (categoryId,)
     ).fetchone() and (not active or reportingRole != "income" or parentCategoryId or hasChildren):
         raise ValidationError("Archive or remove the active expected income plan before changing this category")
     if parentCategoryId and connection.execute(
-        """SELECT 1 FROM sinkingFundPlans p JOIN transactionTemplates tt ON tt.id = p.templateId
+        """SELECT 1 FROM scopedsinkingFundPlans p JOIN scopedtransactionTemplates tt ON tt.id = p.templateId
            WHERE p.active = 1 AND tt.categoryId = ?""", (parentCategoryId,)
     ).fetchone():
         raise ValidationError("Archive or remove the active Sinking Fund plan before making its category a rollup")
@@ -1409,7 +1438,7 @@ def updateCategory(connection, categoryId, name, parentCategoryId=None, displayO
         raise ValidationError("A rollup category cannot become a child")
     if parentCategoryId:
         parent = connection.execute(
-            "SELECT * FROM categories WHERE id = ?", (parentCategoryId,)
+            "SELECT * FROM scopedcategories WHERE id = ?", (parentCategoryId,)
         ).fetchone()
         if not parent or parent["parentCategoryId"] is not None or parent["reportingRole"] != "expense":
             raise ValidationError("Parent must be an existing top-level category")
@@ -1421,8 +1450,8 @@ def updateCategory(connection, categoryId, name, parentCategoryId=None, displayO
                 """
                 UPDATE categories
                 SET name = ?, parentCategoryId = ?, displayOrder = ?, active = ?, offerReimbursement = ?, reportingRole = ?
-                WHERE id = ?
-                """,
+                WHERE ledgerId = currentLedgerId() AND (id = ?
+                )""",
                 (name, parentCategoryId, int(displayOrder), 1 if active else 0, 1 if offerReimbursement else 0, reportingRole, categoryId),
             )
     except ValidationError:
@@ -1432,20 +1461,21 @@ def updateCategory(connection, categoryId, name, parentCategoryId=None, displayO
 
 
 def deleteCategory(connection, categoryId):
-    category = connection.execute("SELECT * FROM categories WHERE id = ?", (categoryId,)).fetchone()
+    requireLedger(connection)
+    category = connection.execute("SELECT * FROM scopedcategories WHERE id = ?", (categoryId,)).fetchone()
     if not category:
         raise ValidationError("Category does not exist")
-    if connection.execute("SELECT 1 FROM applicationSettings WHERE key = 'reimbursementCategoryId' AND value = ?", (str(categoryId),)).fetchone():
+    if connection.execute("SELECT 1 FROM scopedapplicationSettings WHERE key = 'reimbursementCategoryId' AND value = ?", (str(categoryId),)).fetchone():
         raise ValidationError("Choose another Reimbursement Category before deleting this category")
-    if connection.execute("SELECT 1 FROM transactions WHERE categoryId = ? LIMIT 1", (categoryId,)).fetchone():
+    if connection.execute("SELECT 1 FROM scopedtransactions WHERE categoryId = ? LIMIT 1", (categoryId,)).fetchone():
         raise ValidationError("Category cannot be deleted because transactions reference it")
-    if connection.execute("SELECT 1 FROM categories WHERE parentCategoryId = ? LIMIT 1", (categoryId,)).fetchone():
+    if connection.execute("SELECT 1 FROM scopedcategories WHERE parentCategoryId = ? LIMIT 1", (categoryId,)).fetchone():
         raise ValidationError("Category cannot be deleted because it has child categories")
-    if connection.execute("SELECT 1 FROM flexibleCategoryBudgets WHERE categoryId = ? LIMIT 1", (categoryId,)).fetchone():
+    if connection.execute("SELECT 1 FROM scopedflexibleCategoryBudgets WHERE categoryId = ? LIMIT 1", (categoryId,)).fetchone():
         raise ValidationError("Delete the flexible category budget before deleting this category")
     with connection:
-        connection.execute("UPDATE transactionTemplates SET categoryId = NULL WHERE categoryId = ?", (categoryId,))
-        connection.execute("DELETE FROM categories WHERE id = ?", (categoryId,))
+        connection.execute("UPDATE transactionTemplates SET categoryId = NULL WHERE ledgerId = currentLedgerId() AND (categoryId = ?)", (categoryId,))
+        connection.execute("DELETE FROM categories WHERE ledgerId = currentLedgerId() AND (id = ?)", (categoryId,))
 
 
 def reportingPeriod(period, startDate=None, endDate=None, today=None):
@@ -1501,11 +1531,12 @@ def percentageHundredths(numerator, denominator):
 
 
 def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None, today=None):
+    requireLedger(connection)
     periodStart, periodEnd, dayCount = reportingPeriod(period, startDate, endDate, today)
     invalidRollups = connection.execute(
-        """SELECT c.name FROM categories c
-           WHERE EXISTS (SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id)
-             AND EXISTS (SELECT 1 FROM transactions t WHERE t.categoryId = c.id)
+        """SELECT c.name FROM scopedcategories c
+           WHERE EXISTS (SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id)
+             AND EXISTS (SELECT 1 FROM scopedtransactions t WHERE t.categoryId = c.id)
            ORDER BY c.displayOrder, c.name, c.id"""
     ).fetchall()
     categoryReportingError = None
@@ -1519,8 +1550,8 @@ def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None
         """
         SELECT c.id, c.name, c.parentCategoryId, c.displayOrder, c.reportingRole,
                COALESCE(SUM(t.amountCents), 0) AS storedAmountCents
-        FROM categories AS c
-        LEFT JOIN transactions AS t
+        FROM scopedcategories AS c
+        LEFT JOIN scopedtransactions AS t
           ON t.categoryId = c.id
          AND t.transferId IS NULL
          AND t.date BETWEEN ? AND ?
@@ -1565,13 +1596,13 @@ def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None
                    AS incomeStoredAmountCents,
                COUNT(CASE WHEN c.reportingRole = 'expense' THEN 1 END) AS expenseCount,
                COUNT(CASE WHEN c.reportingRole = 'income' THEN 1 END) AS incomeCount
-        FROM accounts AS a
-        LEFT JOIN transactions AS t
+        FROM scopedaccounts AS a
+        LEFT JOIN scopedtransactions AS t
           ON t.accountId = a.id
          AND t.transferId IS NULL
          AND t.categoryId IS NOT NULL
          AND t.date BETWEEN ? AND ?
-        LEFT JOIN categories AS c ON c.id = t.categoryId
+        LEFT JOIN scopedcategories AS c ON c.id = t.categoryId
         WHERE a.accountClass IN ('cash', 'credit')
         GROUP BY a.id
         HAVING a.active = 1 OR expenseCount > 0 OR incomeCount > 0
@@ -1621,8 +1652,8 @@ def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None
         """
         SELECT a.id, a.name, a.accountClass, a.active, a.displayOrder,
                SUM(t.amountCents) AS ledgerChangeCents
-        FROM accounts AS a
-        JOIN transactions AS t ON t.accountId = a.id
+        FROM scopedaccounts AS a
+        JOIN scopedtransactions AS t ON t.accountId = a.id
         WHERE t.date BETWEEN ? AND ? AND a.accountClass IN ('cash', 'credit')
         GROUP BY a.id
         ORDER BY CASE a.accountClass WHEN 'cash' THEN 0 ELSE 1 END,
@@ -1658,8 +1689,8 @@ def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None
     expenseAccountCategoryRows = connection.execute(
         """
         SELECT t.accountId, t.categoryId, -SUM(t.amountCents) AS amountCents
-        FROM transactions AS t
-        JOIN categories AS c ON c.id = t.categoryId
+        FROM scopedtransactions AS t
+        JOIN scopedcategories AS c ON c.id = t.categoryId
         WHERE t.transferId IS NULL
           AND c.reportingRole = 'expense'
           AND t.date BETWEEN ? AND ?
@@ -1748,6 +1779,7 @@ def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None
 
 
 def optionalTemplateValues(connection, accountId, description, categoryId, enteredAmount):
+    requireLedger(connection)
     account = getAccount(connection, accountId, activeRequired=True) if accountId not in (None, "") else None
     if account and account["accountClass"] == "system":
         raise ValidationError("System Accounts cannot be used by transaction templates")
@@ -1760,6 +1792,7 @@ def optionalTemplateValues(connection, accountId, description, categoryId, enter
 
 
 def createTemplate(connection, name, accountId, description, categoryId, enteredAmount, displayOrder=0, prefillAmount=True):
+    requireLedger(connection)
     name = requireText(name, "Template name")
     account, description, category, amountCents = optionalTemplateValues(
         connection, accountId, description, categoryId, enteredAmount
@@ -1786,8 +1819,9 @@ def createTemplate(connection, name, accountId, description, categoryId, entered
 
 
 def updateTemplate(connection, templateId, name, accountId, description, categoryId, enteredAmount, displayOrder=0, active=True, prefillAmount=True):
+    requireLedger(connection)
     existing = connection.execute(
-        "SELECT * FROM transactionTemplates WHERE id = ?", (templateId,)
+        "SELECT * FROM scopedtransactionTemplates WHERE id = ?", (templateId,)
     ).fetchone()
     if not existing:
         raise ValidationError("Template does not exist")
@@ -1796,7 +1830,7 @@ def updateTemplate(connection, templateId, name, accountId, description, categor
         connection, accountId, description, categoryId, enteredAmount
     )
     if connection.execute(
-        "SELECT 1 FROM sinkingFundPlans WHERE templateId = ? AND active = 1", (templateId,)
+        "SELECT 1 FROM scopedsinkingFundPlans WHERE templateId = ? AND active = 1", (templateId,)
     ).fetchone():
         remainsComplete = (
             active and description is not None and category is not None
@@ -1805,7 +1839,7 @@ def updateTemplate(connection, templateId, name, accountId, description, categor
         if not remainsComplete:
             raise ValidationError("Archive or remove the active Sinking Fund plan before making this template incomplete")
     if connection.execute(
-        "SELECT 1 FROM expectedIncomePlans WHERE templateId = ? AND active = 1", (templateId,)
+        "SELECT 1 FROM scopedexpectedIncomePlans WHERE templateId = ? AND active = 1", (templateId,)
     ).fetchone():
         remainsComplete = (
             active and description is not None and category is not None
@@ -1823,8 +1857,8 @@ def updateTemplate(connection, templateId, name, accountId, description, categor
                 UPDATE transactionTemplates
                 SET name = ?, accountId = ?, description = ?, categoryId = ?,
                     enteredAmountCents = ?, displayOrder = ?, active = ?, prefillAmount = ?
-                WHERE id = ?
-                """,
+                WHERE ledgerId = currentLedgerId() AND (id = ?
+                )""",
                 (name, account["id"] if account else None, description,
                  category["id"] if category else None, amountCents,
                  int(displayOrder), 1 if active else 0, 1 if prefillAmount else 0, templateId),
@@ -1836,31 +1870,33 @@ def updateTemplate(connection, templateId, name, accountId, description, categor
 
 
 def deleteTemplate(connection, templateId):
+    requireLedger(connection)
     existing = connection.execute(
-        "SELECT name FROM transactionTemplates WHERE id = ?", (templateId,)
+        "SELECT name FROM scopedtransactionTemplates WHERE id = ?", (templateId,)
     ).fetchone()
     if not existing:
         raise ValidationError("Template does not exist")
     if connection.execute(
-        "SELECT 1 FROM sinkingFundPlans WHERE templateId = ? AND active = 1", (templateId,)
+        "SELECT 1 FROM scopedsinkingFundPlans WHERE templateId = ? AND active = 1", (templateId,)
     ).fetchone():
         raise ValidationError("Archive or remove the active Sinking Fund plan before deleting this template")
     if connection.execute(
-        "SELECT 1 FROM expectedIncomePlans WHERE templateId = ? AND active = 1", (templateId,)
+        "SELECT 1 FROM scopedexpectedIncomePlans WHERE templateId = ? AND active = 1", (templateId,)
     ).fetchone():
         raise ValidationError("Archive or remove the active expected income plan before deleting this template")
     with connection:
-        connection.execute("DELETE FROM transactionTemplates WHERE id = ?", (templateId,))
+        connection.execute("DELETE FROM transactionTemplates WHERE ledgerId = currentLedgerId() AND (id = ?)", (templateId,))
 
 
 def validateCompleteExpenseTemplate(connection, templateId):
+    requireLedger(connection)
     template = connection.execute(
         """SELECT tt.*, a.active AS accountActive, c.active AS categoryActive,
                   c.reportingRole,
-                  EXISTS(SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id) AS hasChildren
-           FROM transactionTemplates tt
-           LEFT JOIN accounts a ON a.id = tt.accountId
-           LEFT JOIN categories c ON c.id = tt.categoryId
+                  EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
+           FROM scopedtransactionTemplates tt
+           LEFT JOIN scopedaccounts a ON a.id = tt.accountId
+           LEFT JOIN scopedcategories c ON c.id = tt.categoryId
            WHERE tt.id = ?""",
         (templateId,),
     ).fetchone()
@@ -1879,6 +1915,7 @@ def validateCompleteExpenseTemplate(connection, templateId):
 
 
 def setPaychecksPerYear(connection, rawValue):
+    requireLedger(connection)
     try:
         paychecksPerYear = int(rawValue)
     except (TypeError, ValueError) as error:
@@ -1887,29 +1924,29 @@ def setPaychecksPerYear(connection, rawValue):
         raise ValidationError("Paychecks Per Year must be a positive whole number")
     with connection:
         connection.execute(
-            "INSERT INTO applicationSettings (key, value) VALUES ('paychecksPerYear', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO applicationSettings (key, value) VALUES ('paychecksPerYear', ?) ON CONFLICT(ledgerId, key) DO UPDATE SET value = excluded.value",
             (str(paychecksPerYear),),
         )
     return paychecksPerYear
 
 
 def setSuggestionRounding(connection, rawValue):
+    requireLedger(connection)
     if rawValue in (None, ""):
         with connection:
-            connection.execute("DELETE FROM applicationSettings WHERE key = 'suggestionRoundingCents'")
+            connection.execute("DELETE FROM applicationSettings WHERE ledgerId = currentLedgerId() AND (key = 'suggestionRoundingCents')")
         return None
     roundingCents = parseMoneyCents(rawValue, positiveOnly=True)
     with connection:
         connection.execute(
-            "INSERT INTO applicationSettings (key, value) VALUES ('suggestionRoundingCents', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO applicationSettings (key, value) VALUES ('suggestionRoundingCents', ?) ON CONFLICT(ledgerId, key) DO UPDATE SET value = excluded.value",
             (str(roundingCents),),
         )
     return roundingCents
 
 
 def setBudgetSuggestionWindows(connection, monthlyDays, quarterlyMonths, annualMonths):
+    requireLedger(connection)
     rawValues = {
         "monthlySuggestionWindowDays": monthlyDays,
         "quarterlySuggestionWindowMonths": quarterlyMonths,
@@ -1926,22 +1963,23 @@ def setBudgetSuggestionWindows(connection, monthlyDays, quarterlyMonths, annualM
         parsedValues[key] = parsedValue
     with connection:
         connection.executemany(
-            "INSERT INTO applicationSettings (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO applicationSettings (key, value) VALUES (?, ?) ON CONFLICT(ledgerId, key) DO UPDATE SET value = excluded.value",
             [(key, str(value)) for key, value in parsedValues.items()],
         )
     return parsedValues
 
 
 def applicationSettingInteger(connection, key, defaultValue):
-    row = connection.execute("SELECT value FROM applicationSettings WHERE key = ?", (key,)).fetchone()
+    requireLedger(connection)
+    row = connection.execute("SELECT value FROM scopedapplicationSettings WHERE key = ?", (key,)).fetchone()
     return int(row["value"]) if row else defaultValue
 
 
 def validateFlexibleCategory(connection, categoryId):
+    requireLedger(connection)
     category = connection.execute(
-        """SELECT c.*, EXISTS(SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id) AS hasChildren
-           FROM categories c WHERE c.id = ?""", (categoryId,)
+        """SELECT c.*, EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
+           FROM scopedcategories c WHERE c.id = ?""", (categoryId,)
     ).fetchone()
     if not category or not category["active"] or category["reportingRole"] != "expense" or category["hasChildren"]:
         raise ValidationError("Flexible budgets require an active selectable Expense category")
@@ -1949,6 +1987,7 @@ def validateFlexibleCategory(connection, categoryId):
 
 
 def createFlexibleCategoryBudget(connection, categoryId, monthlyTarget):
+    requireLedger(connection)
     category = validateFlexibleCategory(connection, categoryId)
     targetCents = parseMoneyCents(monthlyTarget, positiveOnly=True)
     try:
@@ -1965,7 +2004,8 @@ def createFlexibleCategoryBudget(connection, categoryId, monthlyTarget):
 
 
 def updateFlexibleCategoryBudget(connection, budgetId, categoryId, monthlyTarget, active=True):
-    if not connection.execute("SELECT 1 FROM flexibleCategoryBudgets WHERE id = ?", (budgetId,)).fetchone():
+    requireLedger(connection)
+    if not connection.execute("SELECT 1 FROM scopedflexibleCategoryBudgets WHERE id = ?", (budgetId,)).fetchone():
         raise ValidationError("Flexible category budget does not exist")
     if active:
         validateFlexibleCategory(connection, categoryId)
@@ -1977,7 +2017,7 @@ def updateFlexibleCategoryBudget(connection, budgetId, categoryId, monthlyTarget
             if active:
                 validateFlexibleCategory(connection, categoryId)
             connection.execute(
-                "UPDATE flexibleCategoryBudgets SET categoryId = ?, monthlyTargetCents = ?, active = ? WHERE id = ?",
+                "UPDATE flexibleCategoryBudgets SET categoryId = ?, monthlyTargetCents = ?, active = ? WHERE ledgerId = currentLedgerId() AND (id = ?)",
                 (categoryId, targetCents, 1 if active else 0, budgetId),
             )
     except sqlite3.IntegrityError as error:
@@ -1985,19 +2025,21 @@ def updateFlexibleCategoryBudget(connection, budgetId, categoryId, monthlyTarget
 
 
 def deleteFlexibleCategoryBudget(connection, budgetId):
+    requireLedger(connection)
     with connection:
-        cursor = connection.execute("DELETE FROM flexibleCategoryBudgets WHERE id = ?", (budgetId,))
+        cursor = connection.execute("DELETE FROM flexibleCategoryBudgets WHERE ledgerId = currentLedgerId() AND (id = ?)", (budgetId,))
     if cursor.rowcount != 1:
         raise ValidationError("Flexible category budget does not exist")
 
 
 def validateCompleteIncomeTemplate(connection, templateId):
+    requireLedger(connection)
     template = connection.execute(
         """SELECT tt.*, a.active AS accountActive, c.active AS categoryActive, c.reportingRole,
-                  EXISTS(SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id) AS hasChildren
-           FROM transactionTemplates tt
-           LEFT JOIN accounts a ON a.id = tt.accountId
-           LEFT JOIN categories c ON c.id = tt.categoryId
+                  EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
+           FROM scopedtransactionTemplates tt
+           LEFT JOIN scopedaccounts a ON a.id = tt.accountId
+           LEFT JOIN scopedcategories c ON c.id = tt.categoryId
            WHERE tt.id = ?""", (templateId,)
     ).fetchone()
     complete = template and template["active"] and (template["accountId"] is None or template["accountActive"])
@@ -2010,6 +2052,7 @@ def validateCompleteIncomeTemplate(connection, templateId):
 
 
 def createExpectedIncomePlan(connection, templateId, expectedDate):
+    requireLedger(connection)
     validateCompleteIncomeTemplate(connection, templateId)
     validateDate(expectedDate)
     with connection:
@@ -2021,26 +2064,29 @@ def createExpectedIncomePlan(connection, templateId, expectedDate):
 
 
 def updateExpectedIncomePlan(connection, planId, templateId, expectedDate, active=True):
-    if not connection.execute("SELECT 1 FROM expectedIncomePlans WHERE id = ?", (planId,)).fetchone():
+    requireLedger(connection)
+    if not connection.execute("SELECT 1 FROM scopedexpectedIncomePlans WHERE id = ?", (planId,)).fetchone():
         raise ValidationError("Expected income plan does not exist")
     if active:
         validateCompleteIncomeTemplate(connection, templateId)
     validateDate(expectedDate)
     with connection:
         connection.execute(
-            "UPDATE expectedIncomePlans SET templateId = ?, expectedDate = ?, active = ? WHERE id = ?",
+            "UPDATE expectedIncomePlans SET templateId = ?, expectedDate = ?, active = ? WHERE ledgerId = currentLedgerId() AND (id = ?)",
             (templateId, expectedDate, 1 if active else 0, planId),
         )
 
 
 def deleteExpectedIncomePlan(connection, planId):
+    requireLedger(connection)
     with connection:
-        cursor = connection.execute("DELETE FROM expectedIncomePlans WHERE id = ?", (planId,))
+        cursor = connection.execute("DELETE FROM expectedIncomePlans WHERE ledgerId = currentLedgerId() AND (id = ?)", (planId,))
     if cursor.rowcount != 1:
         raise ValidationError("Expected income plan does not exist")
 
 
 def validateCreditPaymentAccount(connection, accountId):
+    requireLedger(connection)
     account = getAccount(connection, accountId, activeRequired=True)
     if account["accountClass"] != "credit" or account["accountSubtype"] not in {"Credit Card", "Personal Loan"}:
         raise ValidationError("Planned payments require an active Credit Card or Personal Loan")
@@ -2048,6 +2094,7 @@ def validateCreditPaymentAccount(connection, accountId):
 
 
 def createPlannedCreditPayment(connection, expectedDate, accountId, description, amount):
+    requireLedger(connection)
     validateDate(expectedDate)
     account = validateCreditPaymentAccount(connection, accountId)
     description = requireText(description, "Description")
@@ -2061,7 +2108,8 @@ def createPlannedCreditPayment(connection, expectedDate, accountId, description,
 
 
 def updatePlannedCreditPayment(connection, planId, expectedDate, accountId, description, amount, active=True):
-    if not connection.execute("SELECT 1 FROM plannedCreditPayments WHERE id = ?", (planId,)).fetchone():
+    requireLedger(connection)
+    if not connection.execute("SELECT 1 FROM scopedplannedCreditPayments WHERE id = ?", (planId,)).fetchone():
         raise ValidationError("Planned credit payment does not exist")
     validateDate(expectedDate)
     if active:
@@ -2070,19 +2118,21 @@ def updatePlannedCreditPayment(connection, planId, expectedDate, accountId, desc
     amountCents = parseMoneyCents(amount, positiveOnly=True)
     with connection:
         connection.execute(
-            "UPDATE plannedCreditPayments SET expectedDate = ?, accountId = ?, description = ?, amountCents = ?, active = ? WHERE id = ?",
+            "UPDATE plannedCreditPayments SET expectedDate = ?, accountId = ?, description = ?, amountCents = ?, active = ? WHERE ledgerId = currentLedgerId() AND (id = ?)",
             (expectedDate, accountId, description, amountCents, 1 if active else 0, planId),
         )
 
 
 def deletePlannedCreditPayment(connection, planId):
+    requireLedger(connection)
     with connection:
-        cursor = connection.execute("DELETE FROM plannedCreditPayments WHERE id = ?", (planId,))
+        cursor = connection.execute("DELETE FROM plannedCreditPayments WHERE ledgerId = currentLedgerId() AND (id = ?)", (planId,))
     if cursor.rowcount != 1:
         raise ValidationError("Planned credit payment does not exist")
 
 
 def createSimulatorPlan(connection, name, planDate, duplicatePlanId=None):
+    requireLedger(connection)
     name = requireText(name, "Plan Name")
     validateDate(planDate)
     with connection:
@@ -2091,24 +2141,25 @@ def createSimulatorPlan(connection, name, planDate, duplicatePlanId=None):
         )
         planId = cursor.lastrowid
         if duplicatePlanId is not None:
-            if not connection.execute("SELECT 1 FROM simulatorPlans WHERE id = ?", (duplicatePlanId,)).fetchone():
+            if not connection.execute("SELECT 1 FROM scopedsimulatorPlans WHERE id = ?", (duplicatePlanId,)).fetchone():
                 raise ValidationError("Source plan does not exist")
             connection.execute(
                 """INSERT INTO simulatorRows
                    (planId, rowType, rowOrder, fromAccountId, toAccountId, categoryId, label, amountCents, amountMode, executed, executedTransactionId)
                    SELECT ?, rowType, rowOrder, fromAccountId, toAccountId, categoryId, label, amountCents, amountMode, 0, NULL
-                   FROM simulatorRows WHERE planId = ? ORDER BY rowOrder, id""",
+                   FROM scopedsimulatorRows WHERE planId = ? ORDER BY rowOrder, id""",
                 (planId, duplicatePlanId),
             )
     return planId
 
 
 def updateSimulatorPlan(connection, planId, name, planDate):
+    requireLedger(connection)
     name = requireText(name, "Plan Name")
     validateDate(planDate)
     with connection:
         cursor = connection.execute(
-            "UPDATE simulatorPlans SET name = ?, planDate = ? WHERE id = ?",
+            "UPDATE simulatorPlans SET name = ?, planDate = ? WHERE ledgerId = currentLedgerId() AND (id = ?)",
             (name, planDate, planId),
         )
     if cursor.rowcount != 1:
@@ -2116,14 +2167,16 @@ def updateSimulatorPlan(connection, planId, name, planDate):
 
 
 def deleteSimulatorPlan(connection, planId):
+    requireLedger(connection)
     with connection:
-        cursor = connection.execute("DELETE FROM simulatorPlans WHERE id = ?", (planId,))
+        cursor = connection.execute("DELETE FROM simulatorPlans WHERE ledgerId = currentLedgerId() AND (id = ?)", (planId,))
     if cursor.rowcount != 1:
         raise ValidationError("Plan does not exist")
 
 
 def saveSimulatorRow(connection, planId, rowId, rowType, fromAccountId=None, toAccountId=None,
                      categoryId=None, label=None, amount=None):
+    requireLedger(connection)
     try:
         fromAccountId = int(fromAccountId) if fromAccountId not in (None, "") else None
         toAccountId = int(toAccountId) if toAccountId not in (None, "") else None
@@ -2134,12 +2187,12 @@ def saveSimulatorRow(connection, planId, rowId, rowType, fromAccountId=None, toA
         raise ValidationError("Type is required")
     payoffMode = rowType == "payoff"
     storedRowType = "transfer" if payoffMode else rowType
-    if not connection.execute("SELECT 1 FROM simulatorPlans WHERE id = ?", (planId,)).fetchone():
+    if not connection.execute("SELECT 1 FROM scopedsimulatorPlans WHERE id = ?", (planId,)).fetchone():
         raise ValidationError("Plan does not exist")
     existing = None
     if rowId is not None:
         existing = connection.execute(
-            "SELECT * FROM simulatorRows WHERE id = ? AND planId = ?", (rowId, planId)
+            "SELECT * FROM scopedsimulatorRows WHERE id = ? AND planId = ?", (rowId, planId)
         ).fetchone()
         if not existing:
             raise ValidationError("Worksheet row does not exist")
@@ -2151,7 +2204,7 @@ def saveSimulatorRow(connection, planId, rowId, rowType, fromAccountId=None, toA
         if account["accountClass"] != "cash":
             raise ValidationError("Live balance requires a Cash account")
         duplicate = connection.execute(
-            "SELECT 1 FROM simulatorRows WHERE planId = ? AND rowType = 'live' AND fromAccountId = ? AND id != ?",
+            "SELECT 1 FROM scopedsimulatorRows WHERE planId = ? AND rowType = 'live' AND fromAccountId = ? AND id != ?",
             (planId, account["id"], rowId or -1),
         ).fetchone()
         if duplicate:
@@ -2185,7 +2238,7 @@ def saveSimulatorRow(connection, planId, rowId, rowType, fromAccountId=None, toA
                 if fromAccount["accountClass"] != "cash" or toAccount["accountClass"] != "credit":
                     raise ValidationError("Payoff requires a Cash source and Credit destination")
                 duplicatePayoff = connection.execute(
-                    "SELECT 1 FROM simulatorRows WHERE planId = ? AND amountMode = 'payoff' AND toAccountId = ? AND id != ?",
+                    "SELECT 1 FROM scopedsimulatorRows WHERE planId = ? AND amountMode = 'payoff' AND toAccountId = ? AND id != ?",
                     (planId, toId, rowId or -1),
                 ).fetchone()
                 if duplicatePayoff:
@@ -2203,12 +2256,12 @@ def saveSimulatorRow(connection, planId, rowId, rowType, fromAccountId=None, toA
         if existing:
             connection.execute(
                 """UPDATE simulatorRows SET rowType=?, fromAccountId=?, toAccountId=?, categoryId=?, label=?, amountCents=?, amountMode=?
-                   WHERE id=? AND planId=?""",
+                   WHERE ledgerId = currentLedgerId() AND (id=? AND planId=?)""",
                 (storedRowType, fromId, toId, category, rowLabel, amountCents, "payoff" if payoffMode else "fixed", rowId, planId),
             )
             return rowId
         nextOrder = connection.execute(
-            "SELECT COALESCE(MAX(rowOrder), 0) + 1 FROM simulatorRows WHERE planId = ?", (planId,)
+            "SELECT COALESCE(MAX(rowOrder), 0) + 1 FROM scopedsimulatorRows WHERE planId = ?", (planId,)
         ).fetchone()[0]
         cursor = connection.execute(
             """INSERT INTO simulatorRows
@@ -2220,15 +2273,17 @@ def saveSimulatorRow(connection, planId, rowId, rowType, fromAccountId=None, toA
 
 
 def deleteSimulatorRow(connection, planId, rowId):
+    requireLedger(connection)
     with connection:
         cursor = connection.execute(
-            "DELETE FROM simulatorRows WHERE id = ? AND planId = ?", (rowId, planId)
+            "DELETE FROM simulatorRows WHERE ledgerId = currentLedgerId() AND (id = ? AND planId = ?)", (rowId, planId)
         )
     if cursor.rowcount != 1:
         raise ValidationError("Worksheet row does not exist")
 
 
 def deleteExecutedSimulatorRows(connection, planId, expectedCount):
+    requireLedger(connection)
     try:
         expectedCount = int(expectedCount)
     except (TypeError, ValueError) as error:
@@ -2237,12 +2292,12 @@ def deleteExecutedSimulatorRows(connection, planId, expectedCount):
         raise ValidationError("Executed-row count is invalid")
     with connection:
         plan = connection.execute(
-            "SELECT name FROM simulatorPlans WHERE id = ?", (planId,)
+            "SELECT name FROM scopedsimulatorPlans WHERE id = ?", (planId,)
         ).fetchone()
         if not plan:
             raise ValidationError("Plan does not exist")
         executedCount = connection.execute(
-            """SELECT COUNT(*) FROM simulatorRows
+            """SELECT COUNT(*) FROM scopedsimulatorRows
                WHERE planId = ? AND executed = 1
                  AND rowType NOT IN ('live', 'buffer')""",
             (planId,),
@@ -2253,8 +2308,8 @@ def deleteExecutedSimulatorRows(connection, planId, expectedCount):
             raise ValidationError("Executed rows changed; review the plan and try again")
         cursor = connection.execute(
             """DELETE FROM simulatorRows
-               WHERE planId = ? AND executed = 1
-                 AND rowType NOT IN ('live', 'buffer')""",
+               WHERE ledgerId = currentLedgerId() AND (planId = ? AND executed = 1
+                 AND rowType NOT IN ('live', 'buffer'))""",
             (planId,),
         )
         if cursor.rowcount != executedCount:
@@ -2263,8 +2318,9 @@ def deleteExecutedSimulatorRows(connection, planId, expectedCount):
 
 
 def setSimulatorRowExecuted(connection, planId, rowId, executed):
+    requireLedger(connection)
     row = connection.execute(
-        "SELECT rowType, executedTransactionId FROM simulatorRows WHERE id = ? AND planId = ?",
+        "SELECT rowType, executedTransactionId FROM scopedsimulatorRows WHERE id = ? AND planId = ?",
         (rowId, planId),
     ).fetchone()
     if not row:
@@ -2275,15 +2331,16 @@ def setSimulatorRowExecuted(connection, planId, rowId, executed):
         raise ValidationError("Delete the linked ledger event before returning this row to Planned")
     with connection:
         connection.execute(
-            "UPDATE simulatorRows SET executed = ? WHERE id = ? AND planId = ?",
+            "UPDATE simulatorRows SET executed = ? WHERE ledgerId = currentLedgerId() AND (id = ? AND planId = ?)",
             (1 if executed else 0, rowId, planId),
         )
 
 
 def recordSimulatorTransaction(connection, planId, rowId, accountId, transactionDate,
                                description, categoryId, enteredAmount, pinned=False):
+    requireLedger(connection)
     row = connection.execute(
-        "SELECT * FROM simulatorRows WHERE id = ? AND planId = ?", (rowId, planId)
+        "SELECT * FROM scopedsimulatorRows WHERE id = ? AND planId = ?", (rowId, planId)
     ).fetchone()
     if not row or row["rowType"] not in {"income", "spend"} or row["executed"]:
         raise ValidationError("Planned Income or Spend row does not exist")
@@ -2298,7 +2355,7 @@ def recordSimulatorTransaction(connection, planId, rowId, accountId, transaction
             transactionValues,
         )
         connection.execute(
-            "UPDATE simulatorRows SET executed=1, executedTransactionId=? WHERE id=? AND planId=?",
+            "UPDATE simulatorRows SET executed=1, executedTransactionId=? WHERE ledgerId = currentLedgerId() AND (id=? AND planId=?)",
             (cursor.lastrowid, rowId, planId),
         )
     return cursor.lastrowid
@@ -2306,8 +2363,9 @@ def recordSimulatorTransaction(connection, planId, rowId, accountId, transaction
 
 def recordSimulatorTransfer(connection, planId, rowId, transactionDate, fromAccountId,
                             toAccountId, enteredAmount, description):
+    requireLedger(connection)
     row = connection.execute(
-        "SELECT * FROM simulatorRows WHERE id = ? AND planId = ?", (rowId, planId)
+        "SELECT * FROM scopedsimulatorRows WHERE id = ? AND planId = ?", (rowId, planId)
     ).fetchone()
     if not row or row["rowType"] != "transfer" or row["executed"]:
         raise ValidationError("Planned Transfer, Payment, or Payoff row does not exist")
@@ -2337,28 +2395,29 @@ def recordSimulatorTransfer(connection, planId, rowId, transactionDate, fromAcco
             connection.execute(
                 """UPDATE simulatorRows SET rowType='transfer', amountMode='fixed',
                    fromAccountId=?, toAccountId=?, label=?, amountCents=?, executed=1,
-                   executedTransactionId=? WHERE id=? AND planId=?""",
+                   executedTransactionId=? WHERE ledgerId = currentLedgerId() AND (id=? AND planId=?)""",
                 (fromAccount["id"], toAccount["id"], description, amountCents,
                  sourceCursor.lastrowid, rowId, planId),
             )
         else:
             connection.execute(
-                "UPDATE simulatorRows SET executed=1, executedTransactionId=? WHERE id=? AND planId=?",
+                "UPDATE simulatorRows SET executed=1, executedTransactionId=? WHERE ledgerId = currentLedgerId() AND (id=? AND planId=?)",
                 (sourceCursor.lastrowid, rowId, planId),
             )
     return transferId, sourceCursor.lastrowid
 
 
 def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True):
+    requireLedger(connection)
     reimbursementSetting = connection.execute(
-        """SELECT c.id FROM applicationSettings s JOIN categories c ON c.id=CAST(s.value AS INTEGER)
+        """SELECT c.id FROM scopedapplicationSettings s JOIN scopedcategories c ON c.id=CAST(s.value AS INTEGER)
            WHERE s.key='reimbursementCategoryId' AND c.active=1 AND c.reportingRole='income'
              AND c.parentCategoryId IS NULL
-             AND NOT EXISTS (SELECT 1 FROM categories child WHERE child.parentCategoryId=c.id)"""
+             AND NOT EXISTS (SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId=c.id)"""
     ).fetchone()
     reimbursementCategoryId = reimbursementSetting["id"] if reimbursementSetting else None
     plans = [dict(row) for row in connection.execute(
-        "SELECT * FROM simulatorPlans ORDER BY planDate, id"
+        "SELECT * FROM scopedsimulatorPlans ORDER BY planDate, id"
     )]
     if not plans:
         return {"plans": [], "plan": None, "reimbursementCategoryId": reimbursementCategoryId}
@@ -2367,8 +2426,8 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
         with connection:
             connection.execute(
                 """UPDATE simulatorRows SET executed=0, executedTransactionId=NULL
-                   WHERE planId=? AND executedTransactionId IS NOT NULL
-                     AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id=simulatorRows.executedTransactionId)""",
+                   WHERE ledgerId = currentLedgerId() AND (planId=? AND executedTransactionId IS NOT NULL
+                     AND NOT EXISTS (SELECT 1 FROM scopedtransactions t WHERE t.id=simulatorRows.executedTransactionId))""",
                 (selected["id"],),
             )
     rows = [dict(row) for row in connection.execute(
@@ -2376,8 +2435,8 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
                   fa.accountSubtype fromAccountSubtype, ta.name toAccountName, ta.active toAccountActive,
                   ta.accountClass toAccountClass, ta.accountSubtype toAccountSubtype,
                   c.name categoryName, c.active categoryActive, c.reportingRole categoryRole
-           FROM simulatorRows r LEFT JOIN accounts fa ON fa.id=r.fromAccountId
-           LEFT JOIN accounts ta ON ta.id=r.toAccountId LEFT JOIN categories c ON c.id=r.categoryId
+           FROM scopedsimulatorRows r LEFT JOIN scopedaccounts fa ON fa.id=r.fromAccountId
+           LEFT JOIN scopedaccounts ta ON ta.id=r.toAccountId LEFT JOIN scopedcategories c ON c.id=r.categoryId
            WHERE r.planId=?
            ORDER BY CASE WHEN amountMode = 'payoff' THEN 5
                          ELSE CASE rowType WHEN 'live' THEN 1 WHEN 'income' THEN 2 WHEN 'spend' THEN 3
@@ -2388,7 +2447,7 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
     if not repairMissingLinks:
         for row in rows:
             if row["executedTransactionId"] is not None and not connection.execute(
-                "SELECT 1 FROM transactions WHERE id = ?", (row["executedTransactionId"],)
+                "SELECT 1 FROM scopedtransactions WHERE id = ?", (row["executedTransactionId"],)
             ).fetchone():
                 row["executedTransactionId"] = None
                 row["executed"] = 0
@@ -2396,7 +2455,7 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
         """SELECT a.id, a.name, a.accountClass, a.accountSubtype, a.active, a.creditLimitCents,
                   a.minimumBalanceCents, a.minimumCautionPercent,
                   a.balanceOffsetCents + COALESCE(SUM(t.amountCents),0) balanceCents
-           FROM accounts a LEFT JOIN transactions t ON t.accountId=a.id GROUP BY a.id"""
+           FROM scopedaccounts a LEFT JOIN scopedtransactions t ON t.accountId=a.id GROUP BY a.id"""
     ).fetchall()
     balances = {row["id"]: dict(row) for row in balanceRows}
     accountOrder = []
@@ -2414,7 +2473,7 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
         if row["executedTransactionId"] is not None:
             linked = connection.execute(
                 """SELECT t.*, c.reportingRole categoryRole
-                   FROM transactions t LEFT JOIN categories c ON c.id=t.categoryId WHERE t.id=?""",
+                   FROM scopedtransactions t LEFT JOIN scopedcategories c ON c.id=t.categoryId WHERE t.id=?""",
                 (row["executedTransactionId"],),
             ).fetchone()
             if linked:
@@ -2423,7 +2482,7 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
                 row["label"] = linked["description"]
                 if linked["transferId"]:
                     pair = connection.execute(
-                        "SELECT * FROM transactions WHERE transferId=? ORDER BY amountCents",
+                        "SELECT * FROM scopedtransactions WHERE transferId=? ORDER BY amountCents",
                         (linked["transferId"],),
                     ).fetchall()
                     if len(pair) == 2 and sum(item["amountCents"] for item in pair) == 0:
@@ -2521,9 +2580,10 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
 
 
 def createSinkingFundPlan(connection, templateId, frequency, expectedDate):
+    requireLedger(connection)
     if frequency not in {"monthly", "quarterly", "yearly"}:
         raise ValidationError("Frequency must be Monthly, Quarterly, or Yearly")
-    if frequency != "monthly" and not connection.execute("SELECT 1 FROM applicationSettings WHERE key = 'paychecksPerYear'").fetchone():
+    if frequency != "monthly" and not connection.execute("SELECT 1 FROM scopedapplicationSettings WHERE key = 'paychecksPerYear'").fetchone():
         raise ValidationError("Set Paychecks Per Year before creating a Sinking Fund plan")
     validateCompleteExpenseTemplate(connection, templateId)
     validateDate(expectedDate)
@@ -2539,13 +2599,14 @@ def createSinkingFundPlan(connection, templateId, frequency, expectedDate):
 
 
 def simulatorLedgerMapping(connection, transactionId=None, transferId=None):
+    requireLedger(connection)
     """Return an eligible ledger event as existing Simulator row values."""
     if bool(transactionId) == bool(transferId):
         raise ValidationError("Select one ledger event to send")
     if transferId:
         rows = connection.execute(
             """SELECT t.*, a.name AS accountName, a.active AS accountActive
-               FROM transactions t JOIN accounts a ON a.id = t.accountId
+               FROM scopedtransactions t JOIN scopedaccounts a ON a.id = t.accountId
                WHERE t.transferId = ? ORDER BY t.amountCents""", (transferId,)
         ).fetchall()
         if (len(rows) != 2 or sum(row["amountCents"] for row in rows) != 0
@@ -2563,9 +2624,9 @@ def simulatorLedgerMapping(connection, transactionId=None, transferId=None):
     row = connection.execute(
         """SELECT t.*, a.name AS accountName, a.active AS accountActive,
                   c.name AS categoryName, c.active AS categoryActive,
-                  c.reportingRole, EXISTS(SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id) AS hasChildren
-           FROM transactions t JOIN accounts a ON a.id = t.accountId
-           LEFT JOIN categories c ON c.id = t.categoryId WHERE t.id = ?""", (transactionId,)
+                  c.reportingRole, EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
+           FROM scopedtransactions t JOIN scopedaccounts a ON a.id = t.accountId
+           LEFT JOIN scopedcategories c ON c.id = t.categoryId WHERE t.id = ?""", (transactionId,)
     ).fetchone()
     if (not row or row["transferId"] or not row["categoryId"] or not row["accountActive"]
             or not row["categoryActive"] or row["hasChildren"]):
@@ -2586,30 +2647,32 @@ def simulatorLedgerMapping(connection, transactionId=None, transferId=None):
 
 
 def sendLedgerEventToSimulator(connection, planId, transactionId=None, transferId=None):
+    requireLedger(connection)
     mapping = simulatorLedgerMapping(connection, transactionId, transferId)
     rowId = saveSimulatorRow(
         connection, planId, None, mapping["rowType"], mapping["fromAccountId"],
         mapping["toAccountId"], mapping["categoryId"], mapping["label"],
         f"{mapping['amountCents'] // 100}.{mapping['amountCents'] % 100:02d}",
     )
-    plan = connection.execute("SELECT name FROM simulatorPlans WHERE id = ?", (planId,)).fetchone()
+    plan = connection.execute("SELECT name FROM scopedsimulatorPlans WHERE id = ?", (planId,)).fetchone()
     return rowId, plan["name"]
 
 
 def updateSinkingFundPlan(connection, planId, templateId, frequency, expectedDate, active=True):
-    if not connection.execute("SELECT 1 FROM sinkingFundPlans WHERE id = ?", (planId,)).fetchone():
+    requireLedger(connection)
+    if not connection.execute("SELECT 1 FROM scopedsinkingFundPlans WHERE id = ?", (planId,)).fetchone():
         raise ValidationError("Sinking Fund plan does not exist")
     if frequency not in {"monthly", "quarterly", "yearly"}:
         raise ValidationError("Frequency must be Monthly, Quarterly, or Yearly")
     if active:
-        if frequency != "monthly" and not connection.execute("SELECT 1 FROM applicationSettings WHERE key = 'paychecksPerYear'").fetchone():
+        if frequency != "monthly" and not connection.execute("SELECT 1 FROM scopedapplicationSettings WHERE key = 'paychecksPerYear'").fetchone():
             raise ValidationError("Set Paychecks Per Year before activating a Sinking Fund plan")
         validateCompleteExpenseTemplate(connection, templateId)
     validateDate(expectedDate)
     try:
         with connection:
             connection.execute(
-                "UPDATE sinkingFundPlans SET templateId = ?, frequency = ?, expectedDate = ?, active = ? WHERE id = ?",
+                "UPDATE sinkingFundPlans SET templateId = ?, frequency = ?, expectedDate = ?, active = ? WHERE ledgerId = currentLedgerId() AND (id = ?)",
                 (templateId, frequency, expectedDate, 1 if active else 0, planId),
             )
     except sqlite3.IntegrityError as error:
@@ -2617,8 +2680,9 @@ def updateSinkingFundPlan(connection, planId, templateId, frequency, expectedDat
 
 
 def deleteSinkingFundPlan(connection, planId):
+    requireLedger(connection)
     with connection:
-        cursor = connection.execute("DELETE FROM sinkingFundPlans WHERE id = ?", (planId,))
+        cursor = connection.execute("DELETE FROM sinkingFundPlans WHERE ledgerId = currentLedgerId() AND (id = ?)", (planId,))
     if cursor.rowcount != 1:
         raise ValidationError("Sinking Fund plan does not exist")
 
@@ -2650,6 +2714,7 @@ def calendarMonthDifference(earlierDate, laterDate):
 
 
 def budgetTemplateSuggestions(connection, selectedDate=None):
+    requireLedger(connection)
     selectedDate = selectedDate or date.today()
     if isinstance(selectedDate, str):
         validateDate(selectedDate)
@@ -2662,9 +2727,9 @@ def budgetTemplateSuggestions(connection, selectedDate=None):
     planRows = connection.execute(
         """SELECT templateId, frequency, expectedDate,
                   CASE frequency WHEN 'monthly' THEN 'Monthly' WHEN 'quarterly' THEN 'Quarterly' ELSE 'Yearly' END AS reason
-           FROM sinkingFundPlans WHERE active = 1
+           FROM scopedsinkingFundPlans WHERE active = 1
            UNION ALL
-           SELECT templateId, 'monthly', expectedDate, 'Expected income' FROM expectedIncomePlans WHERE active = 1"""
+           SELECT templateId, 'monthly', expectedDate, 'Expected income' FROM scopedexpectedIncomePlans WHERE active = 1"""
     ).fetchall()
     linkedTemplateIds = set()
     suggestedTemplateIds = set()
@@ -2700,8 +2765,9 @@ def budgetTemplateSuggestions(connection, selectedDate=None):
 
 
 def sinkingFundSummary(connection, today=None):
+    requireLedger(connection)
     today = today or date.today()
-    setting = connection.execute("SELECT value FROM applicationSettings WHERE key = 'paychecksPerYear'").fetchone()
+    setting = connection.execute("SELECT value FROM scopedapplicationSettings WHERE key = 'paychecksPerYear'").fetchone()
     paychecksPerYear = int(setting["value"]) if setting else None
     rows = connection.execute(
         """SELECT p.*, tt.name, tt.accountId, tt.description, tt.categoryId, tt.enteredAmountCents,
@@ -2709,11 +2775,11 @@ def sinkingFundSummary(connection, today=None):
                   a.active AS accountActive, c.name AS categoryName,
                   c.displayOrder AS categoryDisplayOrder, c.parentCategoryId,
                   parent.name AS parentCategoryName
-           FROM sinkingFundPlans p
-           JOIN transactionTemplates tt ON tt.id = p.templateId
-           LEFT JOIN accounts a ON a.id = tt.accountId
-           LEFT JOIN categories c ON c.id = tt.categoryId
-           LEFT JOIN categories parent ON parent.id = c.parentCategoryId
+           FROM scopedsinkingFundPlans p
+           JOIN scopedtransactionTemplates tt ON tt.id = p.templateId
+           LEFT JOIN scopedaccounts a ON a.id = tt.accountId
+           LEFT JOIN scopedcategories c ON c.id = tt.categoryId
+           LEFT JOIN scopedcategories parent ON parent.id = c.parentCategoryId
            ORDER BY p.id"""
     ).fetchall()
     plans = []
@@ -2743,7 +2809,7 @@ def sinkingFundSummary(connection, today=None):
     activeSinkingFunds = [plan for plan in plans if plan["active"] and plan["frequency"] != "monthly"]
     activeMonthlyPlans = [plan for plan in plans if plan["active"] and plan["frequency"] == "monthly"]
     suggestionSetting = connection.execute(
-        "SELECT value FROM applicationSettings WHERE key = 'suggestionRoundingCents'"
+        "SELECT value FROM scopedapplicationSettings WHERE key = 'suggestionRoundingCents'"
     ).fetchone()
     suggestionRoundingCents = int(suggestionSetting["value"]) if suggestionSetting else None
     currentMonthStart = today.replace(day=1)
@@ -2751,10 +2817,10 @@ def sinkingFundSummary(connection, today=None):
     suggestionRows = connection.execute(
         """SELECT c.id, c.name, c.displayOrder,
                   COALESCE(SUM(CASE WHEN t.transferId IS NULL THEN -t.amountCents ELSE 0 END), 0) AS threeMonthCents
-           FROM categories c
-           LEFT JOIN transactions t ON t.categoryId = c.id AND t.date >= ? AND t.date < ?
+           FROM scopedcategories c
+           LEFT JOIN scopedtransactions t ON t.categoryId = c.id AND t.date >= ? AND t.date < ?
            WHERE c.active = 1 AND c.reportingRole = 'expense'
-             AND NOT EXISTS(SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id)
+             AND NOT EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id)
            GROUP BY c.id ORDER BY c.displayOrder, c.name, c.id""",
         (suggestionStart.isoformat(), currentMonthStart.isoformat()),
     ).fetchall()
@@ -2770,7 +2836,7 @@ def sinkingFundSummary(connection, today=None):
     categorySuggestions = {row["id"]: row["suggestionCents"] for row in flexibleCategories}
     flexibleRows = connection.execute(
         """SELECT b.*, c.name AS categoryName, c.displayOrder
-           FROM flexibleCategoryBudgets b JOIN categories c ON c.id = b.categoryId
+           FROM scopedflexibleCategoryBudgets b JOIN scopedcategories c ON c.id = b.categoryId
            ORDER BY c.displayOrder, c.name, b.id"""
     ).fetchall()
     flexibleBudgets = []
@@ -2782,8 +2848,8 @@ def sinkingFundSummary(connection, today=None):
     incomeRows = connection.execute(
         """SELECT p.*, tt.name, tt.accountId, tt.description, tt.categoryId, tt.enteredAmountCents,
                   a.name AS accountName, c.name AS categoryName
-           FROM expectedIncomePlans p JOIN transactionTemplates tt ON tt.id = p.templateId
-           LEFT JOIN accounts a ON a.id = tt.accountId LEFT JOIN categories c ON c.id = tt.categoryId
+           FROM scopedexpectedIncomePlans p JOIN scopedtransactionTemplates tt ON tt.id = p.templateId
+           LEFT JOIN scopedaccounts a ON a.id = tt.accountId LEFT JOIN scopedcategories c ON c.id = tt.categoryId
            ORDER BY p.id"""
     ).fetchall()
     expectedIncomePlans = []
@@ -2793,8 +2859,8 @@ def sinkingFundSummary(connection, today=None):
         expectedIncomePlans.append(item)
 
     paymentRows = connection.execute(
-        """SELECT p.*, a.name AS accountName FROM plannedCreditPayments p
-           JOIN accounts a ON a.id = p.accountId ORDER BY p.id"""
+        """SELECT p.*, a.name AS accountName FROM scopedplannedCreditPayments p
+           JOIN scopedaccounts a ON a.id = p.accountId ORDER BY p.id"""
     ).fetchall()
     plannedCreditPayments = []
     for row in paymentRows:
@@ -2930,13 +2996,15 @@ def integrationLabel(label):
 
 
 def updateIntegrationLabel(connection, secretId, label):
+    requireLedger(connection)
     label = integrationLabel(label)
     with connection:
-        if not connection.execute("UPDATE integrationSecrets SET label = ? WHERE id = ?", (label, secretId)).rowcount:
+        if not connection.execute("UPDATE integrationSecrets SET label = ? WHERE ledgerId = currentLedgerId() AND (id = ?)", (label, secretId)).rowcount:
             raise ValidationError("Integration secret does not exist")
 
 
 def createIntegrationSecret(connection, label):
+    requireLedger(connection)
     label = integrationLabel(label)
     with connection:
         return connection.execute(
@@ -2977,6 +3045,7 @@ def submissionContent(submitted, manual=False):
 
 
 def preparePending(connection, kind, row, pinned=False):
+    requireLedger(connection)
     if kind == "transfer":
         return prepareTransfer(connection, row.get("date"), row.get("fromAccountId"), row.get("toAccountId"), row.get("amount"), row.get("description")), None
     values = prepareTransaction(connection, row.get("accountId"), row.get("date"), row.get("description"), row.get("categoryId"), row.get("amount"), pinned)
@@ -2984,15 +3053,17 @@ def preparePending(connection, kind, row, pinned=False):
 
 
 def insertPending(connection, integrationId, submitted, originalContent, role, sourceSnapshot=None):
+    requireLedger(connection)
     cursor = connection.execute(
         "INSERT INTO pendingSubmissions (integrationId, submissionId, originalContent, originalRole, kind, source, pinned, sourceSnapshot) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (integrationId, submitted["submissionId"], originalContent, role, pendingKind(submitted), "manual" if integrationId is None else "integration", int(submitted.get("pinned", False)), sourceSnapshot),
     )
-    return dict(connection.execute("SELECT * FROM pendingSubmissions WHERE id = ?", (cursor.lastrowid,)).fetchone())
+    return dict(connection.execute("SELECT * FROM scopedpendingSubmissions WHERE id = ?", (cursor.lastrowid,)).fetchone())
 
 
 def integrationTransferReview(connection, submitted):
-    setting = connection.execute("SELECT value FROM applicationSettings WHERE key = 'integrationTransferDefaultDescription'").fetchone()
+    requireLedger(connection)
+    setting = connection.execute("SELECT value FROM scopedapplicationSettings WHERE key = 'integrationTransferDefaultDescription'").fetchone()
     if not setting or setting["value"] != "1":
         return submitted
     destination = getAccount(connection, submitted.get("toAccountId"), activeRequired=True)
@@ -3006,14 +3077,16 @@ def integrationTransferReview(connection, submitted):
 
 
 def submitPendingTransaction(connection, integrationId, submitted):
+    requireLedger(connection)
     return submitPendingEntry(connection, integrationId, submitted)
 
 
 def submitPendingEntry(connection, integrationId, submitted):
+    requireLedger(connection)
     originalContent = submissionContent(submitted, manual=integrationId is None)
     with connection:
         connection.execute("BEGIN IMMEDIATE")
-        existing = connection.execute("SELECT * FROM pendingSubmissions WHERE integrationId IS ? AND submissionId = ?", (integrationId, submitted["submissionId"])).fetchone()
+        existing = connection.execute("SELECT * FROM scopedpendingSubmissions WHERE integrationId IS ? AND submissionId = ?", (integrationId, submitted["submissionId"])).fetchone()
         if existing:
             if existing["originalContent"] != originalContent:
                 raise SubmissionConflict("Submission ID already used with different content")
@@ -3023,8 +3096,8 @@ def submitPendingEntry(connection, integrationId, submitted):
         proposal = insertPending(connection, integrationId, submitted, originalContent, role)
         if review != submitted:
             # Keep original request content for retry identity; only review content is normalized.
-            connection.execute("UPDATE pendingSubmissions SET reviewContent = ? WHERE id = ?", (json.dumps(review, ensure_ascii=False, sort_keys=True), proposal["id"]))
-            proposal = dict(connection.execute("SELECT * FROM pendingSubmissions WHERE id = ?", (proposal["id"],)).fetchone())
+            connection.execute("UPDATE pendingSubmissions SET reviewContent = ? WHERE ledgerId = currentLedgerId() AND (id = ?)", (json.dumps(review, ensure_ascii=False, sort_keys=True), proposal["id"]))
+            proposal = dict(connection.execute("SELECT * FROM scopedpendingSubmissions WHERE id = ?", (proposal["id"],)).fetchone())
         return proposal, True
 
 
@@ -3057,13 +3130,14 @@ def pendingReviewSummary(rows):
 
 
 def pendingReviewRows(connection):
+    requireLedger(connection)
     reviewRows = []
     for proposal in connection.execute(
-        "SELECT p.*, s.label FROM pendingSubmissions p LEFT JOIN integrationSecrets s ON s.id = p.integrationId WHERE p.status = 'Pending' ORDER BY p.id"
+        "SELECT p.*, s.label FROM scopedpendingSubmissions p LEFT JOIN scopedintegrationSecrets s ON s.id = p.integrationId WHERE p.status = 'Pending' ORDER BY p.id"
     ):
         submitted = json.loads(proposal["reviewContent"] or proposal["originalContent"])
         review = {**submitted, "id": proposal["id"], "kind": proposal["kind"], "source": proposal["source"], "pinned": bool(proposal["pinned"]), "submissionId": proposal["submissionId"], "label": "Manual" if proposal["source"] == "manual" else proposal["label"], "originalRole": proposal["originalRole"], "reviewVersion": proposal["reviewVersion"]}
-        category = connection.execute("SELECT reportingRole FROM categories WHERE id = ?", (submitted.get("categoryId"),)).fetchone()
+        category = connection.execute("SELECT reportingRole FROM scopedcategories WHERE id = ?", (submitted.get("categoryId"),)).fetchone()
         review["currentRole"] = category["reportingRole"] if category else None
         review["roleChanged"] = proposal["kind"] == "transaction" and review["currentRole"] != review["originalRole"]
         try:
@@ -3083,6 +3157,7 @@ def validatePendingReviewVersion(proposal, reviewVersion):
 
 
 def validatedReview(connection, proposal, row):
+    requireLedger(connection)
     fields = pendingFields(proposal["kind"])
     if set(row) - {*fields, "id", "reviewedRole", "reviewVersion", "kind"} or row.get("kind", proposal["kind"]) != proposal["kind"]:
         raise ValidationError("Proposal kind is fixed; submit only its review fields")
@@ -3098,11 +3173,12 @@ def validatedReview(connection, proposal, row):
 
 
 def savePendingReview(connection, proposalId, row, integrationUpdate=False):
+    requireLedger(connection)
     if not isinstance(row, dict):
         raise ValidationError("Review fields must be an object")
     with connection:
         connection.execute("BEGIN IMMEDIATE")
-        proposal = connection.execute("SELECT * FROM pendingSubmissions WHERE id = ?", (proposalId,)).fetchone()
+        proposal = connection.execute("SELECT * FROM scopedpendingSubmissions WHERE id = ?", (proposalId,)).fetchone()
         if not proposal and integrationUpdate:
             return None
         if not proposal or proposal["status"] != "Pending":
@@ -3119,11 +3195,12 @@ def savePendingReview(connection, proposalId, row, integrationUpdate=False):
             row = integrationTransferReview(connection, row)
         content, values = validatedReview(connection, proposal, row)
         nextVersion = proposal["reviewVersion"] + 1
-        connection.execute("UPDATE pendingSubmissions SET reviewContent = ?, reviewVersion = ? WHERE id = ?", (json.dumps(content, ensure_ascii=False, sort_keys=True), nextVersion, proposalId))
+        connection.execute("UPDATE pendingSubmissions SET reviewContent = ?, reviewVersion = ? WHERE ledgerId = currentLedgerId() AND (id = ?)", (json.dumps(content, ensure_ascii=False, sort_keys=True), nextVersion, proposalId))
     return nextVersion
 
 
 def decidePendingTransactions(connection, decision, rows, approveAll=False):
+    requireLedger(connection)
     if type(approveAll) is not bool or (approveAll and decision != "approve"):
         raise ValidationError("Approve All is only available for approval")
     if decision not in {"approve", "reject"} or not isinstance(rows, list) or not rows:
@@ -3136,11 +3213,11 @@ def decidePendingTransactions(connection, decision, rows, approveAll=False):
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         if approveAll:
-            pendingIds = {proposal["id"] for proposal in connection.execute("SELECT id FROM pendingSubmissions WHERE status = 'Pending'")}
+            pendingIds = {proposal["id"] for proposal in connection.execute("SELECT id FROM scopedpendingSubmissions WHERE status = 'Pending'")}
             if pendingIds != set(proposalIds):
                 raise SubmissionConflict("Review is stale: the pending queue changed. Refresh before approving all.")
         for row in rows:
-            proposal = connection.execute("SELECT * FROM pendingSubmissions WHERE id = ?", (row["id"],)).fetchone()
+            proposal = connection.execute("SELECT * FROM scopedpendingSubmissions WHERE id = ?", (row["id"],)).fetchone()
             if not proposal or proposal["status"] != "Pending":
                 raise SubmissionConflict("Review is stale: a selected proposal is no longer Pending. Refresh before deciding.")
             validatePendingReviewVersion(proposal, row.get("reviewVersion", 0))
@@ -3155,36 +3232,38 @@ def decidePendingTransactions(connection, decision, rows, approveAll=False):
                     transferId = insertTransfer(connection, values)
                 else:
                     transactionId = connection.execute("INSERT INTO transactions (accountId, date, description, amountCents, categoryId, pinned) VALUES (?, ?, ?, ?, ?, ?)", values).lastrowid
-            connection.execute("UPDATE pendingSubmissions SET status = ?, transactionId = ?, transferId = ? WHERE id = ?", ("Approved" if decision == "approve" else "Rejected", transactionId, transferId, row["id"]))
+            connection.execute("UPDATE pendingSubmissions SET status = ?, transactionId = ?, transferId = ? WHERE ledgerId = currentLedgerId() AND (id = ?)", ("Approved" if decision == "approve" else "Rejected", transactionId, transferId, row["id"]))
     return len(rows)
 
 
 def ledgerMoveSnapshot(connection, transactionId=None, transferId=None):
+    requireLedger(connection)
     if (transactionId is None) == (transferId is None):
         raise ValidationError("Choose one ledger event")
     if transferId is not None:
-        rows = connection.execute("SELECT * FROM transactions WHERE transferId = ? ORDER BY amountCents, id", (transferId,)).fetchall()
+        rows = connection.execute("SELECT * FROM scopedtransactions WHERE transferId = ? ORDER BY amountCents, id", (transferId,)).fetchall()
         if len(rows) != 2 or rows[0]["amountCents"] >= 0 or rows[1]["amountCents"] <= 0 or sum(row["amountCents"] for row in rows) != 0 or rows[0]["accountId"] == rows[1]["accountId"] or rows[0]["date"] != rows[1]["date"] or rows[0]["description"] != rows[1]["description"] or any(row["categoryId"] is not None for row in rows):
             raise ValidationError("Transfer is incomplete or invalid")
     else:
-        row = connection.execute("SELECT * FROM transactions WHERE id = ?", (transactionId,)).fetchone()
+        row = connection.execute("SELECT * FROM scopedtransactions WHERE id = ?", (transactionId,)).fetchone()
         if not row or row["transferId"] is not None or row["categoryId"] is None:
             raise ValidationError("Only categorized ordinary transactions or valid transfers can move to Pending")
         rows = [row]
     snapshot = [{key: row[key] for key in ("id", "eventIdentity", "accountId", "date", "description", "amountCents", "categoryId", "transferId", "pinned")} for row in rows]
     if transferId is None:
-        snapshot[0]["reportingRole"] = connection.execute("SELECT reportingRole FROM categories WHERE id = ?", (rows[0]["categoryId"],)).fetchone()["reportingRole"]
+        snapshot[0]["reportingRole"] = connection.execute("SELECT reportingRole FROM scopedcategories WHERE id = ?", (rows[0]["categoryId"],)).fetchone()["reportingRole"]
     snapshot[0]["enteredAmount"] = moneyInputValue(-rows[0]["amountCents"] if transferId is not None else storedAmountForCategory(snapshot[0]["reportingRole"], rows[0]["amountCents"]))
     return snapshot
 
 
 def moveLedgerToPending(connection, requestId, snapshot, transactionId=None, transferId=None):
+    requireLedger(connection)
     if not isinstance(requestId, str) or not 1 <= len(requestId) <= 128 or not requestId.strip() or not isinstance(snapshot, list):
         raise ValidationError("Move requires a request identity and reviewed snapshot")
     originalSnapshot = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
     with connection:
         connection.execute("BEGIN IMMEDIATE")
-        existing = connection.execute("SELECT * FROM pendingSubmissions WHERE source = 'manual' AND submissionId = ?", (requestId,)).fetchone()
+        existing = connection.execute("SELECT * FROM scopedpendingSubmissions WHERE source = 'manual' AND submissionId = ?", (requestId,)).fetchone()
         if existing:
             if existing["sourceSnapshot"] != originalSnapshot:
                 raise SubmissionConflict("Move identity already used with another event")
@@ -3204,8 +3283,8 @@ def moveLedgerToPending(connection, requestId, snapshot, transactionId=None, tra
             submitted.update(accountId=first["accountId"], categoryId=first["categoryId"], amount=moneyInputValue(enteredCents), pinned=bool(first["pinned"]))
         proposal = insertPending(connection, None, submitted, submissionContent(submitted, manual=True), role, originalSnapshot)
         for sourceRow in current:
-            connection.execute("UPDATE simulatorRows SET executed = 0, executedTransactionId = NULL WHERE executedTransactionId = ?", (sourceRow["id"],))
-            connection.execute("DELETE FROM transactions WHERE id = ?", (sourceRow["id"],))
+            connection.execute("UPDATE simulatorRows SET executed = 0, executedTransactionId = NULL WHERE ledgerId = currentLedgerId() AND (executedTransactionId = ?)", (sourceRow["id"],))
+            connection.execute("DELETE FROM transactions WHERE ledgerId = currentLedgerId() AND (id = ?)", (sourceRow["id"],))
         return proposal, True
 
 
@@ -3272,3 +3351,270 @@ def migrateToVersion21(connection):
             raise
         finally:
             connection.execute("PRAGMA foreign_keys = ON")
+
+
+# A scoped connection is request-local. No process-global active ledger exists.
+ledgerTables = (
+    "accounts", "categories", "applicationSettings", "transactions",
+    "transactionTemplates", "sinkingFundPlans", "flexibleCategoryBudgets",
+    "expectedIncomePlans", "plannedCreditPayments", "simulatorPlans",
+    "simulatorRows", "integrationSecrets", "pendingSubmissions",
+)
+
+
+class LedgerConnection(sqlite3.Connection):
+    ledgerId = None
+    actorKind = "system"
+    actorId = "cli"
+    actorLabel = "Command line"
+
+
+def requireLedger(connection):
+    if not isinstance(connection, LedgerConnection) or not connection.ledgerId:
+        raise ValidationError("Authorized ledger context is required")
+    return connection.ledgerId
+
+
+def installLedgerContext(connection):
+    connection.create_function("currentLedgerId", 0, lambda: requireLedger(connection))
+    connection.create_function("auditActorKind", 0, lambda: connection.actorKind)
+    connection.create_function("auditActorId", 0, lambda: str(connection.actorId))
+    connection.create_function("auditActorLabel", 0, lambda: connection.actorLabel)
+    if connection.execute("PRAGMA user_version").fetchone()[0] < 22:
+        return
+    connection.execute("CREATE TEMP VIEW IF NOT EXISTS scopedusers AS SELECT u.*, a.role FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE a.ledgerId = currentLedgerId()")
+    for table in ledgerTables:
+        connection.execute(f"CREATE TEMP VIEW IF NOT EXISTS scoped{table} AS SELECT * FROM main.{table} WHERE ledgerId = currentLedgerId()")
+
+
+def bindLedger(connection, ledgerId, actorKind="system", actorId="cli", actorLabel="Command line"):
+    if not ledgerId or not connection.execute("SELECT 1 FROM ledgers WHERE id = ?", (ledgerId,)).fetchone():
+        raise ValidationError("Ledger does not exist")
+    connection.ledgerId = ledgerId
+    connection.actorKind, connection.actorId, connection.actorLabel = actorKind, actorId, actorLabel
+    return connection
+
+
+def bindInitialLedger(connection):
+    """Trusted single-ledger CLI setup only; never use to authorize a request."""
+    ledgers = connection.execute("SELECT id FROM ledgers").fetchall()
+    if len(ledgers) != 1:
+        raise ValidationError("Single-ledger management requires exactly one ledger")
+    return bindLedger(connection, ledgers[0]["id"])
+
+
+def connectInitialLedgerDatabase(databasePath):
+    connection = connectDatabase(databasePath)
+    try:
+        return bindInitialLedger(connection)
+    except Exception:
+        connection.close()
+        raise
+
+
+def migrateToVersion22(connection):
+    """Rebuild once under an exclusive write transaction; preserve historical IDs."""
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    # TEMP views refer to the final schema; remove them while tables are rebuilt.
+    for table in ledgerTables:
+        connection.execute(f"DROP VIEW IF EXISTS temp.scoped{table}")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        tableSql = {row["name"]: row["sql"] for row in connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'")}
+        schemaObjects = connection.execute("SELECT type, name, sql FROM sqlite_master WHERE type IN ('index', 'trigger') AND sql IS NOT NULL").fetchall()
+        sequences = dict(connection.execute("SELECT name, seq FROM sqlite_sequence"))
+        oldUsers = connection.execute("SELECT * FROM users").fetchall()
+        initialOwner = next((user for user in oldUsers if user["role"] == "owner"), None)
+        ledgerId = str(uuid4())
+        connection.execute("CREATE TABLE ledgers (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL CHECK(length(trim(name)) > 0))")
+        connection.execute("INSERT INTO ledgers VALUES (?, ?)", (ledgerId, f"{initialOwner['username']}’s Finances" if initialOwner else "Finances"))
+        references = {
+            "categories": (("parentCategoryId", "categories"),),
+            "transactions": (("accountId", "accounts"), ("categoryId", "categories")),
+            "transactionTemplates": (("accountId", "accounts"), ("categoryId", "categories")),
+            "sinkingFundPlans": (("templateId", "transactionTemplates"),),
+            "flexibleCategoryBudgets": (("categoryId", "categories"),),
+            "expectedIncomePlans": (("templateId", "transactionTemplates"),),
+            "plannedCreditPayments": (("accountId", "accounts"),),
+            "simulatorRows": (("planId", "simulatorPlans"), ("fromAccountId", "accounts"), ("toAccountId", "accounts"), ("categoryId", "categories"), ("executedTransactionId", "transactions")),
+            "pendingSubmissions": (("integrationId", "integrationSecrets"), ("transactionId", "transactions")),
+        }
+        for table in ledgerTables:
+            definition = tableSql[table]
+            definition = re.sub(r"CREATE TABLE(?: IF NOT EXISTS)?\s+\"?" + table + r"\"?", f"CREATE TABLE {table}Version22", definition, count=1, flags=re.I)
+            # Names are unique per ledger, while integration secret values stay global.
+            if table in {"accounts", "categories", "transactionTemplates"}:
+                definition = definition.replace("name TEXT NOT NULL UNIQUE", "name TEXT NOT NULL")
+            if table == "accounts":
+                definition = definition.replace("systemIdentity TEXT UNIQUE", "systemIdentity TEXT")
+            if table == "applicationSettings":
+                definition = definition.replace("key TEXT PRIMARY KEY", "key TEXT NOT NULL")
+            opening = definition.index("(") + 1
+            definition = definition[:opening] + "ledgerId TEXT NOT NULL DEFAULT (currentLedgerId()) REFERENCES ledgers(id), " + definition[opening:]
+            extra = []
+            if table == "applicationSettings":
+                extra.append("PRIMARY KEY (ledgerId, key)")
+            else:
+                extra.append("UNIQUE (ledgerId, id)")
+            if table in {"accounts", "categories", "transactionTemplates"}:
+                extra.append("UNIQUE (ledgerId, name)")
+            if table == "accounts":
+                extra.append("UNIQUE (ledgerId, systemIdentity)")
+            if table == "integrationSecrets":
+                opening = definition.index("(") + 1
+                definition = definition[:opening] + "revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1) AND (revoked = 0 OR active = 0)), " + definition[opening:]
+            if table == "pendingSubmissions":
+                # Manual request IDs must be unique within, rather than across, ledgers.
+                definition = definition.replace("UNIQUE(source, submissionId)", "UNIQUE(ledgerId, source, submissionId)")
+            for column, parent in references.get(table, ()):
+                extra.append(f"FOREIGN KEY (ledgerId, {column}) REFERENCES {parent}(ledgerId, id)")
+            closing = definition.rfind(")")
+            definition = definition[:closing] + ", " + ", ".join(extra) + definition[closing:]
+            connection.execute(definition)
+            columns = [row["name"] for row in connection.execute(f"PRAGMA table_info({table})")]
+            columnSql = ", ".join(f'"{column}"' for column in columns)
+            connection.execute(f"INSERT INTO {table}Version22 ({columnSql}, ledgerId) SELECT {columnSql}, ? FROM {table}", (ledgerId,))
+            if table == "integrationSecrets":
+                connection.execute("UPDATE integrationSecretsVersion22 SET revoked = 1 WHERE active = 0")
+        connection.execute("CREATE TABLE usersVersion22 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, usernameKey TEXT NOT NULL UNIQUE, passwordHash TEXT NOT NULL, authVersion INTEGER NOT NULL DEFAULT 1, lastLoginAt TEXT)")
+        connection.execute("INSERT INTO usersVersion22 (id, username, usernameKey, passwordHash, authVersion) SELECT id, username, usernameKey, passwordHash, authVersion FROM users")
+        for row in schemaObjects:
+            connection.execute(f'DROP {row["type"]} "{row["name"]}"')
+        for table in (*ledgerTables, "users"):
+            connection.execute(f"DROP TABLE {table}")
+        for table in (*ledgerTables, "users"):
+            connection.execute(f"ALTER TABLE {table}Version22 RENAME TO {table}")
+        connection.execute("CREATE TABLE ledgerAccess (userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ledgerId TEXT NOT NULL REFERENCES ledgers(id), role TEXT NOT NULL CHECK(role IN ('owner', 'auditor')), PRIMARY KEY(userId, ledgerId))")
+        connection.execute("CREATE UNIQUE INDEX oneOwnerPerLedger ON ledgerAccess(ledgerId) WHERE role = 'owner'")
+        connection.executemany("INSERT INTO ledgerAccess VALUES (?, ?, ?)", ((user["id"], ledgerId, user["role"]) for user in oldUsers))
+        for row in schemaObjects:
+            statement = row["sql"]
+            if row["name"] == "manualSubmissionIdentity":
+                statement = statement.replace("(submissionId)", "(ledgerId, submissionId)")
+            connection.execute(statement)
+        for table, seq in sequences.items():
+            connection.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = ?", (seq, table))
+        connection.execute("CREATE TABLE auditEvents (id INTEGER PRIMARY KEY AUTOINCREMENT, ledgerId TEXT NOT NULL REFERENCES ledgers(id), changedAt TEXT NOT NULL, actorKind TEXT NOT NULL, actorId TEXT NOT NULL, actorLabel TEXT NOT NULL, action TEXT NOT NULL, recordType TEXT NOT NULL, recordId TEXT NOT NULL, beforeValues TEXT, afterValues TEXT)")
+        connection.execute("CREATE INDEX auditLedgerIndex ON auditEvents(ledgerId, id)")
+        installAuditTriggers(connection)
+        for table in ledgerTables:
+            connection.execute(f"CREATE INDEX {table}LedgerIndex ON {table}(ledgerId)")
+            # Prevent moving objects into another ledger even through a low-level write.
+            connection.execute(f"CREATE TRIGGER {table}LedgerImmutable BEFORE UPDATE OF ledgerId ON {table} WHEN NEW.ledgerId != OLD.ledgerId BEGIN SELECT RAISE(ABORT, 'Ledger assignment is immutable'); END")
+            # Even an accidentally unscoped write cannot modify another ledger.
+            for action, prefix in (("INSERT", "NEW"), ("UPDATE", "OLD"), ("DELETE", "OLD")):
+                connection.execute(f"CREATE TRIGGER {table}WriteScope{action} BEFORE {action} ON {table} WHEN {prefix}.ledgerId != currentLedgerId() BEGIN SELECT RAISE(ABORT, 'Record does not exist'); END")
+        if connection.execute("PRAGMA foreign_key_check").fetchone():
+            raise RuntimeError("Ledger migration foreign key verification failed")
+        connection.execute("PRAGMA user_version = 22")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+        installLedgerContext(connection)
+
+
+def installAuditTriggers(connection):
+    for table in ledgerTables:
+        columns = [row["name"] for row in connection.execute(f"PRAGMA table_info({table})") if row["name"] not in {"secret", "ledgerId"}]
+        # Pending payloads contain financial fields, never integration credentials.
+        def rowJson(prefix):
+            return "json_object(" + ", ".join(f"'{column}', {prefix}.{column}" for column in columns) + ")"
+        for action, prefix in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            recordKey = "key" if table == "applicationSettings" else "id"
+            before = "NULL" if action == "INSERT" else rowJson("OLD")
+            after = "NULL" if action == "DELETE" else rowJson("NEW")
+            connection.execute(f"""CREATE TRIGGER audit{table}{action} AFTER {action} ON {table}
+                BEGIN INSERT INTO auditEvents (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues)
+                VALUES ({prefix}.ledgerId, strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), '{action.lower()}', '{table}', {prefix}.{recordKey}, {before}, {after}); END""")
+    connection.execute("""CREATE TRIGGER auditLedgerName AFTER UPDATE OF name ON ledgers
+        WHEN OLD.name != NEW.name BEGIN
+        INSERT INTO auditEvents (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues)
+        VALUES (NEW.id, strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), 'update', 'ledgers', NEW.id, json_object('name', OLD.name), json_object('name', NEW.name)); END""")
+    for action in ("INSERT", "UPDATE"):
+        connection.execute(f"""CREATE TRIGGER transferLedger{action} BEFORE {action} ON transactions
+            WHEN NEW.transferId IS NOT NULL AND EXISTS
+                (SELECT 1 FROM transactions WHERE transferId = NEW.transferId AND ledgerId != NEW.ledgerId)
+            BEGIN SELECT RAISE(ABORT, 'Transfer cannot cross ledgers'); END""")
+    for action in ("UPDATE", "DELETE"):
+        connection.execute(f"CREATE TRIGGER auditEventsNo{action} BEFORE {action} ON auditEvents BEGIN SELECT RAISE(ABORT, 'Audit events are append-only'); END")
+
+
+def setIntegrationState(connection, secretId, enabled):
+    requireLedger(connection)
+    with connection:
+        secret = connection.execute("SELECT revoked FROM scopedintegrationSecrets WHERE id = ?", (secretId,)).fetchone()
+        if not secret:
+            raise ValidationError("Integration secret does not exist")
+        if secret["revoked"]:
+            raise ValidationError("Revoked integration secrets cannot be enabled or disabled")
+        connection.execute("UPDATE integrationSecrets SET active = ? WHERE ledgerId = currentLedgerId() AND id = ?", (int(enabled), secretId))
+
+
+def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKeys=False):
+    """Copy a consistent authorized subset into fresh pages, never redact a full DB."""
+    ledgerId = requireLedger(sourceConnection)
+    if sourceConnection.in_transaction:
+        raise ValidationError("Finish the current write before exporting")
+    destinationPath = Path(destinationPath)
+    if destinationPath.exists():
+        raise ValidationError("Export destination must be a new file")
+    with tempfile.TemporaryDirectory(prefix="npf-ledger-export-") as directory:
+        snapshot = sqlite3.connect(Path(directory) / "snapshot.db")
+        destination = None
+        try:
+            sourceConnection.backup(snapshot)
+            snapshot.row_factory = sqlite3.Row
+            memberships = snapshot.execute("SELECT a.*, u.username FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE ledgerId = ?", (ledgerId,)).fetchall()
+            if sum(row["role"] == "owner" for row in memberships) != 1 or sum(row["role"] == "auditor" for row in memberships) > 1:
+                raise ValidationError("Export requires one Owner and at most one Auditor")
+            userIds = [row["userId"] for row in memberships]
+            for userId in userIds:
+                if snapshot.execute("SELECT COUNT(*) FROM ledgerAccess WHERE userId = ?", (userId,)).fetchone()[0] != 1:
+                    raise ValidationError("Shared-membership credential export is not supported")
+            destination = sqlite3.connect(destinationPath)
+            definitions = snapshot.execute("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type = 'table' DESC").fetchall()
+            allowedTables = (*ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents")
+            for definition in definitions:
+                if definition["type"] == "table" and definition["name"] in allowedTables:
+                    destination.execute(definition["sql"])
+            for table in allowedTables:
+                if table == "users":
+                    rows = snapshot.execute("SELECT * FROM users WHERE id IN (SELECT userId FROM ledgerAccess WHERE ledgerId = ?)", (ledgerId,)).fetchall()
+                else:
+                    column = "id" if table == "ledgers" else "ledgerId"
+                    rows = snapshot.execute(f"SELECT * FROM {table} WHERE {column} = ?", (ledgerId,)).fetchall()
+                if rows:
+                    columnNames = ", ".join(f'"{column}"' for column in rows[0].keys())
+                    placeholders = ", ".join("?" for _ in rows[0])
+                    destination.executemany(f"INSERT INTO {table} ({columnNames}) VALUES ({placeholders})", [tuple(row) for row in rows])
+                    copied = destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    if copied != len(rows):
+                        raise RuntimeError("Export row preservation failed")
+            if disableIntegrationKeys:
+                destination.execute("UPDATE integrationSecrets SET active = 0 WHERE revoked = 0 AND active = 1")
+            for definition in definitions:
+                if definition["type"] in {"index", "trigger"} and definition["tbl_name"] in allowedTables:
+                    destination.execute(definition["sql"])
+            # Preserve allocated IDs without copying another ledger's financial rows.
+            for table in allowedTables:
+                sequence = snapshot.execute("SELECT seq FROM sqlite_sequence WHERE name = ?", (table,)).fetchone()
+                if sequence:
+                    destination.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = ?", (sequence[0], table))
+            destination.execute(f"PRAGMA user_version = {schemaVersion}")
+            if destination.execute("PRAGMA foreign_key_check").fetchone() or destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError("Export database integrity verification failed")
+            destination.commit()
+        except Exception:
+            if destination is not None:
+                destination.close()
+                destination = None
+            destinationPath.unlink(missing_ok=True)
+            raise
+        finally:
+            snapshot.close()
+            if destination is not None:
+                destination.close()

@@ -1,3 +1,5 @@
+from tests.test_support import useHistoricalSchema21
+from tests.test_support import snapshotWithoutLoginTime
 import tests
 import json
 import sqlite3
@@ -11,6 +13,7 @@ from app import createApp
 import database as ledger
 from users import createUser
 from tests.test_release_2610 import signIn
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class PendingNextTests(unittest.TestCase):
@@ -20,7 +23,7 @@ class PendingNextTests(unittest.TestCase):
         self.backupsPath = Path(self.directory.name) / "backups"
         self.backupsPath.mkdir()
         ledger.initializeDatabase(self.path)
-        self.connection = ledger.connectDatabase(self.path)
+        self.connection = connectDatabase(self.path)
         createUser(self.connection, "owner", "Owner", "owner password")
         createUser(self.connection, "auditor", "Auditor", "auditor password")
         self.cash = ledger.createAccount(self.connection, "Example Cash", "cash", openingBalance="100.00")
@@ -49,7 +52,7 @@ class PendingNextTests(unittest.TestCase):
         return [{"id": row["id"], **{key: row[key] for key in ledger.pendingFields(row["kind"])}, "reviewedRole": row["currentRole"], "reviewVersion": row["reviewVersion"]} for row in ledger.pendingReviewRows(self.connection)]
 
     def snapshot(self):
-        return tuple(self.connection.iterdump())
+        return tuple(snapshotWithoutLoginTime(self.connection))
 
     def testMixedKindsAndSourcesCountsSignsPinDatesAndNoPendingEffect(self):
         before = self.owner.get("/api/dashboard?period=custom&startDate=1900-01-01&endDate=2100-12-31").get_json()
@@ -160,7 +163,7 @@ class PendingNextTests(unittest.TestCase):
     def testDocumentedRequestsVersionAndOwnerOnlyContract(self):
         from packageApplication import applicationVersion
         contract = self.owner.get("/openapi.json").get_json()
-        self.assertEqual("26.10.19", applicationVersion)
+        self.assertEqual("26.10.21", applicationVersion)
         self.assertEqual(applicationVersion, contract["info"]["version"])
         body = contract["paths"]["/api/integration/submissions"]["post"]["requestBody"]["content"]["application/json"]
         shapes = body["schema"]["oneOf"]
@@ -212,7 +215,7 @@ class PendingNextTests(unittest.TestCase):
         row = {**self.rows()[0], "amount": "7.00"}
         fields = {key: value for key, value in row.items() if key != "id"}
         ledger.savePendingReview(self.connection, proposal["id"], fields)
-        self.connection.close(); ledger.initializeDatabase(self.path); self.connection = ledger.connectDatabase(self.path)
+        self.connection.close(); ledger.initializeDatabase(self.path); self.connection = connectDatabase(self.path)
         self.assertEqual("7.00", ledger.pendingReviewRows(self.connection)[0]["amount"])
         self.assertEqual(proposal["id"], self.submit(self.transfer)["id"])
         with self.assertRaises(ledger.SubmissionConflict):
@@ -268,7 +271,7 @@ class PendingNextTests(unittest.TestCase):
         self.submit(self.ordinary); self.submit(self.transfer)
         reviewed = self.rows(); barrier = threading.Barrier(2)
         def approve(_):
-            connection = ledger.connectDatabase(self.path)
+            connection = connectDatabase(self.path)
             try:
                 barrier.wait()
                 try:
@@ -437,9 +440,8 @@ class PendingNextTests(unittest.TestCase):
     def testVersion20MigrationPreservesAllStateAndBackup(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "version20.db"
-            connection = ledger.connectDatabase(path)
-            connection.executescript(ledger.schemaSql + ledger.securitySchemaSql)
-            ledger.createExternalSystemAccount(connection)
+            ledger.initializeDatabase(path)
+            connection = connectDatabase(path)
             with connection:
                 cashId = connection.execute("INSERT INTO accounts (name, accountClass, balanceOffsetCents, displayOrder) VALUES ('Historical Cash', 'cash', 12345, 77)").lastrowid
                 categoryId = connection.execute("INSERT INTO categories (name, reportingRole) VALUES ('Historical Expense', 'expense')").lastrowid
@@ -454,27 +456,28 @@ class PendingNextTests(unittest.TestCase):
                 connection.execute("UPDATE simulatorRows SET executed = 1, executedTransactionId = 42 WHERE id = ?", (simulatorRow,))
                 connection.execute("INSERT INTO pendingSubmissions (integrationId, submissionId, originalContent, reviewContent, reviewVersion, originalRole, status, transactionId) VALUES (?, 'original', ?, ?, 3, 'expense', 'Approved', 42)", (secretId, content, corrected))
                 connection.execute("UPDATE integrationSecrets SET active = 0 WHERE id = ?", (secretId,))
+                useHistoricalSchema21(connection)
                 connection.execute("PRAGMA user_version = 20")
             tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'sqlite_sequence'")]
             before = {table: [dict(row) for row in connection.execute('SELECT * FROM "' + table + '"')] for table in tables}
             connection.close()
             ledger.initializeDatabase(path)
-            connection = ledger.connectDatabase(path)
+            connection = connectDatabase(path)
             try:
                 for table, records in before.items():
-                    after = [dict(row) for row in connection.execute('SELECT * FROM "' + table + '"')]
+                    after = [dict(row) for row in connection.execute('SELECT * FROM ' + ('scopedusers' if table == 'users' else '"' + table + '"'))]
                     self.assertEqual(records, [{key: row[key] for key in records[index]} for index, row in enumerate(after)], table)
                 migrated = connection.execute("SELECT * FROM pendingSubmissions").fetchone()
                 self.assertEqual(("transaction", "integration", 0, None), (migrated["kind"], migrated["source"], migrated["pinned"], migrated["transferId"]))
                 self.assertEqual(0, connection.execute("SELECT SUM(pinnedForSelection) FROM accounts").fetchone()[0])
                 self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
-                self.assertEqual(21, connection.execute("PRAGMA user_version").fetchone()[0])
+                self.assertEqual(22, connection.execute("PRAGMA user_version").fetchone()[0])
                 created = ledger.createTransaction(connection, cashId, "2026-10-02", "New event", categoryId, "1.00")
                 self.assertGreater(created, 42)
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v20-to-v21-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v20-to-v22-*.db"))
             self.assertEqual(1, len(backups))
             backup = sqlite3.connect(backups[0])
             try:
@@ -485,6 +488,7 @@ class PendingNextTests(unittest.TestCase):
 
     def testLedgerMigrationFailureRollsBackTableRebuild(self):
         ledger.createTransaction(self.connection, self.cash, "2020-01-01", "Preserved", self.expense, "1.00")
+        useHistoricalSchema21(self.connection)
         with self.connection:
             self.connection.execute("DROP TRIGGER ledgerEventIdentity")
             self.connection.execute("ALTER TABLE transactions DROP COLUMN eventIdentity")
@@ -502,7 +506,7 @@ class PendingNextTests(unittest.TestCase):
         snapshot = ledger.ledgerMoveSnapshot(self.connection, transactionId=event)
         barrier = threading.Barrier(2)
         def move(_):
-            connection = ledger.connectDatabase(self.path)
+            connection = connectDatabase(self.path)
             try:
                 barrier.wait()
                 return ledger.moveLedgerToPending(connection, "concurrent-move", snapshot, transactionId=event)
@@ -515,7 +519,7 @@ class PendingNextTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         manual = {**self.transfer, "submissionId": "concurrent-manual"}
         def submit(_):
-            connection = ledger.connectDatabase(self.path)
+            connection = connectDatabase(self.path)
             try:
                 barrier.wait()
                 return ledger.submitPendingEntry(connection, None, manual)
@@ -790,7 +794,7 @@ class PendingNextTests(unittest.TestCase):
                 barrier.wait()
                 return self.app.test_client().put(f"/api/integration/submissions/{proposal['id']}", headers=self.headers, json={**fields, "description": "Agent"}).status_code
             def updateCompeting():
-                connection = ledger.connectDatabase(self.path)
+                connection = connectDatabase(self.path)
                 try:
                     barrier.wait()
                     if competitor in {"approve", "reject"}:
@@ -850,8 +854,8 @@ class PendingNextTests(unittest.TestCase):
 
     def testIntegrationPendingPublishedContractAndExamples(self):
         from packageApplication import applicationVersion
-        contract = json.loads((Path(__file__).resolve().parents[1] / "openapi.json").read_text(encoding="utf-8"))
-        self.assertEqual("26.10.19", applicationVersion)
+        contract = self.owner.get("/openapi.json").get_json()
+        self.assertEqual("26.10.21", applicationVersion)
         self.assertEqual(applicationVersion, contract["info"]["version"])
         pending = contract["paths"]["/api/integration/pending"]["get"]
         update = contract["paths"]["/api/integration/submissions/{proposalId}"]["put"]
