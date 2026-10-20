@@ -1,3 +1,4 @@
+from tests.test_support import useHistoricalSchema21
 import sqlite3
 import tempfile
 import unittest
@@ -5,6 +6,7 @@ from pathlib import Path
 
 import tests  # Activates production-database isolation before importing database code.
 from database import connectDatabase, initializeDatabase, migrateToVersion11, schemaVersion
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class DatabaseTests(unittest.TestCase):
@@ -184,12 +186,13 @@ class DatabaseTests(unittest.TestCase):
         accountId = self.connection.execute(
             "INSERT INTO accounts (name, accountClass) VALUES ('Preserved', 'cash')"
         ).lastrowid
+        useHistoricalSchema21(self.connection)
         self.connection.execute("PRAGMA user_version = 4")
         self.connection.commit()
         self.connection.close()
         initializeDatabase(self.databasePath)
         self.connection = connectDatabase(self.databasePath)
-        backups = list((self.databasePath.parent / "backups").glob("pre-migration-v4-to-v21-*.db"))
+        backups = list((self.databasePath.parent / "backups").glob("pre-migration-v4-to-v22-*.db"))
         self.assertEqual(1, len(backups))
         self.assertEqual("Preserved", self.connection.execute("SELECT name FROM accounts WHERE id = ?", (accountId,)).fetchone()[0])
         self.assertEqual("ok", self.connection.execute("PRAGMA integrity_check").fetchone()[0])
@@ -212,6 +215,7 @@ class DatabaseTests(unittest.TestCase):
             "INSERT INTO sinkingFundPlans (templateId, frequency, expectedDate) VALUES (?, ?, ?)",
             (templateId, "quarterly", "2026-10-31"),
         ).lastrowid
+        useHistoricalSchema21(self.connection)
         self.connection.execute("PRAGMA user_version = 8")
         self.connection.commit()
         self.connection.close()
@@ -226,7 +230,7 @@ class DatabaseTests(unittest.TestCase):
             "INSERT INTO sinkingFundPlans (templateId, frequency, expectedDate, active) VALUES (?, ?, ?, ?)",
             (templateId, "monthly", "2026-11-30", 0),
         )
-        self.assertEqual(21, self.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(22, self.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual([], self.connection.execute("PRAGMA foreign_key_check").fetchall())
 
     def testNewerDatabaseVersionIsRefused(self):

@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import sqlite3
 import tempfile
@@ -6,7 +7,7 @@ import secrets
 import time
 import sys
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from users import configureOnStartup, manageUsers, check_password_hash, password
 
 from database import (
     ValidationError,
+    bindLedger, connectInitialLedgerDatabase, exportLedgerDatabase, setIntegrationState,
     reconcileAccountBalance,
     connectDatabase,
     createAccount,
@@ -158,11 +160,12 @@ def createApp(databasePathOverride=None):
     app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
     sessions = {}
     loginAttempts = {}
+    usernameAttempts = {}
     authenticationLock = threading.RLock()
     dummyPasswordHash = passwordHash(secrets.token_urlsafe(32))
 
     def authenticationPage(message=None, csrfToken=None, status=200):
-        return render_template_string("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>No Part Finance — Sign In</title><meta name="theme-color" content="#202124"><meta name="apple-mobile-web-app-title" content="No Part Finance"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/pwa.webmanifest"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png"><script src="/theme.js"></script><link rel="stylesheet" href="/styles.css"></head><body><main class="signIn"><h1>No Part Finance</h1>{% if csrfToken %}<h2>Sign In</h2><form method="post" action="/sign-in"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><label>Username <input name="username" autocomplete="username" required maxlength="64"></label><label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="128"></label><p role="alert">{{ message or "" }}</p><button type="submit">Sign In</button></form>{% else %}<p>{{ message }}</p>{% endif %}</main></body></html>""", message=message, csrfToken=csrfToken), status
+        return render_template_string("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>No Part Finance — Sign In</title><meta name="theme-color" content="#202124"><meta name="apple-mobile-web-app-title" content="No Part Finance"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/pwa.webmanifest"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png"><script src="/theme.js"></script><link rel="stylesheet" href="/styles.css"></head><body><main class="signIn"><h1>No Part Finance</h1>{% if csrfToken %}<h2>Sign In</h2><form method="post" action="/sign-in"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><label>Username <input name="username" autocomplete="username" required maxlength="64"></label><label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="128"></label><p role="alert">{{ message or "" }}</p><button type="submit">Sign In</button></form>{% else %}<p>{{ message }}</p>{% endif %}</main><footer class="signInVersion">No Part Finance {{ version }}</footer></body></html>""", message=message, csrfToken=csrfToken, version=applicationVersion), status
 
     def setSessionCookie(response, token, maxAge):
         response.set_cookie("npfSession", token, max_age=maxAge, httponly=True, secure=request.is_secure, samesite="Lax")
@@ -180,7 +183,7 @@ def createApp(databasePathOverride=None):
         if request.endpoint in {"robots", "styles", "javascript", "apiDocumentation", "openApiDocument", "webAppManifest", "themeJavascript", "pwaIcon"} or request.endpoint is None:
             return None
         connection = getDatabase()
-        if not connection.execute("SELECT 1 FROM users WHERE role = 'owner'").fetchone():
+        if not connection.execute("SELECT 1 FROM ledgerAccess WHERE role = 'owner'").fetchone():
             message = "No Part Finance is not configured. An Owner is required before you can sign in. From the application folder, run startWindows.bat manage-users (Windows) or ./startLinux.sh manage-users (Linux) in a terminal and choose Create Owner. After setup, reload this page."
             if request.path.startswith("/api/") or request.path == "/health":
                 return jsonify({"error": message}), 503
@@ -190,9 +193,10 @@ def createApp(databasePathOverride=None):
         if request.path.startswith("/api/integration/"):
             secret = authorizationParts[1] if isBearer and len(authorizationParts) == 2 else ""
             if secret:
-                g.integration = connection.execute("SELECT id, label FROM integrationSecrets WHERE secret = ? AND active = 1", (secret,)).fetchone()
+                g.integration = connection.execute("SELECT id, label, ledgerId FROM integrationSecrets WHERE secret = ? AND active = 1 AND revoked = 0 AND EXISTS (SELECT 1 FROM ledgerAccess WHERE ledgerAccess.ledgerId = integrationSecrets.ledgerId AND role = 'owner')", (secret,)).fetchone()
             if not g.integration:
                 return jsonify({"error": "Valid integration Bearer authentication required"}), 401
+            bindLedger(connection, g.integration["ledgerId"], "integration", g.integration["id"], g.integration["label"])
             return None
         # A proxy's Basic/Digest header is not an integration credential and grants
         # no app access. Browser requests still require the normal session and CSRF.
@@ -205,16 +209,20 @@ def createApp(databasePathOverride=None):
                 del sessions[expiredToken]
             g.browserSession = sessions.get(token)
         if g.browserSession and g.browserSession.get("userId"):
-            user = connection.execute("SELECT id, role, username, authVersion FROM users WHERE id = ?", (g.browserSession["userId"],)).fetchone()
-            if user and user["authVersion"] == g.browserSession["authVersion"]:
-                g.user = user
+            memberships = connection.execute("SELECT u.id, u.username, u.authVersion, a.ledgerId, a.role FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE u.id = ?", (g.browserSession["userId"],)).fetchall()
+            if len(memberships) == 1:
+                user = memberships[0]
+                owner = connection.execute("SELECT 1 FROM ledgerAccess WHERE ledgerId = ? AND role = 'owner'", (user["ledgerId"],)).fetchone()
+                if owner and user["authVersion"] == g.browserSession["authVersion"]:
+                    g.user = user
+                    bindLedger(connection, user["ledgerId"], "user", user["id"], user["username"])
         if request.endpoint == "signIn":
             return None
         if not g.user:
             if request.path.startswith("/api/") or request.path == "/health":
                 return jsonify({"error": "Sign In required"}), 401
             return redirect("/sign-in")
-        ownerOnly = request.endpoint in {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "reviewPending", "savePendingRow", "previewPending", "summarizePending", "decidePending", "pendingPage", "downloadBackup", "downloadApplicationPackage", "transactionPendingSnapshot", "transferPendingSnapshot"}
+        ownerOnly = request.endpoint in {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "changeIntegrationState", "reviewPending", "savePendingRow", "previewPending", "summarizePending", "decidePending", "pendingPage", "downloadBackup", "downloadApplicationPackage", "transactionPendingSnapshot", "transferPendingSnapshot"}
         isMutation = request.method not in {"GET", "HEAD", "OPTIONS"}
         nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut"}
         if g.user["role"] == "auditor" and (ownerOnly or (isMutation and request.endpoint not in nonpersistentPosts)):
@@ -234,26 +242,40 @@ def createApp(databasePathOverride=None):
             return setSessionCookie(response, token, 600)
         if not csrfValid():
             return authenticationPage("Sign In form expired. Reload and try again.", status=403)
-        now = time.time()
-        address = request.remote_addr or "unknown"
-        with authenticationLock:
-            for key in [key for key, attempts in loginAttempts.items() if now - attempts[0] >= 60]:
-                del loginAttempts[key]
-            attempts = loginAttempts.setdefault(address, [now, 0])
-            if attempts[1] >= 5:
-                return authenticationPage("Please wait a minute before trying again.", csrfToken=g.browserSession["csrfToken"], status=429)
-            attempts[1] += 1
         username = request.form.get("username", "").strip().casefold()
         password = request.form.get("password", "")
-        user = getDatabase().execute("SELECT * FROM users WHERE usernameKey = ?", (username,)).fetchone()
-        valid = len(password) <= 128 and check_password_hash(user["passwordHash"] if user else dummyPasswordHash, password)
-        if not user or not valid:
-            return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
-        token = secrets.token_urlsafe(32)
+        address = request.remote_addr or "unknown"
+        # Hold the lock through verification: concurrent attempts cannot pass a
+        # shared threshold using stale counts or erase another request's failure.
         with authenticationLock:
+            now = time.time()
+            for key in [key for key, attempts in loginAttempts.items() if now - attempts[0] >= 60]:
+                del loginAttempts[key]
+            for key in [key for key, attempts in usernameAttempts.items() if now >= attempts[1]]:
+                del usernameAttempts[key]
+            attempts = loginAttempts.setdefault(address, [now, 0])
+            failures, until = usernameAttempts.get(username, (0, now + 300))
+            if attempts[1] >= 5 or failures >= 5:
+                return authenticationPage("Unable to sign in. Try again later.", csrfToken=g.browserSession["csrfToken"], status=429)
+            attempts[1] += 1
+            connection = getDatabase()
+            user = connection.execute("SELECT * FROM users WHERE usernameKey = ?", (username,)).fetchone()
+            valid = len(password) <= 128 and check_password_hash(user["passwordHash"] if user else dummyPasswordHash, password)
+            memberships = connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (user["id"],)).fetchall() if user else []
+            if not user or not valid or len(memberships) != 1:
+                failures += 1
+                usernameAttempts[username] = (failures, now + 300 if failures == 5 else until)
+                return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
+            ledgerId = memberships[0]["ledgerId"]
+            if not connection.execute("SELECT 1 FROM ledgerAccess WHERE ledgerId = ? AND role = 'owner'", (ledgerId,)).fetchone():
+                return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
+            token = secrets.token_urlsafe(32)
+            with connection:
+                connection.execute("UPDATE users SET lastLoginAt = ? WHERE id = ?", (datetime.fromtimestamp(now, timezone.utc).isoformat(), user["id"]))
             sessions.pop(request.cookies.get("npfSession"), None)
             sessions[token] = {"userId": user["id"], "authVersion": user["authVersion"], "expiresAt": now + 168 * 3600, "csrfToken": secrets.token_urlsafe(32)}
             loginAttempts.pop(address, None)
+            usernameAttempts.pop(username, None)
         return setSessionCookie(redirect("/"), token, 168 * 3600)
 
     @app.post("/api/logout")
@@ -320,7 +342,7 @@ def createApp(databasePathOverride=None):
     def pageShell():
         if request.path == "/pending" and g.user["role"] != "owner":
             return jsonify({"error": "Owner access required"}), 403
-        return send_from_directory(projectDirectory, "index.html")
+        return Response((projectDirectory / "index.html").read_text().replace("__APPLICATION_VERSION__", applicationVersion), mimetype="text/html")
 
     @app.route("/styles.css")
     def styles():
@@ -346,14 +368,9 @@ def createApp(databasePathOverride=None):
 
     @app.get("/api/backup")
     def downloadBackup():
-        sourceConnection = getDatabase()
-        with tempfile.TemporaryDirectory() as temporaryDirectory:
+        with tempfile.TemporaryDirectory(prefix="npf-web-backup-") as temporaryDirectory:
             backupPath = Path(temporaryDirectory) / "finance-backup.db"
-            backupConnection = sqlite3.connect(backupPath)
-            try:
-                sourceConnection.backup(backupConnection)
-            finally:
-                backupConnection.close()
+            exportLedgerDatabase(getDatabase(), backupPath, disableIntegrationKeysOption())
             backupBytes = backupPath.read_bytes()
         return send_file(
             BytesIO(backupBytes),
@@ -370,23 +387,33 @@ def createApp(databasePathOverride=None):
     def downloadApplicationPackageWithoutDatabase():
         return packageDownloadResponse(False)
 
+    def disableIntegrationKeysOption():
+        if set(request.args) - {"disableIntegrationKeys"}:
+            raise ValidationError("Unsupported download option")
+        value = request.args.get("disableIntegrationKeys", "false")
+        if value not in {"true", "false"}:
+            raise ValidationError("disableIntegrationKeys must be true or false")
+        return value == "true"
+
     def packageDownloadResponse(includeDatabase):
         try:
-            result = createApplicationPackage(
-                repositoryPath=projectDirectory,
-                databasePath=app.config["DATABASE_PATH"],
-                outputPath=app.config["PACKAGE_OUTPUT_DIRECTORY"],
-                includeDatabase=includeDatabase,
-            )
+            # Web exports never persist whole-installation snapshots in packages/.
+            with tempfile.TemporaryDirectory(prefix="npf-web-package-") as directory:
+                exportedPath = Path(directory) / "finance.db"
+                if includeDatabase:
+                    exportLedgerDatabase(getDatabase(), exportedPath, disableIntegrationKeysOption())
+                result = createApplicationPackage(
+                    repositoryPath=projectDirectory,
+                    databasePath=exportedPath,
+                    outputPath=Path(directory) / "packages",
+                    includeDatabase=includeDatabase,
+                )
+                archiveBytes = result["archivePath"].read_bytes()
+                archiveName = result["archivePath"].name
         except PackagingError as error:
             app.logger.error("Application package creation failed: %s", error)
             return jsonify({"error": str(error)}), 500
-        response = send_file(
-            result["archivePath"],
-            mimetype="application/zip",
-            as_attachment=True,
-            download_name=result["archivePath"].name,
-        )
+        response = send_file(BytesIO(archiveBytes), mimetype="application/zip", as_attachment=True, download_name=archiveName)
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -422,8 +449,8 @@ def createApp(databasePathOverride=None):
         rows = connection.execute(
             """
             SELECT a.*, a.balanceOffsetCents + COALESCE(SUM(t.amountCents), 0) AS balanceCents
-            FROM accounts AS a
-            LEFT JOIN transactions AS t ON t.accountId = a.id
+            FROM scopedaccounts AS a
+            LEFT JOIN scopedtransactions AS t ON t.accountId = a.id
             GROUP BY a.id
             ORDER BY CASE a.accountClass WHEN 'cash' THEN 0 WHEN 'credit' THEN 1 ELSE 2 END,
                      LOWER(a.name), a.id
@@ -442,8 +469,8 @@ def createApp(databasePathOverride=None):
         accountRows = connection.execute(
             """
             SELECT a.*, a.balanceOffsetCents + COALESCE(SUM(t.amountCents), 0) AS balanceCents
-            FROM accounts AS a
-            LEFT JOIN transactions AS t ON t.accountId = a.id
+            FROM scopedaccounts AS a
+            LEFT JOIN scopedtransactions AS t ON t.accountId = a.id
             WHERE a.active = 1 AND a.accountClass IN ('cash', 'credit')
             GROUP BY a.id
             ORDER BY CASE a.accountClass WHEN 'cash' THEN 0 WHEN 'credit' THEN 1 ELSE 2 END,
@@ -462,9 +489,9 @@ def createApp(databasePathOverride=None):
         recentRows = connection.execute(
             """
             SELECT t.*, a.name AS accountName, c.name AS categoryName, c.reportingRole AS categoryRole
-            FROM transactions AS t
-            JOIN accounts AS a ON a.id = t.accountId
-            LEFT JOIN categories AS c ON c.id = t.categoryId
+            FROM scopedtransactions AS t
+            JOIN scopedaccounts AS a ON a.id = t.accountId
+            LEFT JOIN scopedcategories AS c ON c.id = t.categoryId
             WHERE t.pinned = 0 OR t.transferId IS NOT NULL
             ORDER BY t.date DESC, t.id DESC
             """
@@ -472,9 +499,9 @@ def createApp(databasePathOverride=None):
         quickUpdateRows = connection.execute(
             """
             SELECT t.*, a.name AS accountName, c.name AS categoryName, c.reportingRole AS categoryRole
-            FROM transactions AS t
-            JOIN accounts AS a ON a.id = t.accountId
-            LEFT JOIN categories AS c ON c.id = t.categoryId
+            FROM scopedtransactions AS t
+            JOIN scopedaccounts AS a ON a.id = t.accountId
+            LEFT JOIN scopedcategories AS c ON c.id = t.categoryId
             WHERE t.pinned = 1 AND t.transferId IS NULL
             ORDER BY t.date DESC, t.id DESC
             """
@@ -518,7 +545,7 @@ def createApp(databasePathOverride=None):
         monthRows = getDatabase().execute(
             """
             SELECT DISTINCT substr(date, 1, 7) AS month
-            FROM transactions
+            FROM scopedtransactions
             WHERE substr(date, 1, 7) < ?
             ORDER BY month DESC
             """,
@@ -543,7 +570,7 @@ def createApp(databasePathOverride=None):
     def editAccount(accountId):
         accountRequest = request.get_json(silent=True) or {}
         existingAccount = getDatabase().execute(
-            "SELECT displayOrder, pinnedForSelection FROM accounts WHERE id = ?", (accountId,)
+            "SELECT displayOrder, pinnedForSelection FROM scopedaccounts WHERE id = ?", (accountId,)
         ).fetchone()
         if not existingAccount:
             raise ValidationError("Account was not found")
@@ -596,7 +623,7 @@ def createApp(databasePathOverride=None):
             "balanceOffsetCents": balanceOffsetCents,
             "differenceCents": differenceCents,
             "balanceCents": getDatabase().execute(
-                "SELECT balanceOffsetCents + COALESCE((SELECT SUM(amountCents) FROM transactions WHERE accountId = accounts.id), 0) FROM accounts WHERE id = ?",
+                "SELECT balanceOffsetCents + COALESCE((SELECT SUM(amountCents) FROM scopedtransactions WHERE accountId = scopedaccounts.id), 0) FROM scopedaccounts WHERE id = ?",
                 (accountId,),
             ).fetchone()[0],
         })
@@ -606,9 +633,9 @@ def createApp(databasePathOverride=None):
         rows = getDatabase().execute(
             """
             SELECT c.*, EXISTS(
-                SELECT 1 FROM categories AS child WHERE child.parentCategoryId = c.id
+                SELECT 1 FROM scopedcategories AS child WHERE child.parentCategoryId = c.id
             ) AS hasChildren
-            FROM categories AS c
+            FROM scopedcategories AS c
             ORDER BY c.displayOrder, c.name
             """
         ).fetchall()
@@ -644,7 +671,7 @@ def createApp(databasePathOverride=None):
 
     @app.get("/api/settings")
     def listSettings():
-        rows = getDatabase().execute("SELECT key, value FROM applicationSettings").fetchall()
+        rows = getDatabase().execute("SELECT key, value FROM scopedapplicationSettings").fetchall()
         settings = {row["key"]: row["value"] for row in rows}
         settings.setdefault("integrationTransferDefaultDescription", "0")
         settings.setdefault("monthlySuggestionWindowDays", "3")
@@ -659,7 +686,7 @@ def createApp(databasePathOverride=None):
             raise ValidationError("Submit useDefaultDescription as a Boolean")
         connection = getDatabase()
         with connection:
-            connection.execute("INSERT INTO applicationSettings (key, value) VALUES ('integrationTransferDefaultDescription', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", ("1" if settingsRequest["useDefaultDescription"] else "0",))
+            connection.execute("INSERT INTO applicationSettings (key, value) VALUES ('integrationTransferDefaultDescription', ?) ON CONFLICT(ledgerId, key) DO UPDATE SET value = excluded.value", ("1" if settingsRequest["useDefaultDescription"] else "0",))
         return jsonify({"useDefaultDescription": settingsRequest["useDefaultDescription"]})
 
     @app.get("/api/simulator")
@@ -681,7 +708,7 @@ def createApp(databasePathOverride=None):
             raise ValidationError("Transaction does not exist") from error
         mapping = simulatorLedgerMapping(getDatabase(), transactionId, transferId)
         plans = getDatabase().execute(
-            "SELECT id, name, planDate FROM simulatorPlans ORDER BY planDate, id"
+            "SELECT id, name, planDate FROM scopedsimulatorPlans ORDER BY planDate, id"
         ).fetchall()
         return jsonify({"preview": mapping, "plans": [dict(plan) for plan in plans]})
 
@@ -780,12 +807,11 @@ def createApp(databasePathOverride=None):
     @app.get("/api/system/database-status")
     def databaseStatus():
         connection = getDatabase()
-        transactionCount = connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-        accountCount = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
+        transactionCount = connection.execute("SELECT COUNT(*) FROM scopedtransactions").fetchone()[0]
+        accountCount = connection.execute("SELECT COUNT(*) FROM scopedaccounts").fetchone()[0]
         databaseSchemaVersion = connection.execute("PRAGMA user_version").fetchone()[0]
-        modifiedTime = datetime.fromtimestamp(
-            Path(app.config["DATABASE_PATH"]).stat().st_mtime
-        ).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        latestChange = connection.execute("SELECT MAX(changedAt) FROM auditEvents WHERE ledgerId = currentLedgerId()").fetchone()[0]
+        modifiedTime = datetime.fromisoformat(latestChange.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if latestChange else "Not recorded"
         return jsonify({
             "transactionCount": transactionCount,
             "accountCount": accountCount,
@@ -797,17 +823,16 @@ def createApp(databasePathOverride=None):
     def setReimbursementCategory():
         categoryId = (request.get_json(silent=True) or {}).get("categoryId")
         category = getDatabase().execute(
-            """SELECT c.* FROM categories c WHERE c.id = ? AND c.active = 1
+            """SELECT c.* FROM scopedcategories c WHERE c.id = ? AND c.active = 1
                AND c.reportingRole = 'income' AND c.parentCategoryId IS NULL
-               AND NOT EXISTS (SELECT 1 FROM categories child WHERE child.parentCategoryId = c.id)""",
+               AND NOT EXISTS (SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id)""",
             (categoryId,),
         ).fetchone()
         if not category:
             raise ValidationError("Reimbursement Category must be an active standalone Income category")
         with getDatabase():
             getDatabase().execute(
-                "INSERT INTO applicationSettings (key, value) VALUES ('reimbursementCategoryId', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(categoryId),),
+                "INSERT INTO applicationSettings (key, value) VALUES ('reimbursementCategoryId', ?) ON CONFLICT(ledgerId, key) DO UPDATE SET value = excluded.value", (str(categoryId),),
             )
         return jsonify({"status": "ok"})
 
@@ -832,9 +857,9 @@ def createApp(databasePathOverride=None):
         rows = getDatabase().execute(
             """
             SELECT t.*, a.name AS accountName, a.accountClass, c.name AS categoryName, c.reportingRole AS categoryRole
-            FROM transactions AS t
-            JOIN accounts AS a ON a.id = t.accountId
-            LEFT JOIN categories AS c ON c.id = t.categoryId
+            FROM scopedtransactions AS t
+            JOIN scopedaccounts AS a ON a.id = t.accountId
+            LEFT JOIN scopedcategories AS c ON c.id = t.categoryId
             ORDER BY t.date DESC, t.id DESC
             """
         ).fetchall()
@@ -997,7 +1022,7 @@ def createApp(databasePathOverride=None):
             return jsonify({"eligible": False})
         accountRows = connection.execute(
             """SELECT a.*, a.balanceOffsetCents + COALESCE(SUM(t.amountCents), 0) balanceCents
-               FROM accounts a LEFT JOIN transactions t ON t.accountId = a.id
+               FROM scopedaccounts a LEFT JOIN scopedtransactions t ON t.accountId = a.id
                WHERE a.id IN (?, ?) AND a.active = 1 GROUP BY a.id""", (fromId, toId)
         ).fetchall()
         accountMap = {row["id"]: row for row in accountRows}
@@ -1019,7 +1044,7 @@ def createApp(databasePathOverride=None):
     @app.get("/api/transfers/<transferId>")
     def getTransfer(transferId):
         rows = getDatabase().execute(
-            "SELECT * FROM transactions WHERE transferId = ? ORDER BY amountCents", (transferId,)
+            "SELECT * FROM scopedtransactions WHERE transferId = ? ORDER BY amountCents", (transferId,)
         ).fetchall()
         if len(rows) != 2 or sum(row["amountCents"] for row in rows) != 0:
             raise ValidationError("Transfer is incomplete or invalid")
@@ -1046,7 +1071,7 @@ def createApp(databasePathOverride=None):
     @app.delete("/api/transfers/<transferId>")
     def removeTransfer(transferId):
         row = getDatabase().execute(
-            "SELECT id FROM transactions WHERE transferId = ? ORDER BY amountCents LIMIT 1", (transferId,)
+            "SELECT id FROM scopedtransactions WHERE transferId = ? ORDER BY amountCents LIMIT 1", (transferId,)
         ).fetchone()
         if not row:
             raise ValidationError("Transfer does not exist")
@@ -1058,9 +1083,9 @@ def createApp(databasePathOverride=None):
         rows = getDatabase().execute(
             """
             SELECT tt.*, a.name AS accountName, c.name AS categoryName
-            FROM transactionTemplates AS tt
-            LEFT JOIN accounts AS a ON a.id = tt.accountId
-            LEFT JOIN categories AS c ON c.id = tt.categoryId
+            FROM scopedtransactionTemplates AS tt
+            LEFT JOIN scopedaccounts AS a ON a.id = tt.accountId
+            LEFT JOIN scopedcategories AS c ON c.id = tt.categoryId
             ORDER BY tt.displayOrder, tt.name
             """
         ).fetchall()
@@ -1235,7 +1260,9 @@ def createApp(databasePathOverride=None):
 
     @app.get("/openapi.json")
     def openApiDocument():
-        return send_from_directory(projectDirectory, "openapi.json")
+        document = json.loads((projectDirectory / "openapi.json").read_text())
+        document["info"]["version"] = applicationVersion
+        return jsonify(document)
 
     @app.route("/api/integration-secrets", methods=["GET", "POST"])
     def integrationSecrets():
@@ -1246,7 +1273,7 @@ def createApp(databasePathOverride=None):
                 raise ValidationError("Label must be text")
             secretId = createIntegrationSecret(connection, secretRequest["label"])
             return jsonify({"id": secretId}), 201
-        return jsonify([dict(row) for row in connection.execute("SELECT id, label, active FROM integrationSecrets ORDER BY id")])
+        return jsonify([dict(row) for row in connection.execute("SELECT id, label, active, revoked, CASE WHEN revoked = 1 THEN 'Revoked' WHEN active = 1 THEN 'Enabled' ELSE 'Disabled' END AS status FROM scopedintegrationSecrets ORDER BY id")])
 
     @app.patch("/api/integration-secrets/<int:secretId>")
     def editIntegrationLabel(secretId):
@@ -1258,7 +1285,7 @@ def createApp(databasePathOverride=None):
 
     @app.post("/api/integration-secrets/<int:secretId>/reveal")
     def revealIntegrationSecret(secretId):
-        secret = getDatabase().execute("SELECT secret FROM integrationSecrets WHERE id = ?", (secretId,)).fetchone()
+        secret = getDatabase().execute("SELECT secret FROM scopedintegrationSecrets WHERE id = ?", (secretId,)).fetchone()
         if not secret:
             raise ValidationError("Integration secret does not exist")
         return jsonify({"secret": secret["secret"]})
@@ -1267,8 +1294,16 @@ def createApp(databasePathOverride=None):
     def revokeIntegrationSecret(secretId):
         connection = getDatabase()
         with connection:
-            if not connection.execute("UPDATE integrationSecrets SET active = 0 WHERE id = ?", (secretId,)).rowcount:
+            if not connection.execute("UPDATE integrationSecrets SET active = 0, revoked = 1 WHERE ledgerId = currentLedgerId() AND (id = ?)", (secretId,)).rowcount:
                 raise ValidationError("Integration secret does not exist")
+        return jsonify({"status": "ok"})
+
+    @app.post("/api/integration-secrets/<int:secretId>/state")
+    def changeIntegrationState(secretId):
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict) or set(submitted) != {"enabled"} or type(submitted["enabled"]) is not bool:
+            raise ValidationError("Submit enabled as a Boolean")
+        setIntegrationState(getDatabase(), secretId, submitted["enabled"])
         return jsonify({"status": "ok"})
 
     @app.get("/api/pending")
@@ -1397,8 +1432,8 @@ def createApp(databasePathOverride=None):
                 raise ValidationError("Submission status is invalid")
             where += " AND status = ?"
             queryValues.append(request.args["status"])
-        total = connection.execute("SELECT COUNT(*) FROM pendingSubmissions WHERE " + where, queryValues).fetchone()[0]
-        rows = connection.execute("SELECT * FROM pendingSubmissions WHERE " + where + " ORDER BY id LIMIT ? OFFSET ?", [*queryValues, limit, offset]).fetchall()
+        total = connection.execute("SELECT COUNT(*) FROM scopedpendingSubmissions WHERE " + where, queryValues).fetchone()[0]
+        rows = connection.execute("SELECT * FROM scopedpendingSubmissions WHERE " + where + " ORDER BY id LIMIT ? OFFSET ?", [*queryValues, limit, offset]).fetchall()
         return jsonify({"submissions": [statusResult(row) for row in rows], "total": total, "offset": offset, "limit": limit, "nextOffset": offset + limit if offset + limit < total else None})
 
     integrationReads = {
@@ -1442,7 +1477,7 @@ def createApp(databasePathOverride=None):
             for template in result:
                 template["ordinaryEligible"] = bool(template["active"])
                 if template["accountId"]:
-                    account = getDatabase().execute("SELECT active, accountClass FROM accounts WHERE id = ?", (template["accountId"],)).fetchone()
+                    account = getDatabase().execute("SELECT active, accountClass FROM scopedaccounts WHERE id = ?", (template["accountId"],)).fetchone()
                     template["ordinaryEligible"] = bool(template["ordinaryEligible"] and account and account["active"] and account["accountClass"] != "system")
                 if template["categoryId"]:
                     try:
@@ -1474,9 +1509,9 @@ def runApplication(app):
     logging.info("Schema version: %s", schemaVersion)
     logging.info("Development server host: 0.0.0.0")
     try:
-        connection = connectDatabase(app.config["DATABASE_PATH"])
+        connection = connectInitialLedgerDatabase(app.config["DATABASE_PATH"])
         try:
-            ownerConfigured = connection.execute("SELECT 1 FROM users WHERE role = 'owner'").fetchone() is not None
+            ownerConfigured = connection.execute("SELECT 1 FROM ledgerAccess WHERE role = 'owner'").fetchone() is not None
             signInGuidance = "Sign in to use the application." if ownerConfigured else "Complete Owner setup below, then reload to sign in."
             logging.info("Server is running; open http://127.0.0.1:5000 in your browser. %s Keep this terminal open.", signInGuidance)
             configureOnStartup(connection)
@@ -1495,10 +1530,13 @@ def runApplication(app):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if sys.argv[1:] == ["--version"]:
+        print(applicationVersion)
+        sys.exit(0)
     app = createApp()
     if sys.argv[1:] == ["manage-users"]:
         manageUsers(app.config["DATABASE_PATH"])
         sys.exit(0)
     if sys.argv[1:]:
-        sys.exit("Usage: app.py [manage-users]")
+        sys.exit("Usage: app.py [manage-users | --version]")
     runApplication(app)

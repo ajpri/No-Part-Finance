@@ -1,13 +1,14 @@
 """Command-line user management. Passwords never appear in output or logs."""
 
 import getpass
+import json
 import sqlite3
 import unicodedata
 import warnings
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from database import ValidationError, connectDatabase
+from database import ValidationError, connectInitialLedgerDatabase as connectDatabase, bindInitialLedger, requireLedger
 
 
 def validateUsername(username):
@@ -26,28 +27,40 @@ def passwordHash(password):
 
 
 def createUser(connection, role, username, password):
+    requireLedger(connection)
     if role not in {"owner", "auditor"}:
         raise ValidationError("User role is invalid")
     username = validateUsername(username)
-    if connection.execute("SELECT 1 FROM users WHERE role = ? OR usernameKey = ?", (role, username.casefold())).fetchone():
+    if connection.execute("SELECT 1 FROM users WHERE usernameKey = ? UNION ALL SELECT 1 FROM ledgerAccess WHERE ledgerId = currentLedgerId() AND role = ?", (username.casefold(), role)).fetchone():
         raise ValidationError("That role or username is already configured")
     hashedPassword = passwordHash(password)
     with connection:
-        return connection.execute(
-            "INSERT INTO users (role, username, usernameKey, passwordHash) VALUES (?, ?, ?, ?)",
-            (role, username, username.casefold(), hashedPassword),
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute("SELECT 1 FROM users WHERE usernameKey = ? UNION ALL SELECT 1 FROM ledgerAccess WHERE ledgerId = currentLedgerId() AND role = ?", (username.casefold(), role)).fetchone():
+            raise ValidationError("That role or username is already configured")
+        userId = connection.execute(
+            "INSERT INTO users (username, usernameKey, passwordHash) VALUES (?, ?, ?)",
+            (username, username.casefold(), hashedPassword),
         ).lastrowid
+        connection.execute("INSERT INTO ledgerAccess (userId, ledgerId, role) VALUES (?, currentLedgerId(), ?)", (userId, role))
+        if role == "owner":
+            connection.execute("UPDATE ledgers SET name = ? WHERE id = currentLedgerId()", (f"{username}’s Finances",))
+        recordUserChange(connection, userId, "create", role)
+        return userId
 
 
 def resetPassword(connection, role, password):
+    requireLedger(connection)
     hashedPassword = passwordHash(password)
     with connection:
         cursor = connection.execute(
-            "UPDATE users SET passwordHash = ?, authVersion = authVersion + 1 WHERE role = ?",
+            "UPDATE users SET passwordHash = ?, authVersion = authVersion + 1 WHERE id IN (SELECT userId FROM ledgerAccess WHERE ledgerId = currentLedgerId() AND role = ?)",
             (hashedPassword, role),
         )
         if not cursor.rowcount:
             raise ValidationError("That user is not configured")
+        userId = connection.execute("SELECT userId FROM ledgerAccess WHERE ledgerId = currentLedgerId() AND role = ?", (role,)).fetchone()[0]
+        recordUserChange(connection, userId, "password-reset", role)
 
 
 def confirmedPassword():
@@ -69,7 +82,7 @@ def promptCreateUser(connection, role):
 
 
 def configureOnStartup(connection):
-    if connection.execute("SELECT 1 FROM users WHERE role = 'owner'").fetchone():
+    if connection.execute("SELECT 1 FROM ledgerAccess WHERE ledgerId = currentLedgerId() AND role = 'owner'").fetchone():
         return
     ownerConfigured = False
     print("An Owner is required to sign in and use No Part Finance. There are no default credentials.")
@@ -107,7 +120,7 @@ def manageUsers(databasePath):
             try:
                 choice = input("Choose: ").strip()
                 if choice == "1":
-                    for user in connection.execute("SELECT role, username FROM users ORDER BY role DESC"):
+                    for user in connection.execute("SELECT a.role, u.username FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE a.ledgerId = currentLedgerId() ORDER BY a.role DESC"):
                         print(f"{user['role'].title()}: {user['username']}")
                 elif choice in {"2", "4"}:
                     promptCreateUser(connection, "owner" if choice == "2" else "auditor")
@@ -116,7 +129,10 @@ def manageUsers(databasePath):
                     print("Password reset.")
                 elif choice == "6":
                     with connection:
-                        connection.execute("DELETE FROM users WHERE role = 'auditor'")
+                        user = connection.execute("SELECT userId FROM ledgerAccess WHERE ledgerId = currentLedgerId() AND role = 'auditor'").fetchone()
+                        if user:
+                            recordUserChange(connection, user["userId"], "remove", "auditor")
+                            connection.execute("DELETE FROM users WHERE id = ?", (user["userId"],))
                     print("Auditor removed.")
                 elif choice == "7":
                     return
@@ -129,3 +145,16 @@ def manageUsers(databasePath):
                 return
     finally:
         connection.close()
+
+
+def recordUserChange(connection, userId, action, role):
+    user = connection.execute("SELECT username, authVersion FROM users WHERE id = ?", (userId,)).fetchone()
+    values = {"username": user["username"], "role": role, "authVersion": user["authVersion"]}
+    before = None if action == "create" else dict(values)
+    after = None if action == "remove" else values
+    if action == "password-reset":
+        before["authVersion"] -= 1
+    connection.execute("""INSERT INTO auditEvents
+        (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues)
+        VALUES (currentLedgerId(), strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), ?, 'users', ?, ?, ?)""",
+        (action, str(userId), json.dumps(before) if before is not None else None, json.dumps(after) if after is not None else None))

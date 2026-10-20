@@ -26,6 +26,7 @@ from database import (
     updateTemplate,
 )
 from tests.test_support import createScenarioCategories
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class BudgetPhaseOneTests(unittest.TestCase):

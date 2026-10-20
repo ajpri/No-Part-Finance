@@ -8,6 +8,7 @@ import tests  # Enable the database guard before importing application modules.
 from app import createApp
 import database as ledger
 from tests.test_support import ownerClient
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class AccountIdValidationTests(unittest.TestCase):
@@ -18,7 +19,7 @@ class AccountIdValidationTests(unittest.TestCase):
         self.application = createApp(self.databasePath)
         self.application.config["TESTING"] = True
         self.client = ownerClient(self.application)
-        self.connection = ledger.connectDatabase(self.databasePath)
+        self.connection = connectDatabase(self.databasePath)
         self.addCleanup(self.connection.close)
         self.cashId = ledger.createAccount(self.connection, "Cash", "cash", openingBalance="100.00")
         self.creditId = ledger.createAccount(self.connection, "Credit", "credit", openingBalance="20.00")

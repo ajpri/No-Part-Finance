@@ -1,3 +1,4 @@
+from tests.test_support import useHistoricalSchema21
 from tests.test_support import ownerClient
 import sqlite3
 import tempfile
@@ -29,6 +30,7 @@ from database import (
     updateTransfer,
 )
 from tests.test_support import copyProductionDatabase, createScenarioCategories
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class MoneyOperationTests(unittest.TestCase):
@@ -132,20 +134,21 @@ class MoneyOperationTests(unittest.TestCase):
         self.assertEqual(ledgerBefore, [tuple(row) for row in self.connection.execute("SELECT * FROM transactions ORDER BY id")])
         # Synthetic pre-External configuration exercises the supported upgrade with a temporary sibling backup.
         self.connection.execute("DELETE FROM accounts WHERE systemIdentity = 'external'")
+        useHistoricalSchema21(self.connection)
         self.connection.execute("PRAGMA user_version = 17")
         self.connection.commit()
         self.connection.close()
         initializeDatabase(self.databasePath)
         self.connection = connectDatabase(self.databasePath)
-        self.assertEqual(ledgerBefore, [tuple(row) for row in self.connection.execute("SELECT * FROM transactions ORDER BY id")])
+        self.assertEqual([row[1:] for row in ledgerBefore], [tuple(row)[1:] for row in self.connection.execute("SELECT * FROM transactions ORDER BY id")])
         self.assertEqual(offsetsBefore, [tuple(row) for row in self.connection.execute("SELECT id, balanceOffsetCents FROM accounts WHERE accountClass != 'system' ORDER BY id")])
         self.assertEqual((30000, -18000), (self.balance(self.cashAccountId), self.balance(self.creditAccountId)))
         self.assertEqual(reportBefore, dashboardReport(self.connection, "custom", "2020-01-01", "2020-01-31"))
-        backupPaths = list((self.databasePath.parent / "backups").glob("pre-migration-v17-to-v21-*.db"))
+        backupPaths = list((self.databasePath.parent / "backups").glob("pre-migration-v17-to-v22-*.db"))
         self.assertEqual(1, len(backupPaths))
         backupConnection = sqlite3.connect(backupPaths[0])
         try:
-            self.assertEqual(ledgerBefore, backupConnection.execute("SELECT * FROM transactions ORDER BY id").fetchall())
+            self.assertEqual([row[1:] for row in ledgerBefore], backupConnection.execute("SELECT * FROM transactions ORDER BY id").fetchall())
             self.assertEqual(17, backupConnection.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual("ok", backupConnection.execute("PRAGMA integrity_check").fetchone()[0])
         finally:

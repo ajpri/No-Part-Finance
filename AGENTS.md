@@ -222,7 +222,7 @@ Refunds are normal categorized transactions using the defined entry sign convent
 
 For integration proposals, respect explicit Category Reporting Roles: positive Expense entry becomes negative ledger cents, an Expense refund uses negative entry and positive ledger cents, positive Income entry becomes positive ledger cents, and an Income reversal uses negative entry and negative ledger cents. Never infer signs from names, credit-balance wording, or projections. Preserve valid proposed fields and flag malformed values or changed Reporting Roles for human correction and explicit final approval; do not silently blank valid fields, remap IDs, or reverse signs. Keep the public agent documentation clear about these conventions. Python remains authoritative, and human review does not replace backend validation or atomicity.
 
-Do not add a second ledger.
+Do not add a second accounting ledger within a Ledger. Preserve explicit ledger isolation; additional provisioning and sharing workflows require approved scope.
 
 Do not add a stored balance field as a shortcut.
 
@@ -389,9 +389,9 @@ Never interpolate user input into SQL strings.
 
 When inserting user supplied text into the DOM, use safe text APIs rather than treating it as HTML.
 
-The application uses one shared personal ledger with exactly one required Owner and an optional read-only Auditor, as defined in `SPEC.md`.
+Supported setup uses one personal ledger with exactly one required Owner and an optional read-only Auditor. Preserve the ledger-aware schema and server-side isolation defined in `SPEC.md`; financial operations require authorized ledger context, and submitted IDs never grant access.
 
-Preserve the implemented authentication, command-line user management, backend role authorization, and CSRF protection. Do not add roles, separate user ledgers, or new authentication workflows unless `SPEC.md` changes.
+Preserve the implemented authentication, command-line user management, backend role authorization, and CSRF protection. Do not expose additional-ledger provisioning, roles, memberships, switching, or new authentication workflows without approved roadmap scope. Preserve per-ledger audit recording and atomic financial/audit writes.
 
 Authentication does not make the built-in development server suitable for direct public internet exposure. Preserve the trusted self-hosted deployment boundary in `SPEC.md`; public access requires an external access-control and production-serving arrangement.
 

@@ -1,3 +1,4 @@
+from tests.test_support import snapshotWithoutLoginTime
 import tests  # Enable the production database guard before application imports.
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from app import createApp
 import database as ledger
 from users import createUser
 from tests.test_release_2610 import signIn
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class DashboardUtilizationTests(unittest.TestCase):
@@ -16,7 +18,7 @@ class DashboardUtilizationTests(unittest.TestCase):
         self.backupsPath = Path(self.directory.name) / "backups"
         self.backupsPath.mkdir()
         self.application = createApp(self.databasePath)
-        self.connection = ledger.connectDatabase(self.databasePath)
+        self.connection = connectDatabase(self.databasePath)
         createUser(self.connection, "owner", "Owner", "owner password")
         createUser(self.connection, "auditor", "Auditor", "auditor password")
         integrationId = ledger.createIntegrationSecret(self.connection, "Example Agent")

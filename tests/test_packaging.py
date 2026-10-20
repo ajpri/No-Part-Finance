@@ -1,3 +1,5 @@
+from io import BytesIO
+from packageApplication import pwaIconFiles
 from tests.test_support import ownerClient
 import sqlite3
 import secrets
@@ -23,6 +25,7 @@ from packageApplication import (
     includedFiles,
     main,
 )
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class PackagingTests(unittest.TestCase):
@@ -124,7 +127,7 @@ class PackagingTests(unittest.TestCase):
         with zipfile.ZipFile(result["archivePath"]) as archive:
             self.assertNotIn(f"{archiveRootName}/finance.db", archive.namelist())
             self.assertEqual(
-                {f"{archiveRootName}/{path}" for path in includedFiles},
+                {f"{archiveRootName}/{path}" for path in includedFiles} | {f"{archiveRootName}/{path}" for path in pwaIconFiles if (self.repositoryPath / path).is_file()},
                 set(archive.namelist()),
             )
 
@@ -178,17 +181,16 @@ class PackageEndpointTests(unittest.TestCase):
         self.temporaryDirectory.cleanup()
 
     def testPackageEndpointRetainsAndReturnsCompleteArchiveWithoutCaching(self):
-        response = self.client.get("/api/package?output=ignored")
+        response = self.client.get("/api/package")
         self.assertEqual(200, response.status_code)
         self.assertEqual("application/zip", response.mimetype)
         self.assertIn("attachment", response.headers["Content-Disposition"])
         self.assertIn("no-store", response.headers["Cache-Control"])
         archives = list(self.outputPath.glob("*.zip"))
-        self.assertEqual(1, len(archives))
-        self.assertEqual(archives[0].read_bytes(), response.get_data())
-        with zipfile.ZipFile(archives[0]) as archive:
+        self.assertEqual(0, len(archives))
+        with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
             self.assertEqual(
-                {f"{archiveRootName}/{path}" for path in includedFiles} | {f"{archiveRootName}/finance.db"},
+                {f"{archiveRootName}/{path}" for path in includedFiles} | {f"{archiveRootName}/finance.db"} | {f"{archiveRootName}/{path}" for path in pwaIconFiles if (Path(__file__).resolve().parents[1] / path).is_file()},
                 set(archive.namelist()),
             )
         response.close()
@@ -205,11 +207,11 @@ class PackageEndpointTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertIn("-no-db-", response.headers["Content-Disposition"])
         archives = list(self.outputPath.glob("*.zip"))
-        self.assertEqual(1, len(archives))
-        with zipfile.ZipFile(archives[0]) as archive:
+        self.assertEqual(0, len(archives))
+        with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
             self.assertNotIn(f"{archiveRootName}/finance.db", archive.namelist())
             self.assertEqual(
-                {f"{archiveRootName}/{path}" for path in includedFiles},
+                {f"{archiveRootName}/{path}" for path in includedFiles} | {f"{archiveRootName}/{path}" for path in pwaIconFiles if (Path(__file__).resolve().parents[1] / path).is_file()},
                 set(archive.namelist()),
             )
         response.close()
@@ -235,7 +237,7 @@ class ActualDistributionTests(unittest.TestCase):
             finally:
                 connection.close()
             originalBytes = syntheticPath.read_bytes()
-            expectedNames = {f"{archiveRootName}/{relativePath}" for relativePath in includedFiles}
+            expectedNames = {f"{archiveRootName}/{relativePath}" for relativePath in includedFiles} | {f"{archiveRootName}/{path}" for path in pwaIconFiles if (repositoryPath / path).is_file()}
             for sourcePath in (syntheticPath, root / "absent.db"):
                 with self.subTest(sourceExists=sourcePath.exists()), patch("packageApplication.createVerifiedDatabaseCopy", side_effect=AssertionError("Application-only packaging must not open a database")):
                     result = createApplicationPackage(repositoryPath, sourcePath, root / "public", includeDatabase=False)

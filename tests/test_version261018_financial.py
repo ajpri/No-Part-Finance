@@ -1,3 +1,5 @@
+from tests.test_support import useHistoricalSchema21
+from tests.test_support import snapshotWithoutLoginTime
 """Synthetic failure-preservation and financial regression checks for 26.10.18."""
 import tests
 import sqlite3
@@ -7,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import database
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class UpgradeBackupTests(unittest.TestCase):
@@ -14,8 +17,9 @@ class UpgradeBackupTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.databasePath = Path(self.directory.name) / "explicit-upgrade.db"
-        database.initializeDatabase(self.databasePath)
-        with database.connectDatabase(self.databasePath) as connection:
+        with sqlite3.connect(self.databasePath) as connection:
+            connection.executescript((Path(__file__).parent / "schema21.sql").read_text())
+            database.createExternalSystemAccount(connection)
             connection.execute("INSERT INTO accounts (name, accountClass, balanceOffsetCents) VALUES ('Synthetic Cash', 'cash', 12345)")
             connection.execute("INSERT INTO categories (name) VALUES ('Synthetic Expense')")
             connection.execute("INSERT INTO transactions (accountId, date, description, amountCents, categoryId) SELECT a.id, '2026-10-17', 'Synthetic purchase', -321, c.id FROM accounts a, categories c WHERE a.name = 'Synthetic Cash'")
@@ -28,13 +32,14 @@ class UpgradeBackupTests(unittest.TestCase):
             connection.execute("INSERT INTO simulatorPlans (name, planDate) VALUES ('Synthetic plan', '2026-10-17')")
             connection.execute("INSERT INTO simulatorRows (planId, rowType, rowOrder, fromAccountId) VALUES (1, 'live', 0, ?)", (cashId,))
             connection.execute("INSERT INTO pendingSubmissions (integrationId, submissionId, originalContent, reviewContent, reviewVersion, originalRole) VALUES (1, 'synthetic-proposal', '{}', '{}', 4, 'expense')")
+            useHistoricalSchema21(connection)
             connection.execute("PRAGMA user_version = 20")
         self.originalState = self.snapshot()
 
     def snapshot(self):
         connection = sqlite3.connect(self.databasePath)
         try:
-            return list(connection.iterdump())
+            return snapshotWithoutLoginTime(connection)
         finally:
             connection.close()
 
@@ -125,13 +130,13 @@ class UpgradeBackupTests(unittest.TestCase):
     def testSuccessfulUpgradeAndCurrentInitialization(self):
         database.initializeDatabase(self.databasePath)
         database.initializeDatabase(self.databasePath)
-        with database.connectDatabase(self.databasePath) as connection:
+        with connectDatabase(self.databasePath) as connection:
             self.assertEqual(database.schemaVersion, connection.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(12345, connection.execute("SELECT balanceOffsetCents FROM accounts WHERE name = 'Synthetic Cash'").fetchone()[0])
         self.assertEqual(1, len(list((self.databasePath.parent / "backups").glob("*.db"))))
 
     def testNewerSchemaRejectedWithoutBackup(self):
-        with database.connectDatabase(self.databasePath) as connection:
+        with connectDatabase(self.databasePath) as connection:
             connection.execute(f"PRAGMA user_version = {database.schemaVersion + 1}")
         originalState = self.snapshot()
         with self.assertRaisesRegex(RuntimeError, "newer than supported"):
@@ -151,7 +156,7 @@ class CategoryRollupTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.databasePath = Path(self.directory.name) / "explicit-rollups.db"
         database.initializeDatabase(self.databasePath)
-        self.connection = database.connectDatabase(self.databasePath)
+        self.connection = connectDatabase(self.databasePath)
         self.addCleanup(self.connection.close)
         self.accountId = database.createAccount(self.connection, "Fictional Cash", "cash")
         self.parentId = database.createCategory(self.connection, "Fictional Parent")
@@ -221,7 +226,7 @@ class CategoryRollupTests(unittest.TestCase):
         def stalePrepare(*arguments, **keywords):
             transactionValues = originalPrepare(*arguments, **keywords)
             # A second connection establishes a rollup after preflight but before the write lock.
-            otherConnection = database.connectDatabase(self.databasePath)
+            otherConnection = connectDatabase(self.databasePath)
             try:
                 database.createCategory(otherConnection, "Concurrent child", self.parentId)
             finally:
@@ -241,7 +246,7 @@ class CategoryRollupTests(unittest.TestCase):
         originalValues = database.optionalTemplateValues
         def staleTemplateValues(*arguments, **keywords):
             templateValues = originalValues(*arguments, **keywords)
-            otherConnection = database.connectDatabase(self.databasePath)
+            otherConnection = connectDatabase(self.databasePath)
             try:
                 database.createCategory(otherConnection, "Concurrent template child", self.parentId)
             finally:
@@ -260,7 +265,7 @@ class ExternalSimulatorAllocationTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.databasePath = Path(self.directory.name) / "explicit-external-allocation.db"
         database.initializeDatabase(self.databasePath)
-        self.connection = database.connectDatabase(self.databasePath)
+        self.connection = connectDatabase(self.databasePath)
         self.addCleanup(self.connection.close)
         self.cashId = database.createAccount(self.connection, "Fictional Cash", "cash", openingBalance="90.00")
         self.externalId = self.connection.execute("SELECT id FROM accounts WHERE systemIdentity = 'external'").fetchone()[0]
@@ -302,7 +307,7 @@ class ExternalSimulatorAllocationTests(unittest.TestCase):
         database.deleteSimulatorRow(self.connection, self.planId, liveId)
         self.assertEqual(0, self.workspace()["totals"]["unallocatedMoneyCents"])
         self.assertEqual(before, dict(self.connection.execute("SELECT * FROM simulatorRows WHERE id = ?", (rowId,)).fetchone()))
-        otherConnection = database.connectDatabase(self.databasePath)
+        otherConnection = connectDatabase(self.databasePath)
         try:
             self.assertEqual(0, database.simulatorWorkspace(otherConnection, self.planId)["plan"]["totals"]["unallocatedMoneyCents"])
         finally:
@@ -361,7 +366,7 @@ class UtilizationThresholdTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             databasePath = Path(directory) / "explicit-utilization.db"
             database.initializeDatabase(databasePath)
-            connection = database.connectDatabase(databasePath)
+            connection = connectDatabase(databasePath)
             try:
                 planId = database.createSimulatorPlan(connection, "Fictional limits", "2026-10-17")
                 cardId = database.createAccount(connection, "Fictional Card", "credit", "Credit Card", openingBalance="299.96", creditLimit="1000.00", utilizationWarning="30.00")
@@ -381,7 +386,7 @@ class UtilizationThresholdTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             databasePath = Path(directory) / "explicit-ineligible-utilization.db"
             database.initializeDatabase(databasePath)
-            connection = database.connectDatabase(databasePath)
+            connection = connectDatabase(databasePath)
             try:
                 planId = database.createSimulatorPlan(connection, "Fictional ineligible", "2026-10-17")
                 for name, accountClass, subtype in [("Fictional Cash", "cash", None), ("Fictional Loan", "credit", "Personal Loan"), ("Fictional Other", "credit", "Other"), ("Fictional Unlimited", "credit", "Credit Card")]:

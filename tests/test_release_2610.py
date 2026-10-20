@@ -1,3 +1,5 @@
+from tests.test_support import snapshotWithoutLoginTime
+from tests.test_support import useHistoricalSchema21
 import json
 import getpass
 import re
@@ -23,6 +25,7 @@ from database import (
     updateCategory, schemaVersion,
 )
 from users import createUser, resetPassword, configureOnStartup, manageUsers
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 def signIn(client, username="Owner", password="owner password"):
@@ -67,7 +70,7 @@ class OctoberTests(unittest.TestCase):
 
     def taskFourSnapshot(self):
         # Compare all authoritative state without printing synthetic credentials on failure.
-        return tuple(self.connection.iterdump())
+        return tuple(snapshotWithoutLoginTime(self.connection))
 
     def testMaintainedMutationAuthenticationAndCsrfLeaveDatabaseUnchanged(self):
         otherOwner = self.app.test_client()
@@ -269,7 +272,7 @@ class OctoberTests(unittest.TestCase):
         auditor = self.app.test_client()
         signIn(auditor, "Auditor", "auditor password")
         with self.connection:
-            self.connection.execute("DELETE FROM users WHERE role = 'auditor'")
+            self.connection.execute("DELETE FROM users WHERE id IN (SELECT userId FROM ledgerAccess WHERE role = 'auditor')")
         createUser(self.connection, "auditor", "Auditor", "replacement password")
         self.assertEqual(401, auditor.get("/api/session").status_code)
 
@@ -655,7 +658,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 copiedPath = Path(self.directory.name) / "package-database.db"
                 copiedPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
-                self.assertIn('applicationVersion = "26.10.19"', archive.read("No-Part-Finance/packageApplication.py").decode())
+                self.assertIn('applicationVersion = "26.10.21"', archive.read("No-Part-Finance/packageApplication.py").decode())
                 self.assertIn("No-Part-Finance/users.py", archive.namelist())
                 self.assertIn("No-Part-Finance/openapi.json", archive.namelist())
             connection = connectDatabase(copiedPath)
@@ -672,14 +675,14 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 self.assertNotIn("No-Part-Finance/finance.db", archive.namelist())
                 self.assertFalse(any(self.secret.encode() in archive.read(name) for name in archive.namelist()))
-        self.assertEqual("26.10.19", applicationVersion)
+        self.assertEqual("26.10.21", applicationVersion)
 
     def testAuditorAndIntegrationSimulatorReadsNeverWrite(self):
         planId = createSimulatorPlan(self.connection, "Example Plan", "2026-10-01")
         saveSimulatorRow(self.connection, planId, None, "income", toAccountId=self.cashId, label="Example Income", amount="10.00")
-        before = self.path.read_bytes()
         auditor = self.app.test_client()
         signIn(auditor, "Auditor", "auditor password")
+        before = self.path.read_bytes()
         for client, url, headers in [(auditor, "/api/simulator", {}), (self.agent, "/api/integration/read/simulator", self.headers)]:
             self.assertEqual(200, client.get(url, headers=headers).status_code)
         self.assertEqual(before, self.path.read_bytes())
@@ -731,7 +734,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertNotIn("No Owner was created", setupText)
                 self.assertNotIn("valid password", setupText)
                 self.assertNotIn("mismatch", setupText)
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM users")])
+                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
                 with connection:
                     connection.execute("DELETE FROM users")
                 originalCreateUser = createUser
@@ -742,7 +745,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 with patch("users.input", side_effect=["y", "Owner", "y", "Auditor"]), patch("users.getpass.getpass", return_value="valid password"), patch("users.createUser", side_effect=failOptionalAuditor), patch("builtins.print") as output:
                     configureOnStartup(connection)
                 self.assertIn("Your Owner is saved and can sign in", str(output.call_args_list))
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM users")])
+                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
                 with patch("users.input", side_effect=["1", "3", "4", "Auditor", "5", "6", "7"]), patch("users.getpass.getpass", side_effect=["new owner pass", "new owner pass", "auditor pass", "auditor pass", "new auditor pass", "new auditor pass"]), patch("builtins.print") as output:
                     manageUsers(path)
                     text = str(output.call_args_list)
@@ -750,7 +753,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                     self.assertNotIn("scrypt:", text)
                     self.assertIn("User management does not start the server", text)
                     self.assertIn("without manage-users", text)
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM users")])
+                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
             finally:
                 connection.close()
 
@@ -789,7 +792,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                     manageUsers(path)
                 self.assertIn("User management closed", str(output.call_args_list))
                 self.assertIn("interactive Command Prompt or terminal", str(output.call_args_list))
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM users")])
+                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
                 with patch("users.input", side_effect=["4", "Example Auditor", "7"]), patch("users.getpass.getpass", return_value="auditor password"), patch("builtins.print"):
                     manageUsers(path)
                 self.assertEqual(302, signIn(client, "Example Auditor", "auditor password").status_code)
@@ -821,7 +824,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertNotIn("startup password", logText + str(output.call_args_list))
                 connection = connectDatabase(path)
                 try:
-                    self.assertEqual(expectedRoles, [row[0] for row in connection.execute("SELECT role FROM users ORDER BY role")])
+                    self.assertEqual(expectedRoles, [row[0] for row in connection.execute("SELECT role FROM scopedusers ORDER BY role")])
                     self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
                     self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
                 finally:
@@ -839,9 +842,11 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 createTransaction(connection, cashId, "2026-09-30", "Existing ledger", categoryId, "10.00")
                 secretId = createIntegrationSecret(connection, "Migration Agent")
                 proposal, _ = submitPendingTransaction(connection, secretId, {"submissionId": "existing", "date": "2026-09-30", "accountId": cashId, "description": "Existing pending", "categoryId": categoryId, "amount": "5.00"})
+                useHistoricalSchema21(connection)
                 with connection:
                     connection.execute("ALTER TABLE pendingSubmissions DROP COLUMN reviewContent")
                     connection.execute("ALTER TABLE pendingSubmissions DROP COLUMN reviewVersion")
+                    useHistoricalSchema21(connection)
                     connection.execute("PRAGMA user_version = 19")
                 before = {row[0]: [dict(record) for record in connection.execute('SELECT * FROM "' + row[0] + '"')] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             finally:
@@ -850,17 +855,21 @@ class UserManagementAndMigrationTests(unittest.TestCase):
             connection = connectDatabase(path)
             try:
                 for table, records in before.items():
-                    after = [dict(row) for row in connection.execute('SELECT * FROM "' + table + '"')]
+                    after = [dict(row) for row in connection.execute('SELECT * FROM ' + ('scopedusers' if table == 'users' else '"' + table + '"'))]
                     if table == "pendingSubmissions":
                         self.assertEqual(None, after[0].pop("reviewContent"))
                         self.assertEqual(0, after[0].pop("reviewVersion"))
+                    after = [{key: row[key] for key in records[index]} for index, row in enumerate(after)]
+                    if table == "sqlite_sequence":
+                        records = sorted(records, key=lambda row: row["name"])
+                        after = sorted(after, key=lambda row: row["name"])
                     self.assertEqual(records, after, table)
                 self.assertEqual(schemaVersion, connection.execute("PRAGMA user_version").fetchone()[0])
                 self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v21-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v22-*.db"))
             self.assertEqual(1, len(backups))
 
     def testMigrationPreservesEveryExistingTableAndBackup(self):
@@ -874,11 +883,13 @@ class UserManagementAndMigrationTests(unittest.TestCase):
             createTransaction(connection, cashId, "2026-10-01", "Fixture", categoryId, "10.00")
             createTransfer(connection, "2026-10-01", cashId, creditId, "5.00")
             createTemplate(connection, "Fixture Template", cashId, "Fixture", categoryId, "10.00")
+            useHistoricalSchema21(connection)
             before = {row[0]: [tuple(record) for record in connection.execute('SELECT * FROM "' + row[0] + '"')] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('users', 'integrationSecrets', 'pendingSubmissions', 'sqlite_sequence')")}
             with connection:
                 connection.execute("DROP TABLE pendingSubmissions")
                 connection.execute("DROP TABLE integrationSecrets")
                 connection.execute("DROP TABLE users")
+                useHistoricalSchema21(connection)
                 connection.execute("PRAGMA user_version = 18")
             connection.close()
             initializeDatabase(path)
@@ -886,13 +897,13 @@ class UserManagementAndMigrationTests(unittest.TestCase):
             try:
                 self.assertEqual(schemaVersion, connection.execute("PRAGMA user_version").fetchone()[0])
                 for table, records in before.items():
-                    self.assertEqual(records, [tuple(row) for row in connection.execute('SELECT * FROM "' + table + '"')])
+                    self.assertEqual(records, [tuple(row)[1:] for row in connection.execute('SELECT * FROM "' + table + '"')])
                 self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
                 self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v21-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v22-*.db"))
             self.assertEqual(1, len(backups))
             backup = sqlite3.connect(backups[0])
             try:

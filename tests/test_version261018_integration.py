@@ -1,3 +1,4 @@
+from tests.test_support import snapshotWithoutLoginTime
 import tests  # Enable the production database guard before application imports.
 import json
 import tempfile
@@ -8,6 +9,7 @@ from app import createApp
 import database as ledger
 from users import createUser
 from tests.test_release_2610 import signIn
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class IntegrationApiFixture(unittest.TestCase):
@@ -17,7 +19,7 @@ class IntegrationApiFixture(unittest.TestCase):
         self.backupsPath = Path(self.directory.name) / "backups"
         self.backupsPath.mkdir()
         self.application = createApp(self.databasePath)
-        self.connection = ledger.connectDatabase(self.databasePath)
+        self.connection = connectDatabase(self.databasePath)
         createUser(self.connection, "owner", "Owner", "owner password")
         self.cash = ledger.createAccount(self.connection, "Example Cash", "cash")
         self.expense = ledger.createCategory(self.connection, "Example Expense")
@@ -33,7 +35,7 @@ class IntegrationApiFixture(unittest.TestCase):
         self.directory.cleanup()
 
     def snapshot(self):
-        return tuple(self.connection.iterdump())
+        return tuple(snapshotWithoutLoginTime(self.connection))
 
     def bodyWithSize(self, size, content=None):
         encoded = json.dumps(self.proposal if content is None else content).encode("utf-8")

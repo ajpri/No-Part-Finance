@@ -1,3 +1,4 @@
+from tests.test_support import useHistoricalSchema21
 from tests.test_support import ownerClient
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from database import (
     createTemplate, createBulkTransactions, createTransactionWithReimbursement,
     createSimulatorPlan, saveSimulatorRow, simulatorWorkspace, dashboardReport, initializeDatabase,
 )
+from tests.test_support import connectFixtureDatabase as connectDatabase
 
 
 class ExternalSystemAccountTests(unittest.TestCase):
@@ -156,6 +158,7 @@ class ExternalSystemAccountTests(unittest.TestCase):
         createTransaction(self.connection, self.cashId, "2026-10-01", "Existing activity", self.categoryId, "1.00")
         self.connection.execute("DELETE FROM accounts WHERE id = ?", (self.externalId,))
         self.connection.execute("INSERT INTO accounts (name, accountClass, balanceOffsetCents) VALUES ('External', 'cash', 12345)")
+        useHistoricalSchema21(self.connection)
         self.connection.execute("PRAGMA user_version = 17")
         self.connection.commit()
         accountsBefore = [tuple(row) for row in self.connection.execute("SELECT * FROM accounts ORDER BY id")]
