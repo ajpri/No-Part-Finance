@@ -8,7 +8,7 @@ Only Version Next is approved implementation scope. Implement one named Version 
 
 ## Version Next
 
-### Version 26.11 — Ledger Isolation Foundation and Portable Downloads
+### Version 26.10.21 — Ledger Isolation Foundation and Portable Downloads
 
 #### Purpose and scope
 
@@ -18,9 +18,9 @@ Do not add registration, invitations, additional-ledger provisioning, household 
 
 #### Application version and sign-in display
 
-Set the authoritative application version to the exact string `26.11`. Use one central variable for current-version references, including Settings, command-line output, version-bearing application package filenames, and the sign-in screen. Preserve historical release labels and distinguish database schema versions from application versions.
+Set the authoritative application version to the exact string `26.10.21`. Use one central variable for current-version references, including Settings, command-line output, version-bearing application package filenames, and the sign-in screen. Preserve historical release labels and distinguish database schema versions from application versions.
 
-Display `No Part Finance 26.11` at the bottom center of the sign-in screen, with the version populated from that central variable. Keep it readable on desktop and mobile.
+Display `No Part Finance 26.10.21` at the bottom center of the sign-in screen, with the version populated from that central variable. Keep it readable on desktop and mobile.
 
 #### Ledger identity and access schema
 
