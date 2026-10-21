@@ -20,6 +20,7 @@ from users import configureOnStartup, manageUsers, check_password_hash, password
 
 from database import (
     ValidationError,
+    localTimestamp, auditLogPage,
     bindLedger, connectInitialLedgerDatabase, exportLedgerDatabase, setIntegrationState,
     reconcileAccountBalance,
     connectDatabase,
@@ -193,7 +194,7 @@ def createApp(databasePathOverride=None):
         if request.path.startswith("/api/integration/"):
             secret = authorizationParts[1] if isBearer and len(authorizationParts) == 2 else ""
             if secret:
-                g.integration = connection.execute("SELECT id, label, ledgerId FROM integrationSecrets WHERE secret = ? AND active = 1 AND revoked = 0 AND EXISTS (SELECT 1 FROM ledgerAccess WHERE ledgerAccess.ledgerId = integrationSecrets.ledgerId AND role = 'owner')", (secret,)).fetchone()
+                g.integration = connection.execute("SELECT id, label, ledgerId FROM integrationSecrets WHERE secret = ? AND active = 1 AND revoked = 0 AND EXISTS (SELECT 1 FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE a.ledgerId = integrationSecrets.ledgerId AND a.role = 'owner' AND a.enabled = 1 AND u.enabled = 1)", (secret,)).fetchone()
             if not g.integration:
                 return jsonify({"error": "Valid integration Bearer authentication required"}), 401
             bindLedger(connection, g.integration["ledgerId"], "integration", g.integration["id"], g.integration["label"])
@@ -209,11 +210,11 @@ def createApp(databasePathOverride=None):
                 del sessions[expiredToken]
             g.browserSession = sessions.get(token)
         if g.browserSession and g.browserSession.get("userId"):
-            memberships = connection.execute("SELECT u.id, u.username, u.authVersion, a.ledgerId, a.role FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE u.id = ?", (g.browserSession["userId"],)).fetchall()
+            memberships = connection.execute("SELECT u.id, u.username, u.authVersion, u.enabled AS loginEnabled, a.ledgerId, a.role, a.enabled AS accessEnabled FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE u.id = ?", (g.browserSession["userId"],)).fetchall()
             if len(memberships) == 1:
                 user = memberships[0]
                 owner = connection.execute("SELECT 1 FROM ledgerAccess WHERE ledgerId = ? AND role = 'owner'", (user["ledgerId"],)).fetchone()
-                if owner and user["authVersion"] == g.browserSession["authVersion"]:
+                if owner and user["loginEnabled"] and user["accessEnabled"] and user["authVersion"] == g.browserSession["authVersion"]:
                     g.user = user
                     bindLedger(connection, user["ledgerId"], "user", user["id"], user["username"])
         if request.endpoint == "signIn":
@@ -261,8 +262,8 @@ def createApp(databasePathOverride=None):
             connection = getDatabase()
             user = connection.execute("SELECT * FROM users WHERE usernameKey = ?", (username,)).fetchone()
             valid = len(password) <= 128 and check_password_hash(user["passwordHash"] if user else dummyPasswordHash, password)
-            memberships = connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (user["id"],)).fetchall() if user else []
-            if not user or not valid or len(memberships) != 1:
+            memberships = connection.execute("SELECT ledgerId, enabled FROM ledgerAccess WHERE userId = ?", (user["id"],)).fetchall() if user else []
+            if not user or not valid or not user["enabled"] or len(memberships) != 1 or not memberships[0]["enabled"]:
                 failures += 1
                 usernameAttempts[username] = (failures, now + 300 if failures == 5 else until)
                 return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
@@ -271,6 +272,10 @@ def createApp(databasePathOverride=None):
                 return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
             token = secrets.token_urlsafe(32)
             with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                currentUser = connection.execute("SELECT u.authVersion, u.enabled, a.enabled AS accessEnabled FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE u.id = ? AND a.ledgerId = ?", (user["id"], ledgerId)).fetchone()
+                if not currentUser or not currentUser["enabled"] or not currentUser["accessEnabled"] or currentUser["authVersion"] != user["authVersion"]:
+                    return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
                 connection.execute("UPDATE users SET lastLoginAt = ? WHERE id = ?", (datetime.fromtimestamp(now, timezone.utc).isoformat(), user["id"]))
             sessions.pop(request.cookies.get("npfSession"), None)
             sessions[token] = {"userId": user["id"], "authVersion": user["authVersion"], "expiresAt": now + 168 * 3600, "csrfToken": secrets.token_urlsafe(32)}
@@ -804,6 +809,12 @@ def createApp(databasePathOverride=None):
         )
         return jsonify({"transferId": transferId, "transactionId": transactionId}), 201
 
+    @app.get("/api/audit-log")
+    def auditLog():
+        if set(request.args) - {"page", "perPage"} or any(len(request.args.getlist(key)) != 1 for key in request.args):
+            raise ValidationError("Use only page and perPage for the Audit log")
+        return jsonify(auditLogPage(getDatabase(), request.args.get("page", "1"), request.args.get("perPage", "50")))
+
     @app.get("/api/system/database-status")
     def databaseStatus():
         connection = getDatabase()
@@ -811,7 +822,7 @@ def createApp(databasePathOverride=None):
         accountCount = connection.execute("SELECT COUNT(*) FROM scopedaccounts").fetchone()[0]
         databaseSchemaVersion = connection.execute("PRAGMA user_version").fetchone()[0]
         latestChange = connection.execute("SELECT MAX(changedAt) FROM auditEvents WHERE ledgerId = currentLedgerId()").fetchone()[0]
-        modifiedTime = datetime.fromisoformat(latestChange.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if latestChange else "Not recorded"
+        modifiedTime = localTimestamp(latestChange)
         return jsonify({
             "transactionCount": transactionCount,
             "accountCount": accountCount,
@@ -1509,7 +1520,7 @@ def runApplication(app):
     logging.info("Schema version: %s", schemaVersion)
     logging.info("Development server host: 0.0.0.0")
     try:
-        connection = connectInitialLedgerDatabase(app.config["DATABASE_PATH"])
+        connection = connectDatabase(app.config["DATABASE_PATH"])
         try:
             ownerConfigured = connection.execute("SELECT 1 FROM ledgerAccess WHERE role = 'owner'").fetchone() is not None
             signInGuidance = "Sign in to use the application." if ownerConfigured else "Complete Owner setup below, then reload to sign in."

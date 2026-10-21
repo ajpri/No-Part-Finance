@@ -56,7 +56,7 @@ def ownerClient(application, copiedDatabase=False):
             # Only disposable integration copies receive a known test password.
             # Preserve the copied identity and never require the source Owner's credentials.
             username = owner["username"]
-            resetPassword(connection, "owner", "test-owner-password")
+            resetPassword(connection, connection.execute("SELECT id FROM scopedusers WHERE role = 'owner'").fetchone()[0], "test-owner-password")
     finally:
         connection.close()
     client = application.test_client()
@@ -149,5 +149,5 @@ def snapshotWithoutLoginTime(connection):
     hasLoginTime = any(row[1] == "lastLoginAt" for row in connection.execute("PRAGMA table_info(users)"))
     statements = list(connection.iterdump())
     if hasLoginTime:
-        statements = [re.sub(r",(?:NULL|'[^']*')\);$", ",NULL);", statement) if statement.startswith('INSERT INTO "users"') else statement for statement in statements]
+        statements = [re.sub(r",(?:NULL|'[^']*')(?=,[01]\);$)", ",NULL", statement) if statement.startswith('INSERT INTO "users"') else statement for statement in statements]
     return statements

@@ -37,7 +37,7 @@ class LedgerFoundationTests(unittest.TestCase):
         with self.connection:
             self.connection.execute("INSERT INTO ledgers VALUES (?, ?)", (self.secondLedger, "Foreign ledger marker"))
             self.foreignOwner = self.connection.execute("INSERT INTO users (username, usernameKey, passwordHash) VALUES ('Other', 'other', ?)", (passwordHash("other password"),)).lastrowid
-            self.connection.execute("INSERT INTO ledgerAccess VALUES (?, ?, 'owner')", (self.foreignOwner, self.secondLedger))
+            self.connection.execute("INSERT INTO ledgerAccess (userId, ledgerId, role) VALUES (?, ?, 'owner')", (self.foreignOwner, self.secondLedger))
         ledger.bindLedger(self.connection, self.secondLedger)
         ledger.createExternalSystemAccount(self.connection)
         self.foreignAccount = ledger.createAccount(self.connection, "Shared name", "cash", openingBalance="900")
@@ -129,7 +129,7 @@ class LedgerFoundationTests(unittest.TestCase):
         with self.connection:
             self.connection.execute("DELETE FROM ledgerAccess WHERE userId = ?", (self.auditorId,))
             self.connection.execute("UPDATE ledgerAccess SET role = 'auditor' WHERE userId = ?", (self.ownerId,))
-            self.connection.execute("INSERT INTO ledgerAccess VALUES (?, ?, 'owner')", (self.auditorId, self.firstLedger))
+            self.connection.execute("INSERT INTO ledgerAccess (userId, ledgerId, role) VALUES (?, ?, 'owner')", (self.auditorId, self.firstLedger))
         self.assertEqual(403, self.client.post("/api/accounts", json={"name": "Blocked", "accountClass": "cash"}).status_code)
         with self.connection:
             self.connection.execute("DELETE FROM ledgerAccess WHERE userId = ?", (self.ownerId,))
@@ -273,7 +273,7 @@ class LedgerMigrationTests(unittest.TestCase):
             connection.close()
         self.assertEqual(1, len(list((self.path.parent / "backups").glob("*.db"))))
 
-    def testConcurrentAuditorCreationRetainsOneMembership(self):
+    def testConcurrentAuditorCreationRetainsSeparateMemberships(self):
         ledger.initializeDatabase(self.path)
         import threading
         barrier = threading.Barrier(2)
@@ -289,10 +289,10 @@ class LedgerMigrationTests(unittest.TestCase):
             finally:
                 connection.close()
         with ThreadPoolExecutor(max_workers=2) as executor:
-            self.assertEqual(["created", "rejected"], sorted(executor.map(create, (1, 2))))
+            self.assertEqual(["created", "created"], sorted(executor.map(create, (1, 2))))
         connection = ledger.connectInitialLedgerDatabase(self.path)
         try:
-            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM ledgerAccess WHERE role = 'auditor'").fetchone()[0])
-            self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM ledgerAccess WHERE role = 'auditor'").fetchone()[0])
+            self.assertEqual(3, connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
         finally:
             connection.close()

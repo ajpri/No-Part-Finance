@@ -192,7 +192,7 @@ class DatabaseTests(unittest.TestCase):
         self.connection.close()
         initializeDatabase(self.databasePath)
         self.connection = connectDatabase(self.databasePath)
-        backups = list((self.databasePath.parent / "backups").glob("pre-migration-v4-to-v22-*.db"))
+        backups = list((self.databasePath.parent / "backups").glob("pre-migration-v4-to-v26-*.db"))
         self.assertEqual(1, len(backups))
         self.assertEqual("Preserved", self.connection.execute("SELECT name FROM accounts WHERE id = ?", (accountId,)).fetchone()[0])
         self.assertEqual("ok", self.connection.execute("PRAGMA integrity_check").fetchone()[0])
@@ -230,7 +230,7 @@ class DatabaseTests(unittest.TestCase):
             "INSERT INTO sinkingFundPlans (templateId, frequency, expectedDate, active) VALUES (?, ?, ?, ?)",
             (templateId, "monthly", "2026-11-30", 0),
         )
-        self.assertEqual(22, self.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(schemaVersion, self.connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual([], self.connection.execute("PRAGMA foreign_key_check").fetchall())
 
     def testNewerDatabaseVersionIsRefused(self):

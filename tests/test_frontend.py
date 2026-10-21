@@ -111,3 +111,69 @@ check().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         completed = subprocess.run([nodePath, "-e", counterDeclaration + "\n" + helperFunction + "\n" + harness], capture_output=True, text=True, timeout=15)
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
+    def testAuditPagingIgnoresStaleResponsesAndUsesSafeText(self):
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("Node.js is unavailable; audit pagination requires a JavaScript runtime")
+        javascript = (Path(__file__).resolve().parents[1] / "app.js").read_text()
+        auditFunctions = "let auditRequestSequence =" + javascript.split("let auditRequestSequence =", 1)[1].split("function showSettingsSection", 1)[0]
+        harness = r'''
+const assert = require("node:assert/strict");
+const requests = [];
+let location = new URL("http://localhost/settings?page=1&perPage=10#audit-log");
+const history = {replaceState(_,__,url) { location = new URL(url); }, pushState(_,__,url) { location = new URL(url); }};
+function element() { return {textContent:"", disabled:false, value:"10", children:[], append(...items) { this.children.push(...items); }, replaceChildren() { this.children=[]; }, insertRow() { const row={cells:[], insertCell() { const cell=element(); this.cells.push(cell); return cell; }}; this.children.push(row); return row; }}; }
+const controls = Object.fromEntries(["auditError", "auditRows", "auditPerPage", "auditPrevious", "auditNext", "auditRange"].map(key=>["#"+key,element()]));
+const document = {querySelector(selector) { return controls[selector]; }, createElement:element, createTextNode(text) { return {textContent:text}; }};
+function api(path) { return new Promise((resolve,reject)=>requests.push({path,resolve,reject})); }
+function friendlyCalendarDate(value) { return "formatted " + value; }
+async function check() {
+  const old = loadAuditLog();
+  location = new URL("http://localhost/settings?page=2&perPage=10#audit-log");
+  const latest = loadAuditLog();
+  requests[1].resolve({page:2, perPage:10, total:25,start:11,end:20,hasPrevious:true,hasNext:true, rows:[{dateTime:"recorded time",user:"<script>user</script>",action:"Updated",type:"Transaction",oldValues:null,newValues:[{label:"Description",value:"<script>text</script>"}]}]});
+  await latest;
+  requests[0].resolve({page:1, rows:[],start:0,end:0,total:0,hasPrevious:false,hasNext:false});
+  await old;
+  assert.equal(controls["#auditRange"].textContent,"11–20 of 25");
+  assert.equal(controls["#auditRows"].children.length,1);
+  const row=controls["#auditRows"].children[0];
+  assert.equal(row.cells[1].textContent,"<script>user</script>");
+  assert.equal(row.cells[5].children[0].children[1].textContent,"<script>text</script>");
+  const stale = loadAuditLog();
+  location = new URL("http://localhost/settings#accounts");
+  requests[2].resolve({page:1,rows:[],start:0,end:0,total:0});
+  await stale;
+  assert.equal(controls["#auditRange"].textContent,"11–20 of 25");
+  location = new URL("http://localhost/settings?page=2&perPage=10#audit-log");
+  controls["#auditPerPage"].value="100";
+  navigateAuditPage(1);
+  assert.equal(location.search,"?page=1&perPage=100");
+  assert.equal(location.hash,"#audit-log");
+  requests[3].resolve({page:1,rows:[],start:0,end:0,total:0,hasPrevious:false,hasNext:false});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(controls["#auditPrevious"].disabled,true);
+  assert.equal(controls["#auditNext"].disabled,true);
+}
+'''
+        result = subprocess.run([nodePath, "-e", harness + auditFunctions + "\ncheck().catch(error=>{console.error(error);process.exitCode=1;});"], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def testAuditTimestampUsesFriendlyDateWithoutChangingServerTime(self):
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("Node.js is unavailable; timestamp formatting requires a JavaScript runtime")
+        javascript = (Path(__file__).resolve().parents[1] / "app.js").read_text()
+        friendlyDate = "function friendlyCalendarDate" + javascript.split("function friendlyCalendarDate", 1)[1].split("function setMoneyInputValue", 1)[0]
+        auditDate = "function friendlyAuditTimestamp" + javascript.split("function friendlyAuditTimestamp", 1)[1].split("function renderAuditValues", 1)[0]
+        harness = r'''
+const assert = require("node:assert/strict");
+const year = new Date().getFullYear();
+assert.equal(friendlyAuditTimestamp(`${year}-01-02 00:03:04 CST`), "Jan 2 00:03:04 CST");
+assert.equal(friendlyAuditTimestamp(`${year - 1}-12-31 23:59:59 CST`), `Dec 31, ${year - 1} 23:59:59 CST`);
+assert.equal(friendlyAuditTimestamp("Not recorded"), "Not recorded");
+'''
+        for timezone in ("America/Chicago", "Pacific/Kiritimati", "Pacific/Honolulu"):
+            result = subprocess.run([nodePath, "-e", friendlyDate + auditDate + harness], capture_output=True, text=True, env={**os.environ, "TZ": timezone})
+            self.assertEqual(0, result.returncode, result.stderr)

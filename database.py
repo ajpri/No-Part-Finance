@@ -17,7 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-schemaVersion = 22
+schemaVersion = 26
 
 
 class ValidationError(ValueError):
@@ -213,6 +213,14 @@ def connectDatabase(databasePath):
     return connection
 
 
+def localTimestamp(timestamp, includeOffset=False):
+    if not timestamp:
+        return "Not recorded"
+    localTime = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone()
+    pattern = "%Y-%m-%d %H:%M:%S %Z" + (" (UTC%z)" if includeOffset else "")
+    return localTime.strftime(pattern)
+
+
 def initializeDatabase(databasePath):
     """Create or upgrade the schema without changing user-owned configuration."""
     databasePath = Path(databasePath)
@@ -314,6 +322,14 @@ def initializeDatabase(databasePath):
                 createExternalSystemAccount(connection)
             validateExternalSystemAccount(connection)
             migrateToVersion22(connection)
+        if currentVersion < 23:
+            migrateToVersion23(connection)
+        if currentVersion < 24:
+            migrateToVersion24(connection)
+        if currentVersion < 25:
+            migrateToVersion25(connection)
+        if currentVersion < 26:
+            migrateToVersion26(connection)
         connection.execute(f"PRAGMA user_version = {schemaVersion}")
         connection.commit()
         foreignKeyFailure = connection.execute("PRAGMA foreign_key_check").fetchone()
@@ -3367,6 +3383,30 @@ class LedgerConnection(sqlite3.Connection):
     actorKind = "system"
     actorId = "cli"
     actorLabel = "Command line"
+    auditOperation = None
+
+    def operationIdentity(self):
+        if self.auditOperation is None:
+            self.auditOperation = str(uuid4())
+        return self.auditOperation
+
+    def __exit__(self, *arguments):
+        try:
+            return super().__exit__(*arguments)
+        finally:
+            self.auditOperation = None
+
+    def commit(self):
+        try:
+            return super().commit()
+        finally:
+            self.auditOperation = None
+
+    def rollback(self):
+        try:
+            return super().rollback()
+        finally:
+            self.auditOperation = None
 
 
 def requireLedger(connection):
@@ -3380,6 +3420,7 @@ def installLedgerContext(connection):
     connection.create_function("auditActorKind", 0, lambda: connection.actorKind)
     connection.create_function("auditActorId", 0, lambda: str(connection.actorId))
     connection.create_function("auditActorLabel", 0, lambda: connection.actorLabel)
+    connection.create_function("auditOperationId", 0, connection.operationIdentity)
     if connection.execute("PRAGMA user_version").fetchone()[0] < 22:
         return
     connection.execute("CREATE TEMP VIEW IF NOT EXISTS scopedusers AS SELECT u.*, a.role FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE a.ledgerId = currentLedgerId()")
@@ -3517,23 +3558,79 @@ def migrateToVersion22(connection):
         installLedgerContext(connection)
 
 
+def migrateToVersion23(connection):
+    """Keep membership identity while making Auditor access reversible."""
+    with connection:
+        connection.execute("ALTER TABLE ledgerAccess ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1) AND (role != 'owner' OR enabled = 1))")
+        connection.execute("PRAGMA user_version = 23")
+
+
+def migrateToVersion24(connection):
+    """Administrative login status is distinct from cooldown and membership access."""
+    with connection:
+        connection.execute("ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))")
+        connection.execute("PRAGMA user_version = 24")
+
+
+def migrateToVersion25(connection):
+    """Retain legacy audit rows; new writes carry reliable operation grouping."""
+    with connection:
+        connection.execute("ALTER TABLE auditEvents ADD COLUMN operationId TEXT")
+        triggerNames = [f"audit{table}{action}" for table in ledgerTables for action in ("INSERT", "UPDATE", "DELETE")]
+        triggerNames.extend(("auditLedgerName", "auditEventsNoUPDATE", "auditEventsNoDELETE"))
+        for triggerName in triggerNames:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{triggerName}"')
+        for action in ("INSERT", "UPDATE"):
+            connection.execute(f"DROP TRIGGER transferLedger{action}")
+        installAuditTriggers(connection)
+        connection.execute("CREATE INDEX auditOperationIndex ON auditEvents(ledgerId, operationId)")
+        connection.execute("PRAGMA user_version = 25")
+
+
+def migrateToVersion26(connection):
+    """Planning experiments persist normally without generating new audit records."""
+    with connection:
+        for table in ("simulatorPlans", "simulatorRows"):
+            for action in ("INSERT", "UPDATE", "DELETE"):
+                connection.execute(f'DROP TRIGGER IF EXISTS "audit{table}{action}"')
+        connection.execute("PRAGMA user_version = 26")
+
+
 def installAuditTriggers(connection):
+    hasOperations = any(row["name"] == "operationId" for row in connection.execute("PRAGMA table_info(auditEvents)"))
+    operationColumn = ", operationId" if hasOperations else ""
+    operationValue = ", auditOperationId()" if hasOperations else ""
     for table in ledgerTables:
+        # Simulator-only saves are disposable planning, not ledger activity.
+        # Real ledger writes from the Simulator still use the transaction triggers.
+        if table in {"simulatorPlans", "simulatorRows"}:
+            continue
         columns = [row["name"] for row in connection.execute(f"PRAGMA table_info({table})") if row["name"] not in {"secret", "ledgerId"}]
         # Pending payloads contain financial fields, never integration credentials.
         def rowJson(prefix):
-            return "json_object(" + ", ".join(f"'{column}', {prefix}.{column}" for column in columns) + ")"
+            entries = [f"'{column}', {prefix}.{column}" for column in columns]
+            if hasOperations and table == "transactions":
+                entries.extend([
+                    f"'accountName', (SELECT name FROM accounts WHERE ledgerId = {prefix}.ledgerId AND id = {prefix}.accountId)",
+                    f"'categoryName', (SELECT name FROM categories WHERE ledgerId = {prefix}.ledgerId AND id = {prefix}.categoryId)",
+                    f"'reportingRole', (SELECT reportingRole FROM categories WHERE ledgerId = {prefix}.ledgerId AND id = {prefix}.categoryId)",
+                ])
+            return "json_object(" + ", ".join(entries) + ")"
         for action, prefix in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
             recordKey = "key" if table == "applicationSettings" else "id"
             before = "NULL" if action == "INSERT" else rowJson("OLD")
             after = "NULL" if action == "DELETE" else rowJson("NEW")
-            connection.execute(f"""CREATE TRIGGER audit{table}{action} AFTER {action} ON {table}
-                BEGIN INSERT INTO auditEvents (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues)
-                VALUES ({prefix}.ledgerId, strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), '{action.lower()}', '{table}', {prefix}.{recordKey}, {before}, {after}); END""")
-    connection.execute("""CREATE TRIGGER auditLedgerName AFTER UPDATE OF name ON ledgers
+            condition = ""
+            if hasOperations and table == "transactions" and action == "UPDATE":
+                # The insert identity trigger changes no financial or user-visible field.
+                condition = " WHEN " + " OR ".join(f"OLD.{column} IS NOT NEW.{column}" for column in columns if column != "eventIdentity")
+            connection.execute(f"""CREATE TRIGGER audit{table}{action} AFTER {action} ON {table}{condition}
+                BEGIN INSERT INTO auditEvents (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues{operationColumn})
+                VALUES ({prefix}.ledgerId, strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), '{action.lower()}', '{table}', {prefix}.{recordKey}, {before}, {after}{operationValue}); END""")
+    connection.execute(f"""CREATE TRIGGER auditLedgerName AFTER UPDATE OF name ON ledgers
         WHEN OLD.name != NEW.name BEGIN
-        INSERT INTO auditEvents (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues)
-        VALUES (NEW.id, strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), 'update', 'ledgers', NEW.id, json_object('name', OLD.name), json_object('name', NEW.name)); END""")
+        INSERT INTO auditEvents (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues{operationColumn})
+        VALUES (NEW.id, strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), 'update', 'ledgers', NEW.id, json_object('name', OLD.name), json_object('name', NEW.name){operationValue}); END""")
     for action in ("INSERT", "UPDATE"):
         connection.execute(f"""CREATE TRIGGER transferLedger{action} BEFORE {action} ON transactions
             WHEN NEW.transferId IS NOT NULL AND EXISTS
@@ -3569,8 +3666,8 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
             sourceConnection.backup(snapshot)
             snapshot.row_factory = sqlite3.Row
             memberships = snapshot.execute("SELECT a.*, u.username FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE ledgerId = ?", (ledgerId,)).fetchall()
-            if sum(row["role"] == "owner" for row in memberships) != 1 or sum(row["role"] == "auditor" for row in memberships) > 1:
-                raise ValidationError("Export requires one Owner and at most one Auditor")
+            if sum(row["role"] == "owner" for row in memberships) != 1:
+                raise ValidationError("Export requires exactly one Owner")
             userIds = [row["userId"] for row in memberships]
             for userId in userIds:
                 if snapshot.execute("SELECT COUNT(*) FROM ledgerAccess WHERE userId = ?", (userId,)).fetchone()[0] != 1:
@@ -3618,3 +3715,245 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
             snapshot.close()
             if destination is not None:
                 destination.close()
+
+
+# Recorded snapshots take precedence over current-category fallbacks for legacy rows.
+auditGroupSql = """WITH sourceEvents AS (
+    SELECT *
+    FROM auditEvents WHERE ledgerId = currentLedgerId()
+        AND NOT (recordType = 'transactions' AND action = 'update'
+            AND beforeValues IS NOT NULL AND afterValues IS NOT NULL
+            AND json_extract(beforeValues, '$.eventIdentity') IS NOT json_extract(afterValues, '$.eventIdentity')
+            AND json_remove(beforeValues, '$.eventIdentity') = json_remove(afterValues, '$.eventIdentity'))
+), approvalLinks AS (
+    SELECT p.id AS approvalId, t.id AS transactionEventId,
+        COALESCE(json_extract(p.afterValues, '$.kind'), 'transaction') AS kind,
+        t.afterValues AS transactionValues
+    FROM sourceEvents p JOIN sourceEvents t ON t.recordType = 'transactions' AND t.action = 'insert'
+        AND t.id < p.id AND t.actorKind = p.actorKind AND t.actorId = p.actorId AND t.actorLabel = p.actorLabel
+    WHERE p.recordType = 'pendingSubmissions' AND p.action = 'update'
+        AND json_extract(p.beforeValues, '$.status') = 'Pending' AND json_extract(p.afterValues, '$.status') = 'Approved'
+        AND ((p.operationId IS NOT NULL AND t.operationId = p.operationId)
+            OR (p.operationId IS NULL AND t.operationId IS NULL AND NOT EXISTS (
+                SELECT 1 FROM sourceEvents intervening WHERE intervening.recordType = 'transactions'
+                    AND intervening.recordId = t.recordId AND intervening.id > t.id AND intervening.id < p.id)))
+        AND ((COALESCE(json_extract(p.afterValues, '$.kind'), 'transaction') = 'transaction'
+                AND json_type(p.afterValues, '$.transactionId') = 'integer'
+                AND t.recordId = CAST(json_extract(p.afterValues, '$.transactionId') AS TEXT)
+                AND json_extract(t.afterValues, '$.transferId') IS NULL)
+            OR (json_extract(p.afterValues, '$.kind') = 'transfer'
+                AND json_extract(p.afterValues, '$.transferId') IS NOT NULL
+                AND json_extract(t.afterValues, '$.transferId') = json_extract(p.afterValues, '$.transferId')))
+), validApprovals AS (
+    SELECT approvalId FROM approvalLinks l
+    WHERE NOT EXISTS (SELECT 1 FROM approvalLinks candidate JOIN approvalLinks other
+        ON other.transactionEventId = candidate.transactionEventId AND other.approvalId != candidate.approvalId
+        WHERE candidate.approvalId = l.approvalId)
+    GROUP BY approvalId
+    HAVING (MIN(kind) = 'transaction' AND COUNT(*) = 1)
+        OR (MIN(kind) = 'transfer' AND COUNT(*) = 2
+            AND COUNT(DISTINCT json_extract(transactionValues, '$.accountId')) = 2
+            AND COUNT(DISTINCT json_extract(transactionValues, '$.date')) = 1
+            AND COUNT(json_extract(transactionValues, '$.date')) = 2
+            AND COUNT(DISTINCT json_extract(transactionValues, '$.description')) = 1
+            AND COUNT(json_extract(transactionValues, '$.description')) = 2
+            AND SUM(json_extract(transactionValues, '$.categoryId') IS NOT NULL) = 0
+            AND SUM(json_type(transactionValues, '$.amountCents') = 'integer') = 2
+            AND MIN(json_extract(transactionValues, '$.amountCents')) = -MAX(json_extract(transactionValues, '$.amountCents'))
+            AND MIN(json_extract(transactionValues, '$.amountCents')) < 0
+            AND MAX(json_extract(transactionValues, '$.amountCents')) > 0)
+), approvalMembers AS (
+    SELECT approvalId, approvalId AS eventId FROM validApprovals
+    UNION ALL
+    SELECT l.approvalId, l.transactionEventId FROM approvalLinks l JOIN validApprovals v USING (approvalId)
+), eventKeys AS (
+    SELECT e.*, CASE WHEN a.approvalId IS NOT NULL THEN 'approval:' || a.approvalId
+        WHEN operationId IS NOT NULL AND recordType = 'transactions'
+            AND COALESCE(json_extract(afterValues, '$.transferId'), json_extract(beforeValues, '$.transferId')) IS NOT NULL
+        THEN 'transfer:' || operationId || ':' || COALESCE(json_extract(afterValues, '$.transferId'), json_extract(beforeValues, '$.transferId'))
+        ELSE 'event:' || id END AS groupKey
+    FROM sourceEvents e LEFT JOIN approvalMembers a ON a.eventId = e.id
+), eventGroups AS (
+    SELECT groupKey, MAX(id) AS lastId, MAX(changedAt) AS lastChangedAt FROM eventKeys GROUP BY groupKey
+) """
+
+
+def auditMoney(cents):
+    return f"{'-' if cents < 0 else ''}${abs(cents) // 100:,}.{abs(cents) % 100:02}"
+
+
+def auditSnapshotValues(snapshot, transaction=False, currentCategories=None):
+    if snapshot is None:
+        return None
+    values = {}
+    currentCategory = (currentCategories or {}).get(snapshot.get("categoryId")) if transaction else None
+    currentName = currentCategory is not None and snapshot.get("categoryName") is None
+    currentRole = currentCategory is not None and not snapshot.get("reportingRole") and not snapshot.get("transferId")
+    if currentName or currentRole:
+        # Enrich only the presentation copy, never rewrite historical audit snapshots.
+        snapshot = dict(snapshot)
+        if currentName:
+            snapshot["categoryName"] = currentCategory["name"]
+        if currentRole:
+            snapshot["reportingRole"] = currentCategory["reportingRole"]
+    hiddenFields = {"id", "eventToken", "eventIdentity", "transferId", "operationId", "authVersion", "integrationId", "transactionId", "executedTransactionId", "movedEventToken", "originalContent", "reviewContent", "movedSnapshot"}
+    booleanFields = {"active", "enabled", "accessEnabled", "loginEnabled", "pinned", "pinnedForSelection", "offerReimbursement", "prefillAmount", "executed", "revoked"}
+    labels = {"accountName": "Account", "categoryName": "Category", "accessEnabled": "Ledger access", "loginEnabled": "Login", "name": "Name", "username": "Username", "role": "Role", "amountCents": "Amount", "enteredAmountCents": "Amount", "accountId": "Account reference", "categoryId": "Category reference", "fromAccountId": "From Account reference", "toAccountId": "To Account reference", "originalRole": "Original reporting role"}
+    for field, value in snapshot.items():
+        if (transaction and field == "reportingRole") or field in hiddenFields or any(word in field.casefold() for word in ("secret", "password", "token")):
+            continue
+        if field == "accountId" and snapshot.get("accountName") is not None:
+            continue
+        if field == "categoryId" and snapshot.get("categoryName") is not None:
+            continue
+        label = labels.get(field, re.sub(r"([a-z])([A-Z])", r"\1 \2", field.removesuffix("Cents")).capitalize())
+        if transaction and field == "amountCents":
+            role = snapshot.get("reportingRole")
+            if not snapshot.get("transferId") and role == "expense":
+                value = -value
+            elif not role or snapshot.get("transferId"):
+                label = "Ledger amount"
+        if value is None:
+            formatted = "—"
+        elif field.endswith("Cents") and type(value) is int:
+            formatted = auditMoney(value)
+        elif field in booleanFields:
+            formatted = "Yes" if value else "No"
+            if field in {"enabled", "accessEnabled", "loginEnabled", "active"}:
+                formatted = "Enabled" if value else "Disabled"
+        elif field == "revoked":
+            formatted = "Revoked" if value else "Not revoked"
+        else:
+            formatted = str(value)
+        values[label] = formatted
+    return values
+
+
+def auditTransferValues(snapshots):
+    if not snapshots:
+        return None
+    valid = (len(snapshots) == 2 and all(type(row.get("amountCents")) is int for row in snapshots)
+             and sum(row["amountCents"] for row in snapshots) == 0
+             and snapshots[0].get("accountId") != snapshots[1].get("accountId")
+             and snapshots[0].get("date") == snapshots[1].get("date")
+             and snapshots[0].get("description") == snapshots[1].get("description")
+             and all(row.get("categoryId") is None for row in snapshots))
+    source = next((row for row in snapshots if row.get("amountCents", 0) < 0), None)
+    destination = next((row for row in snapshots if row.get("amountCents", 0) > 0), None)
+    if not valid or not source or not destination:
+        # Do not silently hide malformed history when a low-level write bypassed validation.
+        return {f"Ledger row {index}": "; ".join(f"{key}: {value}" for key, value in auditSnapshotValues(row, transaction=True).items()) for index, row in enumerate(snapshots, 1)}
+    return {"From Account": source.get("accountName") or f"Recorded reference {source['accountId']}",
+            "To Account": destination.get("accountName") or f"Recorded reference {destination['accountId']}",
+            "Date": source["date"], "Description": source["description"], "Amount": auditMoney(destination["amountCents"])}
+
+
+def auditPendingValues(snapshot, currentCategories, currentAccounts):
+    if snapshot is None:
+        return None
+    values = {"Status": snapshot.get("status", "—"), "Source": str(snapshot.get("source", "integration")).capitalize()}
+    # Each side shows its saved review, falling back to the original submission.
+    # Internal retry/version fields and private source snapshots are not viewer fields.
+    try:
+        content = json.loads(snapshot.get("reviewContent") or snapshot.get("originalContent") or "null")
+    except (ValueError, TypeError):
+        content = None
+    if not isinstance(content, dict):
+        return {**values, "Proposal": "Unavailable"}
+    for field, label in (("date", "Date"), ("description", "Description")):
+        if field in content:
+            values[label] = str(content[field])
+    references = (("fromAccountId", "From Account", currentAccounts), ("toAccountId", "To Account", currentAccounts)) if snapshot.get("kind") == "transfer" else (("accountId", "Account", currentAccounts), ("categoryId", "Category", currentCategories))
+    for field, label, records in references:
+        reference = content.get(field)
+        record = records.get(reference) if type(reference) is int else None
+        values[label] = record["name"] if record is not None else f"Recorded reference {reference}" if type(reference) is int else "—"
+    try:
+        values["Amount"] = auditMoney(parseMoneyCents(content["amount"])) if "amount" in content else "—"
+    except (ValidationError, TypeError, ValueError):
+        values["Amount"] = "Invalid recorded amount"
+    if snapshot.get("pinned"):
+        values["Pinned"] = "Yes"
+    return values
+
+
+def auditDisplayEvent(events, currentCategories=None, currentAccounts=None):
+    last = events[-1]
+    combined = len(events) > 1 and last["groupKey"].startswith("transfer:")
+    approval = last["groupKey"].startswith("approval:")
+    if approval:
+        approved = json.loads(last["afterValues"])
+        before = {"Status": "Pending"}
+        transactionSnapshots = [json.loads(row["afterValues"]) for row in events if row["recordType"] == "transactions"]
+        transfer = approved.get("kind") == "transfer"
+        details = auditTransferValues(transactionSnapshots) if transfer else auditSnapshotValues(transactionSnapshots[0], transaction=True, currentCategories=currentCategories)
+        after = {"Status": "Approved", **details}
+        action = "Approved"
+        recordType = "Pending transfer" if transfer else "Pending transaction"
+    elif combined:
+        before = auditTransferValues([json.loads(row["beforeValues"]) for row in events if row["beforeValues"]])
+        after = auditTransferValues([json.loads(row["afterValues"]) for row in events if row["afterValues"]])
+        action = "Updated" if before is not None and after is not None else "Created" if after is not None else "Deleted"
+        recordType = "Transfer / Payment"
+    else:
+        before = auditSnapshotValues(json.loads(last["beforeValues"]) if last["beforeValues"] else None, transaction=last["recordType"] == "transactions", currentCategories=currentCategories)
+        after = auditSnapshotValues(json.loads(last["afterValues"]) if last["afterValues"] else None, transaction=last["recordType"] == "transactions", currentCategories=currentCategories)
+        action = {"insert": "Created", "create": "Created", "update": "Updated", "delete": "Deleted", "remove": "Removed", "rename": "Renamed", "password-reset": "Password reset", "access-enable": "Access enabled", "access-disable": "Access disabled", "login-enable": "Login enabled", "login-disable": "Login disabled"}.get(last["action"], last["action"].replace("-", " ").capitalize())
+        recordType = {"transactions": "Transaction", "accounts": "Account", "categories": "Category", "users": "User", "ledgers": "Ledger", "applicationSettings": "Ledger setting", "transactionTemplates": "Template", "integrationSecrets": "Integration", "pendingSubmissions": "Pending entry", "simulatorPlans": "Simulator plan", "simulatorRows": "Simulator row", "sinkingFundPlans": "Recurring Budget item", "flexibleCategoryBudgets": "Flexible Budget", "expectedIncomePlans": "Expected Income", "plannedCreditPayments": "Planned Debt Payment"}.get(last["recordType"], last["recordType"])
+        snapshots = [json.loads(last[field]) for field in ("beforeValues", "afterValues") if last[field]]
+        if last["recordType"] == "pendingSubmissions":
+            original = json.loads(last["beforeValues"]) if last["beforeValues"] else None
+            updated = json.loads(last["afterValues"]) if last["afterValues"] else None
+            before = auditPendingValues(original, currentCategories or {}, currentAccounts or {})
+            after = auditPendingValues(updated, currentCategories or {}, currentAccounts or {})
+            if original is None and updated is not None:
+                action = "Submitted"
+            elif original is not None and updated is not None:
+                status = updated.get("status")
+                if status != original.get("status") and status in {"Approved", "Rejected"}:
+                    action = status
+                elif any(original.get(field) != updated.get(field) for field in ("reviewContent", "reviewVersion")):
+                    action = "Reviewed"
+        if last["recordType"] == "transactions" and any(row.get("transferId") for row in snapshots):
+            recordType = "Transfer row (legacy)" if last["operationId"] is None else "Transfer row (incomplete)"
+    keys = list(dict.fromkeys([*(before or {}), *(after or {})]))
+    changed = [key for key in keys if before is None or after is None or before.get(key) != after.get(key)]
+    # Keep the recorded description/name beside differences so the affected record is identifiable.
+    for key in ("Username", "Name", "Description"):
+        if key in keys and key not in changed:
+            changed.insert(0, key)
+    if not changed:
+        changed = keys
+    userLabel = last["actorLabel"]
+    if last["actorKind"] != "user":
+        userLabel = f"{last['actorKind'].capitalize()}: {userLabel}"
+    return {"dateTime": localTimestamp(last["changedAt"]), "user": userLabel, "action": action, "type": recordType,
+            "oldValues": None if before is None else [{"label": key, "value": before.get(key, "—")} for key in changed],
+            "newValues": None if after is None else [{"label": key, "value": after.get(key, "—")} for key in changed]}
+
+
+def auditLogPage(connection, page="1", perPage="50"):
+    requireLedger(connection)
+    if not isinstance(page, str) or not re.fullmatch(r"[1-9][0-9]{0,8}", page):
+        raise ValidationError("Audit page must be a positive whole number")
+    if perPage not in {"10", "50", "100", "250"}:
+        raise ValidationError("Items per page must be 10, 50, 100, or 250")
+    pageNumber, pageSize = int(page), int(perPage)
+    with connection:
+        connection.execute("BEGIN")
+        total = connection.execute(auditGroupSql + "SELECT COUNT(*) FROM eventGroups").fetchone()[0]
+        lastPage = max(1, (total + pageSize - 1) // pageSize)
+        pageNumber = min(pageNumber, lastPage)
+        selectedEvents = connection.execute(auditGroupSql + """, selectedGroups AS (
+            SELECT * FROM eventGroups ORDER BY lastChangedAt DESC, lastId DESC LIMIT ? OFFSET ?
+        ) SELECT e.* FROM eventKeys e JOIN selectedGroups g ON g.groupKey = e.groupKey
+          ORDER BY g.lastChangedAt DESC, g.lastId DESC, e.id""", (pageSize, (pageNumber - 1) * pageSize)).fetchall()
+        groups = {}
+        for event in selectedEvents:
+            groups.setdefault(event["groupKey"], []).append(event)
+        currentCategories = {row["id"]: row for row in connection.execute("SELECT id, name, reportingRole FROM scopedcategories")}
+        currentAccounts = {row["id"]: row for row in connection.execute("SELECT id, name FROM scopedaccounts")}
+        rows = [auditDisplayEvent(events, currentCategories, currentAccounts) for events in groups.values()]
+    return {"rows": rows, "page": pageNumber, "perPage": pageSize, "total": total,
+            "start": (pageNumber - 1) * pageSize + 1 if total else 0,
+            "end": min(pageNumber * pageSize, total), "hasPrevious": pageNumber > 1, "hasNext": pageNumber < lastPage}

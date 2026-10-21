@@ -101,7 +101,7 @@ class UpgradeBackupTests(unittest.TestCase):
         self.assertEqual(1, len(list((self.databasePath.parent / "backups").glob("*.db"))))
 
     def testPostMigrationVerificationFailureRestoresSnapshot(self):
-        class VerifyFault(sqlite3.Connection):
+        class VerifyFault(database.LedgerConnection):
             def execute(connection, statement, *arguments):
                 if statement == "PRAGMA foreign_key_check":
                     raise RuntimeError("injected final verification failure")
