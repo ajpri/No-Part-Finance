@@ -20,7 +20,7 @@ from users import configureOnStartup, manageUsers, check_password_hash, password
 
 from database import (
     ValidationError,
-    localTimestamp,
+    localTimestamp, auditLogPage,
     bindLedger, connectInitialLedgerDatabase, exportLedgerDatabase, setIntegrationState,
     reconcileAccountBalance,
     connectDatabase,
@@ -808,6 +808,12 @@ def createApp(databasePathOverride=None):
             transferRequest.get("amount"), transferRequest.get("description", "Transfer"),
         )
         return jsonify({"transferId": transferId, "transactionId": transactionId}), 201
+
+    @app.get("/api/audit-log")
+    def auditLog():
+        if set(request.args) - {"page", "perPage"} or any(len(request.args.getlist(key)) != 1 for key in request.args):
+            raise ValidationError("Use only page and perPage for the Audit log")
+        return jsonify(auditLogPage(getDatabase(), request.args.get("page", "1"), request.args.get("perPage", "50")))
 
     @app.get("/api/system/database-status")
     def databaseStatus():

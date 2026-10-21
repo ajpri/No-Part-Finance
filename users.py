@@ -79,6 +79,10 @@ def createOwner(connection, username, password):
                 connection.execute("INSERT INTO ledgers (id, name) VALUES (?, ?)", (ledgerId, f"{username}’s Finances"))
             bindLedger(connection, ledgerId)
             if not initial:
+                connection.execute("""INSERT INTO auditEvents
+                    (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, afterValues)
+                    VALUES (currentLedgerId(), strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), 'create', 'ledgers', ?, ?)""",
+                    (ledgerId, json.dumps({"name": f"{username}’s Finances"})))
                 createExternalSystemAccount(connection)
                 # Other defaults are intentionally absent settings, as on a fresh install.
             userId = insertUser(connection, "owner", username, hashedPassword)

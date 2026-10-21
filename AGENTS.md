@@ -389,7 +389,7 @@ Never interpolate user input into SQL strings.
 
 When inserting user supplied text into the DOM, use safe text APIs rather than treating it as HTML.
 
-Supported setup uses one personal ledger with exactly one required Owner and an optional read-only Auditor. Preserve the ledger-aware schema and server-side isolation defined in `SPEC.md`; financial operations require authorized ledger context, and submitted IDs never grant access.
+Supported CLI setup uses independent personal ledgers, each with exactly one required Owner and multiple read-only Auditors. Each User has one membership in this release, including a Disabled membership. Preserve the ledger-aware schema and server-side isolation defined in `SPEC.md`; financial operations require authorized ledger context, and submitted IDs never grant access.
 
 Preserve the implemented authentication, command-line user management, backend role authorization, and CSRF protection. Do not expose additional-ledger provisioning, roles, memberships, switching, or new authentication workflows without approved roadmap scope. Preserve per-ledger audit recording and atomic financial/audit writes.
 

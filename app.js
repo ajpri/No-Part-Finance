@@ -1547,15 +1547,88 @@ async function saveReimbursementCategory(event) {
   } catch (error) { showFormError(form, error); }
 }
 
+let auditRequestSequence = 0;
+let auditCurrentPage = 1;
+
+function friendlyAuditTimestamp(timestamp) {
+  const parts = String(timestamp ?? "").match(/^(\d{4}-\d{2}-\d{2}) (.+)$/);
+  return parts ? `${friendlyCalendarDate(parts[1])} ${parts[2]}` : timestamp;
+}
+
+function renderAuditValues(cell, values) {
+  if (values === null || values.length === 0) { cell.textContent = "—"; return; }
+  for (const item of values) {
+    const line = document.createElement("div");
+    const label = document.createElement("strong");
+    label.textContent = `${item.label}: `;
+    const value = /date$/i.test(item.label) && /^\d{4}-\d{2}-\d{2}$/.test(item.value) ? friendlyCalendarDate(item.value) : item.value;
+    line.append(label, document.createTextNode(value));
+    cell.append(line);
+  }
+}
+
+async function loadAuditLog() {
+  const sequence = ++auditRequestSequence;
+  const query = new URLSearchParams(location.search);
+  const page = query.get("page") ?? "1";
+  const perPage = query.get("perPage") ?? "50";
+  const errorMessage = document.querySelector("#auditError");
+  const body = document.querySelector("#auditRows");
+  document.querySelector("#auditPerPage").value = ["10", "50", "100", "250"].includes(perPage) ? perPage : "50";
+  document.querySelector("#auditPrevious").disabled = true;
+  document.querySelector("#auditNext").disabled = true;
+  errorMessage.textContent = "";
+  try {
+    if (query.getAll("page").length > 1 || query.getAll("perPage").length > 1) throw new Error("Use one page and one perPage value.");
+    const result = await api(`/api/audit-log?${new URLSearchParams({page, perPage})}`);
+    if (sequence !== auditRequestSequence || location.hash !== "#audit-log") return;
+    body.replaceChildren();
+    auditCurrentPage = result.page;
+    document.querySelector("#auditPrevious").disabled = !result.hasPrevious;
+    document.querySelector("#auditNext").disabled = !result.hasNext;
+    document.querySelector("#auditRange").textContent = `${result.start}–${result.end} of ${result.total}`;
+    if (String(result.page) !== page) {
+      const corrected = new URL(location.href);
+      corrected.searchParams.set("page", result.page);
+      history.replaceState({}, "", corrected);
+    }
+    if (!result.rows.length) {
+      const cell = body.insertRow().insertCell(); cell.colSpan = 6; cell.textContent = "No audit events recorded.";
+    }
+    for (const event of result.rows) {
+      const row = body.insertRow();
+      for (const value of [friendlyAuditTimestamp(event.dateTime), event.user, event.action, event.type]) row.insertCell().textContent = value;
+      renderAuditValues(row.insertCell(), event.oldValues);
+      renderAuditValues(row.insertCell(), event.newValues);
+    }
+  } catch (error) {
+    if (sequence !== auditRequestSequence || location.hash !== "#audit-log") return;
+    body.replaceChildren();
+    document.querySelector("#auditRange").textContent = "";
+    errorMessage.textContent = error.message;
+  }
+}
+
+function navigateAuditPage(page) {
+  const target = new URL(location.href);
+  target.hash = "audit-log";
+  target.searchParams.set("page", page);
+  target.searchParams.set("perPage", document.querySelector("#auditPerPage").value);
+  history.pushState({}, "", target);
+  loadAuditLog();
+}
+
 function showSettingsSection() {
-  const sections = ["accounts", "categories", "templates", "budget", "integrations", "system"];
+  const sections = ["accounts", "categories", "templates", "budget", "integrations", "audit-log", "system"];
   const requested = location.hash.slice(1);
   const section = sections.includes(requested) && (requested !== "integrations" || browserSession?.role === "owner") ? requested : "accounts";
   for (const name of sections) {
-    document.querySelector(`#settings${name[0].toUpperCase()}${name.slice(1)}`).hidden = name !== section;
+    const sectionId = name === "audit-log" ? "AuditLog" : `${name[0].toUpperCase()}${name.slice(1)}`;
+    document.querySelector(`#settings${sectionId}`).hidden = name !== section;
     const link = document.querySelector(`.settingsNavigation a[href="#${name}"]`);
     if (name === section) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
   }
+  if (section === "audit-log") loadAuditLog(); else auditRequestSequence += 1;
 }
 
 function useSameTabNavigation(event) {
@@ -1683,7 +1756,7 @@ function applyAuditorControls() {
   document.querySelector("#releaseHistoryButton").dataset.viewControl = "true";
   document.querySelector("#filterForm button[type='submit']").dataset.viewControl = "true";
   for (const control of document.querySelectorAll("#settingsPage input, #settingsPage select, dialog input, dialog select")) {
-    if (control.id !== "themeSetting") control.disabled = true;
+    if (!["themeSetting", "auditPerPage"].includes(control.id)) control.disabled = true;
   }
   for (const button of document.querySelectorAll("#releaseHistoryDialog [data-close]")) button.dataset.viewControl = "true";
 }
@@ -2155,3 +2228,7 @@ function updateLedgerDownloadOptions() {
 document.querySelector("#disableExportIntegrationKeys").addEventListener("change", updateLedgerDownloadOptions);
 window.addEventListener("pageshow", updateLedgerDownloadOptions);
 updateLedgerDownloadOptions();
+
+document.querySelector("#auditPerPage").addEventListener("change", () => navigateAuditPage(1));
+document.querySelector("#auditPrevious").addEventListener("click", () => navigateAuditPage(auditCurrentPage - 1));
+document.querySelector("#auditNext").addEventListener("click", () => navigateAuditPage(auditCurrentPage + 1));

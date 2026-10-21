@@ -4,7 +4,7 @@ A small Flask and SQLite personal finance application with independently provisi
 
 ## Development status
 
-Version 26.10.21 establishes the multi-ledger database and authorization foundation, per-ledger audit recording, and portable ledger downloads. CLI management can provision additional Owners with separate empty ledgers and multiple Auditors per ledger. Each User has one membership; web account management and household sharing remain future milestones. See [ROADMAP.md](ROADMAP.md) for scope and sequencing.
+Version 26.10.22 adds CLI provisioning and User controls for independent ledgers, login and Auditor-access status, last successful login display, and a read-only Settings Audit log. CLI management can provision additional Owners with separate empty ledgers and multiple Auditors per ledger. Each User has one membership; web account management and household sharing remain future milestones. See [ROADMAP.md](ROADMAP.md) for scope and sequencing.
 
 ## License
 
@@ -126,7 +126,7 @@ FINANCE_DATABASE_PATH=/srv/personal-finance/finance.db python app.py
 
 Financial records, settings, integration keys, and audit history belong to a ledger. The server resolves ledger access from the signed-in User or integration credential; request IDs cannot select another ledger. Existing records are migrated into one UUID-identified ledger, preserving financial values, IDs, credentials, and history. Its initial name comes from the Owner's username. The application creates a verified pre-migration backup before upgrading; failure stops startup. Users sign in again after restart.
 
-Owner-only **Download Backup** and **Download with database** include only the current ledger, its Owner and optional Auditor, password hashes, integration keys and states, pending submissions, and audit history. They exclude unrelated ledgers and Users, active sessions, and deployment configuration. Downloads are assembled in temporary storage and are not retained in the server's `packages` directory. Store completed downloads securely.
+Owner-only **Download Backup** and **Download with database** include only the current ledger, its Owner and all Auditors, password hashes, integration keys and states, pending submissions, and audit history. They exclude unrelated ledgers and Users, active sessions, and deployment configuration. Downloads are assembled in temporary storage and are not retained in the server's `packages` directory. Store completed downloads securely.
 
 **Disable integration keys in downloaded copy** is unchecked by default. Checking it disables enabled keys only in the downloaded database; their values remain available for later re-enabling. Disabled and revoked keys stay blocked. Live keys are unchanged. Without this option, enabled keys continue to work on both copies. Existing passwords work in the standalone copy, but active browser sessions are never copied.
 
@@ -153,6 +153,8 @@ python app.py manage-users
 To retry setup, run the appropriate command above from the application folder (Windows: Command Prompt; Linux: terminal). If the server is still running, use a second terminal in the same folder. Choose **Create Owner** if missing, or **Create Auditor** for optional access. Password mismatch or validation errors allow correction through the existing menu; interrupted or unavailable protected input closes it, and you can run the command again. User management is command-line only.
 
 The menu lists/searches Users in pages of 20, creates Owners with separate ledgers, and creates Auditors for an explicitly selected ledger. Select a User to rename them, reset their password with confirmation, or disable/re-enable Auditor ledger access. Users and memberships are retained; no deletion action is offered. Renaming a User leaves the ledger name unchanged. Details show the last successful sign-in in server-local time with timezone and UTC offset, or Not recorded. User details also controls administrative Login Enabled/Disabled status independently from Auditor ledger access. Disabling an Owner blocks that ledger's integration authentication while preserving each key's own state; Auditors remain independent. Re-enabling login or access requires fresh sign-in and never enables the other status automatically. Exiting the menu does not start the server. If it is stopped, run `startWindows.bat` or `./startLinux.sh` without `manage-users`. Once the server is running, open `http://127.0.0.1:5000` in your browser and sign in with your configured username and password; if the browser showed incomplete setup, reload it. Keep the server terminal open.
+
+Owners and Auditors can open **Settings — Audit log** to view their ledger’s recorded changes. Choose 10, 50, 100, or 250 items per page and use Previous/Next; the URL preserves pagination. New transfer operations are combined. Older transfer rows without operation identity remain labeled legacy history; no historical grouping is guessed. The viewer cannot change or delete events.
 
 Sign-in records the last successful login in UTC; failed attempts and ordinary session activity do not change it. CLI display comes in a later milestone. Five consecutive failed attempts for a normalized username trigger a five-minute cooldown, alongside the existing per-IP limit. Successful sign-in resets failures; cooldown expires automatically and blocked attempts do not extend it. No permanent account disabling is introduced here.
 
@@ -274,6 +276,8 @@ On Windows, packaging errors can return exit code 0; check terminal errors and t
 **Warning:** A default database-included package contains the complete unencrypted financial database and recoverable credentials. Store and transfer it accordingly. A package created with `--no-db` does not contain `finance.db`.
 
 ## Release verification — 2026-10-20
+
+Version 26.10.22 verification covered all 313 tests: 307 passed after updating the current-version/schema/menu assertions and six explicit real-data integration checks stayed skipped. The 16 release acceptance tests and final application/security/startup reruns passed. Browser verification used an isolated synthetic database for Owner/Auditor Audit log access, combined transfers, safe text, page sizes, URL Back/refresh restoration, and contained narrow-screen scrolling. No financial production database was opened by tests; the real installation is upgraded only through normal authorized startup.
 
 Version 26.10.21 full unittest discovery ran 293 tests: 280 passed and 13 were skipped. A final 14-test ledger/security suite also passed, covering migration preservation and late-failure recovery, concurrent Auditor setup, known foreign IDs, database write guards, concurrent request isolation, current access/roles, integration states, audit attribution and rollback, cooldowns, last-login metadata, and standalone exports. All seven JavaScript checks initially skipped for unavailable PATH-based Node passed using the bundled verification runtime; no application dependency was added. The six real-data integration checks remained skipped, and verification used guarded synthetic temporary databases without opening the real financial database.
 

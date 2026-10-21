@@ -157,13 +157,13 @@ class ApplicationTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(200, response.status_code)
         self.assertEqual(
-            {"applicationVersion": "26.10.21", "schemaVersion": 22, "status": "ok"},
+            {"applicationVersion": "26.10.22", "schemaVersion": 26, "status": "ok"},
             response.get_json(),
         )
 
     def testApplicationIdentityIsExposedFromOneVersionValue(self):
         details = self.client.get("/api/application").get_json()
-        self.assertEqual({"name": "No Part Finance", "version": "26.10.21"}, details)
+        self.assertEqual({"name": "No Part Finance", "version": "26.10.22"}, details)
         response = self.client.get("/")
         html = response.get_data(as_text=True)
         response.close()
@@ -430,7 +430,7 @@ class ApplicationTests(unittest.TestCase):
         modifiedAfter = self.databasePath.stat().st_mtime_ns
         self.assertEqual(3, status["transactionCount"])
         self.assertEqual(3, status["accountCount"])
-        self.assertEqual(22, status["schemaVersion"])
+        self.assertEqual(26, status["schemaVersion"])
         self.assertRegex(status["modifiedLocal"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
         self.assertEqual(modifiedBefore, modifiedAfter)
 
@@ -445,7 +445,7 @@ class ApplicationTests(unittest.TestCase):
         self.assertNotIn("<h3>26.08 — Initial Release</h3>", html)
         self.assertNotIn("<h3>26.09.3</h3>", html)
         self.assertIn('href="/api/package-no-db" download>Download application only</a>', html)
-        self.assertIn("The database package contains only your current ledger, its Owner and optional Auditor, unencrypted financial data, and recoverable credentials.", html)
+        self.assertIn("The database package contains only your current ledger, its Owner and all Auditors, unencrypted financial data, and recoverable credentials.", html)
         self.assertIn(".packageActions { align-items: flex-start; display: flex; flex-direction: column; font-weight: 400;", styles)
         backupSection = html[html.index("<h3>Database Backup</h3>"):html.index("<h3>Application Package</h3>")]
         self.assertLess(backupSection.index("Create a consistent SQLite backup"), backupSection.index("Download Backup"))

@@ -658,7 +658,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 copiedPath = Path(self.directory.name) / "package-database.db"
                 copiedPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
-                self.assertIn('applicationVersion = "26.10.21"', archive.read("No-Part-Finance/packageApplication.py").decode())
+                self.assertIn('applicationVersion = "26.10.22"', archive.read("No-Part-Finance/packageApplication.py").decode())
                 self.assertIn("No-Part-Finance/users.py", archive.namelist())
                 self.assertIn("No-Part-Finance/openapi.json", archive.namelist())
             connection = connectDatabase(copiedPath)
@@ -675,7 +675,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 self.assertNotIn("No-Part-Finance/finance.db", archive.namelist())
                 self.assertFalse(any(self.secret.encode() in archive.read(name) for name in archive.namelist()))
-        self.assertEqual("26.10.21", applicationVersion)
+        self.assertEqual("26.10.22", applicationVersion)
 
     def testAuditorAndIntegrationSimulatorReadsNeverWrite(self):
         planId = createSimulatorPlan(self.connection, "Example Plan", "2026-10-01")
@@ -746,7 +746,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                     configureOnStartup(connection)
                 self.assertIn("Your Owner is saved and can sign in", str(output.call_args_list))
                 self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
-                with patch("users.input", side_effect=["1", "3", "4", "Auditor", "5", "6", "7"]), patch("users.getpass.getpass", side_effect=["new owner pass", "new owner pass", "auditor pass", "auditor pass", "new auditor pass", "new auditor pass"]), patch("builtins.print") as output:
+                with patch("users.input", side_effect=["1", "1", "2", "0", "0"]), patch("users.getpass.getpass", side_effect=["new owner pass", "new owner pass", "auditor pass", "auditor pass", "new auditor pass", "new auditor pass"]), patch("builtins.print") as output:
                     manageUsers(path)
                     text = str(output.call_args_list)
                     self.assertNotIn("new owner pass", text)
@@ -788,12 +788,12 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 startupInput.assert_not_called()
                 output.assert_not_called()
 
-                with patch("users.input", side_effect=["4", "Example Auditor"]), patch("users.getpass.getpass", side_effect=unavailablePasswordInput), patch("builtins.print") as output:
+                with patch("users.input", side_effect=["3", "1", "Example Auditor"]), patch("users.getpass.getpass", side_effect=unavailablePasswordInput), patch("builtins.print") as output:
                     manageUsers(path)
                 self.assertIn("User management closed", str(output.call_args_list))
                 self.assertIn("interactive Command Prompt or terminal", str(output.call_args_list))
                 self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
-                with patch("users.input", side_effect=["4", "Example Auditor", "7"]), patch("users.getpass.getpass", return_value="auditor password"), patch("builtins.print"):
+                with patch("users.input", side_effect=["3", "1", "Example Auditor", "0"]), patch("users.getpass.getpass", return_value="auditor password"), patch("builtins.print"):
                     manageUsers(path)
                 self.assertEqual(302, signIn(client, "Example Auditor", "auditor password").status_code)
                 self.assertEqual(403, client.post("/api/accounts", json={}).status_code)
@@ -869,7 +869,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v22-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v26-*.db"))
             self.assertEqual(1, len(backups))
 
     def testMigrationPreservesEveryExistingTableAndBackup(self):
@@ -903,7 +903,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v22-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v26-*.db"))
             self.assertEqual(1, len(backups))
             backup = sqlite3.connect(backups[0])
             try:
