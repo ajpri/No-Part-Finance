@@ -17,7 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-schemaVersion = 23
+schemaVersion = 24
 
 
 class ValidationError(ValueError):
@@ -316,6 +316,8 @@ def initializeDatabase(databasePath):
             migrateToVersion22(connection)
         if currentVersion < 23:
             migrateToVersion23(connection)
+        if currentVersion < 24:
+            migrateToVersion24(connection)
         connection.execute(f"PRAGMA user_version = {schemaVersion}")
         connection.commit()
         foreignKeyFailure = connection.execute("PRAGMA foreign_key_check").fetchone()
@@ -3524,6 +3526,13 @@ def migrateToVersion23(connection):
     with connection:
         connection.execute("ALTER TABLE ledgerAccess ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1) AND (role != 'owner' OR enabled = 1))")
         connection.execute("PRAGMA user_version = 23")
+
+
+def migrateToVersion24(connection):
+    """Administrative login status is distinct from cooldown and membership access."""
+    with connection:
+        connection.execute("ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))")
+        connection.execute("PRAGMA user_version = 24")
 
 
 def installAuditTriggers(connection):

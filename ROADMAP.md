@@ -8,16 +8,6 @@ Only Version Next is approved implementation scope. Implement one named Version 
 
 ## Version Next
 
-### CLI Login Enable and Disable
-
-Expose User-level login Enable/Disable controls in the explicitly selected User's details, for Owners and Auditors. Keep these separate from Auditor membership-access controls; effective ledger access requires both login and membership access to be Enabled, and changing either status never silently changes the other. Show administrative Enabled/Disabled status separately from the temporary sign-in cooldown. Disabling a User invalidates their sessions and blocks login until explicitly re-enabled, without deleting records or changing their password. Disabling an Auditor affects only that login; it does not disable the Owner or integrations.
-
-Disabling an Owner also immediately blocks integration authentication for that Owner's ledger. Implement this as an effective authorization gate, preserving each key's own Enabled/Disabled/Revoked state. Re-enabling the Owner restores use of keys that are still individually Enabled; individually Disabled or Revoked keys remain blocked. Do not automatically disable any Auditor or change membership-access status. Keep these operations ledger-scoped and audited; failures roll back atomically. Existing Users default Enabled when this feature is installed. Preserve administrative status in portable downloads; disabling keys only in a downloaded copy must not change User status.
-
-Re-enabling a retained Auditor membership restores the same User–Ledger link and role; it never creates a replacement membership or changes User login status. Enabling a User login likewise leaves membership-access status unchanged. If either status is Disabled, access remains blocked.
-
-Verify independent login/membership status transitions and restoration of the same Auditor link, session invalidation, persistence across restart/export, blocked browser and integration requests, unchanged key states, successful re-enable requiring fresh browser sign-in, Auditor independence, and isolation from other ledgers.
-
 ### CLI Last Successful Login Display
 
 Expose each User's last-successful-login timestamp on the selected User's CLI details page alongside their administrative login status, using the metadata recorded by 26.10.21. Keep the paginated User list focused on usernames. Display the server's local time with its timezone explicitly identified, including the applicable UTC offset, and `Not recorded` when no timestamp exists. This timestamp describes the User's successful sign-in, not activity within a particular ledger.

@@ -14,7 +14,7 @@ from unittest.mock import patch
 import database as ledger
 from app import createApp, runApplication
 from users import (createOwner, createUser, renameUser, resetPassword, setAuditorAccess,
-                   manageUsers, selectRecord)
+                   manageUsers, selectRecord, setUserEnabled)
 
 
 class UserProvisioningTests(unittest.TestCase):
@@ -164,13 +164,11 @@ class UserProvisioningTests(unittest.TestCase):
         self.assertEqual(before, self.path.read_bytes())
 
     def testMembershipUpgradePreservesRecordsAndRollsBackFailure(self):
+        self.connection.execute("ALTER TABLE users DROP COLUMN enabled")
         self.connection.execute("ALTER TABLE ledgerAccess DROP COLUMN enabled")
         self.connection.execute("PRAGMA user_version = 22")
         self.connection.commit()
         before = list(self.connection.iterdump())
-        def failUpgrade(connection):
-            ledger.migrateToVersion23(connection)
-            raise RuntimeError("synthetic migration failure")
         originalMigration = ledger.migrateToVersion23
         def failingMigration(connection):
             originalMigration(connection)
@@ -182,3 +180,51 @@ class UserProvisioningTests(unittest.TestCase):
         ledger.initializeDatabase(self.path)
         self.assertEqual(3, self.connection.execute("SELECT COUNT(*) FROM ledgerAccess WHERE enabled = 1").fetchone()[0])
         self.assertEqual([], self.connection.execute("PRAGMA foreign_key_check").fetchall())
+
+    def testOwnerLoginGatePreservesKeyStatesAndAuditorAccess(self):
+        owner, _ = self.login()
+        auditor, _ = self.login("Auditor", "auditor password")
+        secretIds = [ledger.createIntegrationSecret(self.connection, label) for label in ("Enabled", "Disabled", "Revoked")]
+        ledger.setIntegrationState(self.connection, secretIds[1], False)
+        with self.connection:
+            self.connection.execute("UPDATE integrationSecrets SET active = 0, revoked = 1 WHERE id = ?", (secretIds[2],))
+        secrets = [tuple(row) for row in self.connection.execute("SELECT secret, active, revoked FROM scopedintegrationSecrets ORDER BY id")]
+        agent = self.application.test_client()
+        setUserEnabled(self.connection, self.owner, False)
+        self.assertEqual(401, owner.get("/api/accounts").status_code)
+        self.assertEqual(200, auditor.get("/api/accounts").status_code)
+        self.assertEqual(401, self.login()[1].status_code)
+        for secret, _, _ in secrets:
+            self.assertEqual(401, agent.get("/api/integration/read/accounts", headers={"Authorization": f"Bearer {secret}"}).status_code)
+        setUserEnabled(self.connection, self.owner, True)
+        self.assertEqual(401, owner.get("/api/accounts").status_code)
+        self.assertEqual(302, self.login()[1].status_code)
+        for (secret, _, _), expected in zip(secrets, (200, 401, 401)):
+            self.assertEqual(expected, agent.get("/api/integration/read/accounts", headers={"Authorization": f"Bearer {secret}"}).status_code)
+        self.assertEqual(secrets, [tuple(row) for row in self.connection.execute("SELECT secret, active, revoked FROM scopedintegrationSecrets ORDER BY id")])
+
+    def testIndependentLoginAccessAndPersistenceInExport(self):
+        setUserEnabled(self.connection, self.auditor, False)
+        setAuditorAccess(self.connection, self.auditor, False)
+        setUserEnabled(self.connection, self.auditor, True)
+        self.assertEqual(401, self.login("Auditor", "auditor password")[1].status_code)
+        setUserEnabled(self.connection, self.auditor, False)
+        setAuditorAccess(self.connection, self.auditor, True)
+        self.assertEqual(401, self.login("Auditor", "auditor password")[1].status_code)
+        snapshot = Path(self.directory.name) / "disabled-export.db"
+        ledger.exportLedgerDatabase(self.connection, snapshot, disableIntegrationKeys=True)
+        ledger.initializeDatabase(snapshot)
+        exported = ledger.connectInitialLedgerDatabase(snapshot)
+        try:
+            self.assertEqual((0, 1), tuple(exported.execute("SELECT u.enabled, a.enabled FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE u.id = ?", (self.auditor,)).fetchone()))
+        finally:
+            exported.close()
+        self.application = createApp(snapshot)
+        self.assertEqual(401, self.login("Auditor", "auditor password")[1].status_code)
+
+    def testLoginStatusRollsBackOnAuditFailure(self):
+        self.connection.execute("CREATE TRIGGER failStatusAudit BEFORE INSERT ON auditEvents BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
+        before = list(self.connection.iterdump())
+        with self.assertRaises(sqlite3.IntegrityError):
+            setUserEnabled(self.connection, self.owner, False)
+        self.assertEqual(before, list(self.connection.iterdump()))

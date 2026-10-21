@@ -88,7 +88,7 @@ def createOwner(connection, username, password):
 
 def userSnapshot(connection, userId):
     requireLedger(connection)
-    user = connection.execute("SELECT u.id, u.username, u.authVersion, a.role, a.enabled AS accessEnabled FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE a.ledgerId = currentLedgerId() AND u.id = ?", (userId,)).fetchone()
+    user = connection.execute("SELECT u.id, u.username, u.authVersion, u.enabled AS loginEnabled, a.role, a.enabled AS accessEnabled FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE a.ledgerId = currentLedgerId() AND u.id = ?", (userId,)).fetchone()
     if not user or connection.execute("SELECT COUNT(*) FROM ledgerAccess WHERE userId = ?", (userId,)).fetchone()[0] != 1:
         raise ValidationError("User must have exactly one membership in the selected ledger")
     return dict(user)
@@ -136,6 +136,18 @@ def setAuditorAccess(connection, userId, enabled):
         connection.execute("UPDATE ledgerAccess SET enabled = ? WHERE userId = ? AND ledgerId = currentLedgerId()", (int(enabled), userId))
         connection.execute("UPDATE users SET authVersion = authVersion + 1 WHERE id = ?", (userId,))
         recordUserChange(connection, userId, "access-enable" if enabled else "access-disable", before, userSnapshot(connection, userId))
+
+
+def setUserEnabled(connection, userId, enabled):
+    if type(enabled) is not bool:
+        raise ValidationError("Login status must be Enabled or Disabled")
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        before = userSnapshot(connection, userId)
+        if before["loginEnabled"] == int(enabled):
+            return
+        connection.execute("UPDATE users SET enabled = ?, authVersion = authVersion + 1 WHERE id = ?", (int(enabled), userId))
+        recordUserChange(connection, userId, "login-enable" if enabled else "login-disable", before, userSnapshot(connection, userId))
 
 
 def confirmedPassword():
@@ -240,11 +252,13 @@ def manageSelectedUser(connection, userId):
         user = userSnapshot(connection, userId)
         ledgerName = connection.execute("SELECT name FROM ledgers WHERE id = currentLedgerId()").fetchone()[0]
         print(f"\nUser: {user['username']}")
+        print(f"Login: {'Enabled' if user['loginEnabled'] else 'Disabled'} (administrative status; sign-in cooldown is separate)")
         print("Ledger | Role | Access")
         print(f"{ledgerName} | {user['role'].title()} | {'Enabled' if user['accessEnabled'] else 'Disabled'}")
         print("1. Change username\n2. Reset password")
         if user["role"] == "auditor":
             print(f"3. {'Disable' if user['accessEnabled'] else 'Enable'} ledger access")
+        print(f"4. {'Disable' if user['loginEnabled'] else 'Enable'} login")
         print("0. Back")
         choice = input("Choose: ").strip()
         if choice == "0":
@@ -259,6 +273,10 @@ def manageSelectedUser(connection, userId):
             if input(f"Change ledger access for {user['username']} in {ledgerName}? [y/N] ").strip().lower() == "y":
                 setAuditorAccess(connection, userId, not user["accessEnabled"])
                 print("Access saved. Fresh sign-in required.")
+        elif choice == "4":
+            if input(f"Change login status for {user['username']}? [y/N] ").strip().lower() == "y":
+                setUserEnabled(connection, userId, not user["loginEnabled"])
+                print("Login status saved. Fresh sign-in required.")
         else:
             print("Choose a listed option.")
 
