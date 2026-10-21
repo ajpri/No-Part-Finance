@@ -14,7 +14,7 @@ from unittest.mock import patch
 import database as ledger
 from app import createApp, runApplication
 from users import (createOwner, createUser, renameUser, resetPassword, setAuditorAccess,
-                   manageUsers, selectRecord, setUserEnabled)
+                   manageUsers, selectRecord, setUserEnabled, manageSelectedUser)
 
 
 class UserProvisioningTests(unittest.TestCase):
@@ -228,3 +228,19 @@ class UserProvisioningTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             setUserEnabled(self.connection, self.owner, False)
         self.assertEqual(before, list(self.connection.iterdump()))
+
+    def testLastLoginDetailsAreReadOnlyAndIdentifyTimezone(self):
+        from datetime import datetime
+        timestamp = "2026-01-15T18:23:45+00:00"
+        with self.connection:
+            self.connection.execute("UPDATE users SET lastLoginAt = ? WHERE id = ?", (timestamp, self.owner))
+        before = self.path.read_bytes()
+        for userId, expected in ((self.owner, datetime.fromisoformat(timestamp).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (UTC%z)")),
+                                 (self.auditor, "Not recorded")):
+            with patch("users.input", return_value="0"), patch("builtins.print") as output:
+                manageSelectedUser(self.connection, userId)
+            self.assertIn(f"Last successful login: {expected}", str(output.call_args_list))
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertEqual(timestamp, self.connection.execute("SELECT lastLoginAt FROM users WHERE id = ?", (self.owner,)).fetchone()[0])
+        setUserEnabled(self.connection, self.owner, False)
+        self.assertEqual(timestamp, self.connection.execute("SELECT lastLoginAt FROM users WHERE id = ?", (self.owner,)).fetchone()[0])

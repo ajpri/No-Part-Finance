@@ -213,6 +213,14 @@ def connectDatabase(databasePath):
     return connection
 
 
+def localTimestamp(timestamp, includeOffset=False):
+    if not timestamp:
+        return "Not recorded"
+    localTime = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone()
+    pattern = "%Y-%m-%d %H:%M:%S %Z" + (" (UTC%z)" if includeOffset else "")
+    return localTime.strftime(pattern)
+
+
 def initializeDatabase(databasePath):
     """Create or upgrade the schema without changing user-owned configuration."""
     databasePath = Path(databasePath)

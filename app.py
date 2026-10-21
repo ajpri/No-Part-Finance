@@ -20,6 +20,7 @@ from users import configureOnStartup, manageUsers, check_password_hash, password
 
 from database import (
     ValidationError,
+    localTimestamp,
     bindLedger, connectInitialLedgerDatabase, exportLedgerDatabase, setIntegrationState,
     reconcileAccountBalance,
     connectDatabase,
@@ -815,7 +816,7 @@ def createApp(databasePathOverride=None):
         accountCount = connection.execute("SELECT COUNT(*) FROM scopedaccounts").fetchone()[0]
         databaseSchemaVersion = connection.execute("PRAGMA user_version").fetchone()[0]
         latestChange = connection.execute("SELECT MAX(changedAt) FROM auditEvents WHERE ledgerId = currentLedgerId()").fetchone()[0]
-        modifiedTime = datetime.fromisoformat(latestChange.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if latestChange else "Not recorded"
+        modifiedTime = localTimestamp(latestChange)
         return jsonify({
             "transactionCount": transactionCount,
             "accountCount": accountCount,

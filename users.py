@@ -12,6 +12,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from database import (
     ValidationError, connectDatabase, bindInitialLedger, bindLedger, requireLedger,
     createExternalSystemAccount,
+    localTimestamp,
 )
 
 
@@ -253,6 +254,8 @@ def manageSelectedUser(connection, userId):
         ledgerName = connection.execute("SELECT name FROM ledgers WHERE id = currentLedgerId()").fetchone()[0]
         print(f"\nUser: {user['username']}")
         print(f"Login: {'Enabled' if user['loginEnabled'] else 'Disabled'} (administrative status; sign-in cooldown is separate)")
+        lastLogin = connection.execute("SELECT lastLoginAt FROM users WHERE id = ?", (userId,)).fetchone()[0]
+        print(f"Last successful login: {localTimestamp(lastLogin, includeOffset=True)}")
         print("Ledger | Role | Access")
         print(f"{ledgerName} | {user['role'].title()} | {'Enabled' if user['accessEnabled'] else 'Disabled'}")
         print("1. Change username\n2. Reset password")

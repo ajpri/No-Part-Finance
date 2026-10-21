@@ -8,12 +8,6 @@ Only Version Next is approved implementation scope. Implement one named Version 
 
 ## Version Next
 
-### CLI Last Successful Login Display
-
-Expose each User's last-successful-login timestamp on the selected User's CLI details page alongside their administrative login status, using the metadata recorded by 26.10.21. Keep the paginated User list focused on usernames. Display the server's local time with its timezone explicitly identified, including the applicable UTC offset, and `Not recorded` when no timestamp exists. This timestamp describes the User's successful sign-in, not activity within a particular ledger.
-
-This is a read-only display. Viewing user management, failed sign-ins, and ordinary activity must not update login metadata. Disabling or re-enabling a User login or Auditor membership access preserves the recorded timestamp. Verify Owner and Auditor details, recorded and missing timestamps, timezone presentation, and unchanged stored values using guarded temporary databases and synthetic records only.
-
 ### Settings Audit Log Viewer
 
 Add a Settings section labeled `Audit log` showing a read-only table of the current authorized ledger's existing audit events. Include already-recorded CLI User and access-management events alongside financial, configuration, planning, and integration events; the viewer is not a separate access-management interface. Invitation and web-sharing event recording and presentation belong to the Version Soon sharing milestone rather than being prebuilt here. No edit, delete, restore, or other per-event action is included. Viewing must not write audit events or change financial records.
