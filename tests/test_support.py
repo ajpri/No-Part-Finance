@@ -56,7 +56,7 @@ def ownerClient(application, copiedDatabase=False):
             # Only disposable integration copies receive a known test password.
             # Preserve the copied identity and never require the source Owner's credentials.
             username = owner["username"]
-            resetPassword(connection, "owner", "test-owner-password")
+            resetPassword(connection, connection.execute("SELECT id FROM scopedusers WHERE role = 'owner'").fetchone()[0], "test-owner-password")
     finally:
         connection.close()
     client = application.test_client()

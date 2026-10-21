@@ -1,10 +1,10 @@
 # No Part Finance
 
-A small Flask and SQLite personal finance application with one shared personal ledger, a required Owner, and an optional read-only Auditor.
+A small Flask and SQLite personal finance application with independently provisioned personal ledgers, each with one Owner and multiple read-only Auditors.
 
 ## Development status
 
-Version 26.10.21 establishes the multi-ledger database and authorization foundation, per-ledger audit recording, and portable ledger downloads. Supported setup still creates one ledger with one Owner and an optional Auditor. CLI provisioning of additional Owners and ledgers, web account management, and household sharing remain future milestones. See [ROADMAP.md](ROADMAP.md) for scope and sequencing.
+Version 26.10.21 establishes the multi-ledger database and authorization foundation, per-ledger audit recording, and portable ledger downloads. CLI management can provision additional Owners with separate empty ledgers and multiple Auditors per ledger. Each User has one membership; web account management and household sharing remain future milestones. See [ROADMAP.md](ROADMAP.md) for scope and sequencing.
 
 ## License
 
@@ -152,7 +152,7 @@ python app.py manage-users
 
 To retry setup, run the appropriate command above from the application folder (Windows: Command Prompt; Linux: terminal). If the server is still running, use a second terminal in the same folder. Choose **Create Owner** if missing, or **Create Auditor** for optional access. Password mismatch or validation errors allow correction through the existing menu; interrupted or unavailable protected input closes it, and you can run the command again. User management is command-line only.
 
-The menu lists users, creates missing users, resets passwords with confirmation, removes the optional Auditor, and exits. Exiting the menu does not start the server. If it is stopped, run `startWindows.bat` or `./startLinux.sh` without `manage-users`. Once the server is running, open `http://127.0.0.1:5000` in your browser and sign in with your configured username and password; if the browser showed incomplete setup, reload it. Keep the server terminal open.
+The menu lists/searches Users in pages of 20, creates Owners with separate ledgers, and creates Auditors for an explicitly selected ledger. Select a User to rename them, reset their password with confirmation, or disable/re-enable Auditor ledger access. Users and memberships are retained; no deletion action is offered. Renaming a User leaves the ledger name unchanged. Exiting the menu does not start the server. If it is stopped, run `startWindows.bat` or `./startLinux.sh` without `manage-users`. Once the server is running, open `http://127.0.0.1:5000` in your browser and sign in with your configured username and password; if the browser showed incomplete setup, reload it. Keep the server terminal open.
 
 Sign-in records the last successful login in UTC; failed attempts and ordinary session activity do not change it. CLI display comes in a later milestone. Five consecutive failed attempts for a normalized username trigger a five-minute cooldown, alongside the existing per-IP limit. Successful sign-in resets failures; cooldown expires automatically and blocked attempts do not extend it. No permanent account disabling is introduced here.
 

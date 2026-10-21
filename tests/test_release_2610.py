@@ -257,7 +257,7 @@ class OctoberTests(unittest.TestCase):
         other = self.app.test_client()
         self.assertEqual(302, signIn(other).status_code)
         self.assertEqual(200, self.owner.get("/api/session").status_code)
-        resetPassword(self.connection, "owner", "new password")
+        resetPassword(self.connection, self.connection.execute("SELECT id FROM scopedusers WHERE role = 'owner'").fetchone()[0], "new password")
         self.assertEqual(401, self.owner.get("/api/session").status_code)
         self.assertEqual(401, other.get("/api/session").status_code)
         self.assertEqual(302, signIn(other, password="new password").status_code)

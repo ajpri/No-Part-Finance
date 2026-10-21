@@ -17,6 +17,7 @@ includedFiles = (
     "docs.html",
     "openapi.json",
     "tests/__init__.py",
+    "tests/test_version261022.py",
     "tests/test_release_2610.py",
     "tests/test_pending_next.py",
     "tests/test_startup_serving.py",

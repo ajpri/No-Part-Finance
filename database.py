@@ -17,7 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-schemaVersion = 22
+schemaVersion = 23
 
 
 class ValidationError(ValueError):
@@ -314,6 +314,8 @@ def initializeDatabase(databasePath):
                 createExternalSystemAccount(connection)
             validateExternalSystemAccount(connection)
             migrateToVersion22(connection)
+        if currentVersion < 23:
+            migrateToVersion23(connection)
         connection.execute(f"PRAGMA user_version = {schemaVersion}")
         connection.commit()
         foreignKeyFailure = connection.execute("PRAGMA foreign_key_check").fetchone()
@@ -3517,6 +3519,13 @@ def migrateToVersion22(connection):
         installLedgerContext(connection)
 
 
+def migrateToVersion23(connection):
+    """Keep membership identity while making Auditor access reversible."""
+    with connection:
+        connection.execute("ALTER TABLE ledgerAccess ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1) AND (role != 'owner' OR enabled = 1))")
+        connection.execute("PRAGMA user_version = 23")
+
+
 def installAuditTriggers(connection):
     for table in ledgerTables:
         columns = [row["name"] for row in connection.execute(f"PRAGMA table_info({table})") if row["name"] not in {"secret", "ledgerId"}]
@@ -3569,8 +3578,8 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
             sourceConnection.backup(snapshot)
             snapshot.row_factory = sqlite3.Row
             memberships = snapshot.execute("SELECT a.*, u.username FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE ledgerId = ?", (ledgerId,)).fetchall()
-            if sum(row["role"] == "owner" for row in memberships) != 1 or sum(row["role"] == "auditor" for row in memberships) > 1:
-                raise ValidationError("Export requires one Owner and at most one Auditor")
+            if sum(row["role"] == "owner" for row in memberships) != 1:
+                raise ValidationError("Export requires exactly one Owner")
             userIds = [row["userId"] for row in memberships]
             for userId in userIds:
                 if snapshot.execute("SELECT COUNT(*) FROM ledgerAccess WHERE userId = ?", (userId,)).fetchone()[0] != 1:
