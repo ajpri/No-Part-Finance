@@ -32,7 +32,7 @@ This project is intentionally split into milestones to reduce wasted implementat
 
 Version Next may contain multiple independently scoped feature milestones. Complete and verify one requested milestone at a time, normally recording each feature and its corresponding SPEC.md and ROADMAP.md updates in one logical commit. Multiple completed feature commits may be batched and pushed upstream together. A batch push does not authorize starting another milestone. Move completed behavior into SPEC.md and remove its completed roadmap entry after verification, without waiting for the batch to be pushed.
 
-Keep one logical change per commit. If a small nit surfaces right after committing and it hasn't been pushed yet, fold it in with `git commit --amend` instead of a second commit. Never amend or rewrite anything already on GitHub.
+Keep one logical change per commit. If a small nit surfaces right after committing and it hasn't been pushed yet, fold it in with `git commit --amend` instead of a second commit. Before pushing to GitHub, squash unpublished progress, fixup, and discussion commits into coherent logical commits, normally one per completed feature or milestone; keep implementation and future specification work separate. Verify that squashing preserves the final tracked file contents. Do not amend or rewrite commits already on GitHub unless the User explicitly approves an override; when approved, use `--force-with-lease` and leave main unchanged unless a merge is separately authorized.
 
 ## 3. Handling Ambiguity
 
