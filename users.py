@@ -94,16 +94,22 @@ def createOwner(connection, username, password):
 def userSnapshot(connection, userId):
     requireLedger(connection)
     user = connection.execute("SELECT u.id, u.username, u.authVersion, u.enabled AS loginEnabled, a.role, a.enabled AS accessEnabled FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE a.ledgerId = currentLedgerId() AND u.id = ?", (userId,)).fetchone()
-    if not user or connection.execute("SELECT COUNT(*) FROM ledgerAccess WHERE userId = ?", (userId,)).fetchone()[0] != 1:
-        raise ValidationError("User must have exactly one membership in the selected ledger")
+    if not user:
+        raise ValidationError("User must have a membership in the selected ledger")
     return dict(user)
 
 
 def recordUserChange(connection, userId, action, before, after):
-    connection.execute("""INSERT INTO auditEvents
-        (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues)
-        VALUES (currentLedgerId(), strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), ?, 'users', ?, ?, ?)""",
-        (action, str(userId), json.dumps(before) if before is not None else None, json.dumps(after) if after is not None else None))
+    # Login identity/credential changes affect every retained membership. Access
+    # changes affect only the explicitly selected ledger.
+    memberships = connection.execute("SELECT ledgerId, role, enabled FROM ledgerAccess WHERE userId = ?", (userId,)).fetchall() if action in {"rename", "password-reset", "login-enable", "login-disable"} else [{"ledgerId": requireLedger(connection), "role": (after or before)["role"], "enabled": (after or before)["accessEnabled"]}]
+    for membership in memberships:
+        def snapshotForMembership(snapshot):
+            return None if snapshot is None else {**snapshot, "role": membership["role"], "accessEnabled": membership["enabled"]} if action in {"rename", "password-reset", "login-enable", "login-disable"} else snapshot
+        connection.execute("""INSERT INTO auditEvents
+            (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues)
+            VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), ?, 'users', ?, ?, ?)""",
+            (membership["ledgerId"], action, str(userId), json.dumps(snapshotForMembership(before)) if before is not None else None, json.dumps(snapshotForMembership(after)) if after is not None else None))
 
 
 def resetPassword(connection, userId, password):
@@ -111,7 +117,7 @@ def resetPassword(connection, userId, password):
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         before = userSnapshot(connection, userId)
-        connection.execute("UPDATE users SET passwordHash = ?, authVersion = authVersion + 1 WHERE id = ?", (hashedPassword, before["id"]))
+        connection.execute("UPDATE users SET passwordHash = ?, passwordSetupRequired = 0, authVersion = authVersion + 1 WHERE id = ?", (hashedPassword, before["id"]))
         recordUserChange(connection, userId, "password-reset", before, userSnapshot(connection, userId))
 
 
@@ -251,8 +257,20 @@ def selectRecord(connection, kind):
 def manageSelectedUser(connection, userId):
     memberships = connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (userId,)).fetchall()
     if len(memberships) != 1:
-        raise ValidationError("User must have exactly one ledger membership")
-    bindLedger(connection, memberships[0]["ledgerId"])
+        if not memberships:
+            raise ValidationError("User has no membership; use trusted provisioning")
+    if len(memberships) > 1:
+        print("Select a membership for access management. Username and password changes affect this login across all its ledgers.")
+        for index, membership in enumerate(memberships, 1):
+            label = connection.execute("SELECT name FROM ledgers WHERE id = ?", (membership["ledgerId"],)).fetchone()[0]
+            print(f"{index}. {label}")
+        choice = input("Membership (0 to cancel): ").strip()
+        if not choice.isdecimal() or not 1 <= int(choice) <= len(memberships):
+            return
+        selectedMembership = memberships[int(choice) - 1]
+    else:
+        selectedMembership = memberships[0]
+    bindLedger(connection, selectedMembership["ledgerId"])
     while True:
         user = userSnapshot(connection, userId)
         ledgerName = connection.execute("SELECT name FROM ledgers WHERE id = currentLedgerId()").fetchone()[0]
@@ -262,6 +280,8 @@ def manageSelectedUser(connection, userId):
         print(f"Last successful login: {localTimestamp(lastLogin, includeOffset=True)}")
         print("Ledger | Role | Access")
         print(f"{ledgerName} | {user['role'].title()} | {'Enabled' if user['accessEnabled'] else 'Disabled'}")
+        setupRequired = connection.execute("SELECT passwordSetupRequired FROM users WHERE id = ?", (userId,)).fetchone()[0]
+        print(f"Credential setup: {'Password required through CLI reset' if setupRequired else 'Ready'}")
         print("1. Change username\n2. Reset password")
         if user["role"] == "auditor":
             print(f"3. {'Disable' if user['accessEnabled'] else 'Enable'} ledger access")

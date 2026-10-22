@@ -126,14 +126,19 @@ class LedgerFoundationTests(unittest.TestCase):
                 self.assertNotIn(self.account, second)
 
     def testCurrentMembershipAndRoleAreAuthoritative(self):
+        auditorClient = self.application.test_client()
+        self.login(auditorClient, "Auditor", "auditor password")
+        with self.connection:
+            self.connection.execute("UPDATE ledgerAccess SET role = 'member' WHERE userId = ?", (self.auditorId,))
+        self.assertEqual(201, auditorClient.post("/api/accounts", json={"name": "Member account", "accountClass": "cash"}).status_code)
+        with self.connection:
+            self.connection.execute("UPDATE ledgerAccess SET role = 'auditor' WHERE userId = ?", (self.auditorId,))
+        self.assertEqual(403, auditorClient.post("/api/accounts", json={"name": "Blocked", "accountClass": "cash"}).status_code)
         with self.connection:
             self.connection.execute("DELETE FROM ledgerAccess WHERE userId = ?", (self.auditorId,))
+        self.assertEqual(403, auditorClient.get("/api/accounts").status_code)
+        with self.assertRaises(sqlite3.IntegrityError), self.connection:
             self.connection.execute("UPDATE ledgerAccess SET role = 'auditor' WHERE userId = ?", (self.ownerId,))
-            self.connection.execute("INSERT INTO ledgerAccess (userId, ledgerId, role) VALUES (?, ?, 'owner')", (self.auditorId, self.firstLedger))
-        self.assertEqual(403, self.client.post("/api/accounts", json={"name": "Blocked", "accountClass": "cash"}).status_code)
-        with self.connection:
-            self.connection.execute("DELETE FROM ledgerAccess WHERE userId = ?", (self.ownerId,))
-        self.assertEqual(401, self.client.get("/api/accounts").status_code)
 
     def testIntegrationStateAndLedgerScope(self):
         headers = {"Authorization": f"Bearer {self.secret}"}
@@ -153,7 +158,9 @@ class LedgerFoundationTests(unittest.TestCase):
     def testExportFreshPagesStateAndSourcePreservation(self):
         for disable in (False, True):
             sourceBefore = [tuple(row) for row in self.connection.execute("SELECT * FROM auditEvents")]
-            response = self.client.get("/api/backup" + ("?disableIntegrationKeys=true" if disable else ""))
+            if disable:
+                self.assertEqual(400, self.client.get("/api/backup?disableIntegrationKeys=true").status_code)
+            response = self.client.get("/api/backup")
             self.assertEqual(200, response.status_code)
             self.assertFalse(b"FOREIGN FINANCIAL MARKER" in response.data)
             self.assertFalse(b"FOREIGN PLAN MARKER" in response.data)
@@ -165,12 +172,13 @@ class LedgerFoundationTests(unittest.TestCase):
             try:
                 self.assertEqual([self.firstLedger], [row[0] for row in exported.execute("SELECT id FROM ledgers")])
                 self.assertEqual({self.ownerId, self.auditorId}, {row[0] for row in exported.execute("SELECT id FROM users")})
-                self.assertEqual((self.secret, int(not disable)), tuple(exported.execute("SELECT secret, active FROM integrationSecrets").fetchone()))
+                self.assertEqual((None, 1), tuple(exported.execute("SELECT secret, active FROM integrationSecrets").fetchone()))
+                self.assertTrue(all(row[0] == 1 for row in exported.execute("SELECT passwordSetupRequired FROM users")))
                 self.assertEqual([], exported.execute("PRAGMA foreign_key_check").fetchall())
             finally:
                 exported.close()
             standalone = createApp(exportPath).test_client()
-            self.assertEqual(302, self.login(standalone, "Owner", "owner password").status_code)
+            self.assertEqual(401, self.login(standalone, "Owner", "owner password").status_code)
             self.assertEqual(sourceBefore, [tuple(row) for row in self.connection.execute("SELECT * FROM auditEvents")])
 
     def testUsernameCooldownLastLoginAndVersion(self):

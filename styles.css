@@ -2,7 +2,7 @@
 :root[data-theme="dark"] { color-scheme: dark; --background: #202124; --border: #5f6368; --muted: #bdc1c6; --surface: #303134; --text: #e8eaed; --link: #8ab4f8; --input-border: #9aa0a6; --unsaved-row: #3d3522; --credit-result-row: #3c4043; --simulator-separator: #9aa0a6; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme]) { color-scheme: dark; --background: #202124; --border: #5f6368; --muted: #bdc1c6; --surface: #303134; --text: #e8eaed; --link: #8ab4f8; --input-border: #9aa0a6; --unsaved-row: #3d3522; --credit-result-row: #3c4043; --simulator-separator: #9aa0a6; } }
 [hidden] { display: none !important; }
-body { background: var(--background); color: var(--text); margin: 0; } header { align-items: center; border-bottom: 1px solid var(--border); display: grid; gap: 2rem; grid-template-columns: auto auto 1fr; padding: .9rem 1.25rem; } .brandRow { align-items: center; display: flex; white-space: nowrap; } .settingsLink { justify-self: end; } nav { display: flex; gap: 1rem; } a { color: var(--link); } a[aria-current="page"] { color: var(--text); font-weight: 600; text-decoration: none; }
+body { background: var(--background); color: var(--text); margin: 0; } header { align-items: center; border-bottom: 1px solid var(--border); display: grid; column-gap: 2rem; row-gap: .5rem; grid-template-columns: auto auto 1fr; padding: .9rem 1.25rem .5rem; } .brandRow { align-items: center; display: flex; white-space: nowrap; } .settingsLink { justify-self: end; } nav { display: flex; gap: 1rem; } a { color: var(--link); } a[aria-current="page"] { color: var(--text); font-weight: 600; text-decoration: none; }
 .applicationVersion { font-weight: 600; }
 .emptyState { border: 1px solid var(--border); padding: .75rem; }
 .utilizationBadge { border-radius: 2px; display: inline-block; font-size: .75rem; font-weight: 500; padding: .08rem .3rem; white-space: nowrap; }
@@ -185,3 +185,15 @@ body:has(.signIn) .signIn { flex: 1; width: min(100%, 28rem); box-sizing: border
 .auditTable th:nth-child(3), .auditTable td:nth-child(3) { min-width: 105px; }
 .auditTable th:nth-child(4), .auditTable td:nth-child(4) { min-width: 150px; }
 .auditTable th:nth-child(5), .auditTable td:nth-child(5), .auditTable th:nth-child(6), .auditTable td:nth-child(6) { min-width: 300px; }
+
+body[data-role="member"] .ownerOnly { display: revert; }
+body[data-role="member"] a[href^="/api/backup"], body[data-role="member"] a[href^="/api/package?"] { display: none; }
+body[data-role="auditor"] a[href^="/api/backup"], body[data-role="auditor"] a[href^="/api/package?"] { display: none; }
+.ledgerNavigation { grid-column: 1 / 3; min-width: 0; }
+.ledgerNavigation label { min-width: 0; width: 100%; }
+.ledgerNavigation select { max-width: 100%; width: 100%; }
+#ledgerSwitchError { margin: .5rem 0 0; }
+#ledgerSwitchError:empty { display: none; }
+#ledgerNameForm { max-width: 32rem; }
+#sharingInviteForm input, #sharingInviteForm select { max-width: 100%; }
+.ownerAccessRow { color: var(--muted, #666); }

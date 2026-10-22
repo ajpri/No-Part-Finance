@@ -690,7 +690,7 @@ class DashboardUiTests(unittest.TestCase):
         self.assertGreaterEqual(javascript.count('className = "expenseDetailChild"'), 2)
         self.assertIn(".expenseDetailGroup th, .expenseDetailGroup td { background: var(--background); font-weight: 600; }", css)
         self.assertIn(".expenseDetailChild td:first-child { padding-left: 1.5rem; }", css)
-        self.assertIn('window.history.pushState({}, "", transactionFilterUrlFromForm())', javascript)
+        self.assertIn('window.history.pushState({}, "", ledgerUrl(transactionFilterUrlFromForm()))', javascript)
         self.assertIn('window.addEventListener("popstate"', javascript)
         self.assertIn('urlFilters.set("account", `id:${account.id}`)', javascript)
         self.assertIn('urlFilters.set("category", `id:${category.id}`)', javascript)

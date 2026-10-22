@@ -155,7 +155,7 @@ function friendlySimulatorBalance(account, amountCents) {
 
 async function loadSimulator(requestedPlanId = new URLSearchParams(location.search).get("plan"), preservedDrafts = []) {
   await loadReferenceData(); simulator = await api(`/api/simulator${requestedPlanId ? `?plan=${encodeURIComponent(requestedPlanId)}` : ""}`);
-  if (simulator.plan && String(requestedPlanId || "") !== String(simulator.plan.id)) history.replaceState({}, "", `/simulator?plan=${simulator.plan.id}`);
+  if (simulator.plan && String(requestedPlanId || "") !== String(simulator.plan.id)) history.replaceState({}, "", ledgerUrl(`/simulator?plan=${simulator.plan.id}`));
   simulatorDirtyRows.clear(); renderSimulator(preservedDrafts);
 }
 
@@ -223,7 +223,7 @@ async function removeExecutedSimulatorRows(){const plan=simulator.plan,executedC
 function warnSimulatorUnsaved(event){if(activeSimulatorDirtyRows().length){event.preventDefault();event.returnValue="";}}
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {...options, headers: {"Content-Type": "application/json", ...(browserSession ? {"X-CSRF-Token": browserSession.csrfToken} : {}), ...options.headers}});
+  const response = await fetch(path, {...options, headers: {"Content-Type": "application/json", ...(browserSession ? {"X-CSRF-Token": browserSession.csrfToken} : {}), ...((browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")) ? {"X-Ledger-ID": browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")} : {}), ...options.headers}});
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "Request failed");
   return result;
@@ -622,7 +622,7 @@ async function sortTransactions(event) {
 
 async function applyTransactionFilterForm(event) {
   event.preventDefault();
-  window.history.pushState({}, "", transactionFilterUrlFromForm());
+  window.history.pushState({}, "", ledgerUrl(transactionFilterUrlFromForm()));
   await loadTransactions();
 }
 
@@ -769,7 +769,7 @@ async function saveTransaction(event) {
     }
     simulatorRecordingRowId = null;
     document.querySelector("#transactionDialog").close();
-    if (currentPath === "/new") window.location.assign("/");
+    if (currentPath === "/new") window.location.assign(ledgerUrl("/"));
     else await refreshDailyPage();
   } catch (error) { showFormError(form, error); }
 }
@@ -1197,7 +1197,7 @@ function newTemplate() { const form = document.querySelector("#templateForm"); f
 function editTemplate(template) { const form = document.querySelector("#templateForm"); form.reset(); document.querySelector("#templateId").value = template.id; document.querySelector("#templateName").value = template.name; document.querySelector("#templateDescription").value = template.description || ""; document.querySelector("#templateAmount").value = template.enteredAmountCents === null ? "" : (template.enteredAmountCents / 100).toFixed(2); document.querySelector("#templatePrefillAmount").checked = Boolean(template.prefillAmount); document.querySelector("#templateDisplayOrder").value = template.displayOrder; document.querySelector("#templateActive").checked = Boolean(template.active); document.querySelector("#templateDialogTitle").textContent = "Edit Template"; document.querySelector("#templateActiveLabel").hidden = false; document.querySelector("#deleteTemplateButton").hidden = false; setAccountOptions(document.querySelector("#templateAccount"), activeAccountsWith(template.accountId), "None", template.accountId); setMixedCategoryOptions(document.querySelector("#templateCategory"), selectableCategoriesWith(template.categoryId), "None", template.categoryId); openDialog(document.querySelector("#templateDialog"), form); }
 async function saveTemplate(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#templateId").value; const payload = {name: document.querySelector("#templateName").value, accountId: document.querySelector("#templateAccount").value, description: document.querySelector("#templateDescription").value, categoryId: document.querySelector("#templateCategory").value, amount: document.querySelector("#templateAmount").value, prefillAmount: document.querySelector("#templatePrefillAmount").checked, displayOrder: document.querySelector("#templateDisplayOrder").value, active: document.querySelector("#templateActive").checked}; try { await api(id ? `/api/templates/${id}` : "/api/templates", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#templateDialog").close(); await loadSettings(); } catch (error) { showFormError(form, error); } }
 async function removeEditedTemplate() { const template = templates.find((item) => item.id === Number(document.querySelector("#templateId").value)); if (!template || !window.confirm(`Permanently delete template "${template.name}"? Existing transactions are unaffected.`)) return; try { await api(`/api/templates/${template.id}`, {method: "DELETE"}); document.querySelector("#templateDialog").close(); await loadSettings(); } catch (error) { window.alert(error.message); } }
-async function loadSettings() { await loadReferenceData(); renderAccounts(); renderCategories(); renderTemplates(); const [settings, databaseStatus] = await Promise.all([api("/api/settings"), api("/api/system/database-status")]); const selected = categories.find((category) => category.id === Number(settings.reimbursementCategoryId)); document.querySelector("#reimbursementCategoryName").textContent = selected?.name || "Not selected"; setOptions(document.querySelector("#reimbursementCategorySetting"), categories.filter((category) => category.active && category.reportingRole === "income" && !category.parentCategoryId && !category.hasChildren), "Select category", settings.reimbursementCategoryId); document.querySelector("#paychecksPerYear").value = settings.paychecksPerYear || ""; setMoneyInputValue(document.querySelector("#suggestionRounding"), settings.suggestionRoundingCents ? (Number(settings.suggestionRoundingCents) / 100).toFixed(2) : ""); document.querySelector("#monthlySuggestionWindow").value = settings.monthlySuggestionWindowDays; document.querySelector("#quarterlySuggestionWindow").value = settings.quarterlySuggestionWindowMonths; document.querySelector("#annualSuggestionWindow").value = settings.annualSuggestionWindowMonths; document.querySelector("#integrationTransferDefaultDescription").checked = settings.integrationTransferDefaultDescription === "1"; document.querySelector("#themeSetting").value = window.readThemePreference(); document.querySelector("#databaseTransactionCount").textContent = databaseStatus.transactionCount.toLocaleString("en-US"); document.querySelector("#databaseAccountCount").textContent = databaseStatus.accountCount.toLocaleString("en-US"); document.querySelector("#databaseSchemaVersion").textContent = databaseStatus.schemaVersion; document.querySelector("#databaseModifiedLocal").textContent = databaseStatus.modifiedLocal; }
+async function loadSettings() { await loadLedgerName(); await loadSharing(); await loadReferenceData(); renderAccounts(); renderCategories(); renderTemplates(); const [settings, databaseStatus] = await Promise.all([api("/api/settings"), api("/api/system/database-status")]); const selected = categories.find((category) => category.id === Number(settings.reimbursementCategoryId)); document.querySelector("#reimbursementCategoryName").textContent = selected?.name || "Not selected"; setOptions(document.querySelector("#reimbursementCategorySetting"), categories.filter((category) => category.active && category.reportingRole === "income" && !category.parentCategoryId && !category.hasChildren), "Select category", settings.reimbursementCategoryId); document.querySelector("#paychecksPerYear").value = settings.paychecksPerYear || ""; setMoneyInputValue(document.querySelector("#suggestionRounding"), settings.suggestionRoundingCents ? (Number(settings.suggestionRoundingCents) / 100).toFixed(2) : ""); document.querySelector("#monthlySuggestionWindow").value = settings.monthlySuggestionWindowDays; document.querySelector("#quarterlySuggestionWindow").value = settings.quarterlySuggestionWindowMonths; document.querySelector("#annualSuggestionWindow").value = settings.annualSuggestionWindowMonths; document.querySelector("#integrationTransferDefaultDescription").checked = settings.integrationTransferDefaultDescription === "1"; document.querySelector("#themeSetting").value = window.readThemePreference(); document.querySelector("#databaseTransactionCount").textContent = databaseStatus.transactionCount.toLocaleString("en-US"); document.querySelector("#databaseAccountCount").textContent = databaseStatus.accountCount.toLocaleString("en-US"); document.querySelector("#databaseSchemaVersion").textContent = databaseStatus.schemaVersion; document.querySelector("#databaseModifiedLocal").textContent = databaseStatus.modifiedLocal; rememberLedgerForms(); }
 
 function completeExpenseTemplates() {
   return templates.filter((template) => template.active && template.description
@@ -1619,11 +1619,11 @@ function navigateAuditPage(page) {
 }
 
 function showSettingsSection() {
-  const sections = ["accounts", "categories", "templates", "budget", "integrations", "audit-log", "system"];
+  const sections = ["accounts", "categories", "templates", "budget", "integrations", "ledger-sharing", "audit-log", "system"];
   const requested = location.hash.slice(1);
-  const section = sections.includes(requested) && (requested !== "integrations" || browserSession?.role === "owner") ? requested : "accounts";
+  const section = sections.includes(requested) && (requested !== "integrations" || ["owner", "member"].includes(browserSession?.role)) ? requested : "accounts";
   for (const name of sections) {
-    const sectionId = name === "audit-log" ? "AuditLog" : `${name[0].toUpperCase()}${name.slice(1)}`;
+    const sectionId = name === "audit-log" ? "AuditLog" : name === "ledger-sharing" ? "LedgerSharing" : `${name[0].toUpperCase()}${name.slice(1)}`;
     document.querySelector(`#settings${sectionId}`).hidden = name !== section;
     const link = document.querySelector(`.settingsNavigation a[href="#${name}"]`);
     if (name === section) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
@@ -1653,7 +1653,7 @@ async function start() {
   if (browserSession.role === "auditor") applyAuditorControls();
   enhanceMoneyInputs(document);
   new MutationObserver((records) => {
-    for (const record of records) for (const node of record.addedNodes) if (node.nodeType === Node.ELEMENT_NODE) enhanceMoneyInputs(node);
+    for (const record of records) for (const node of record.addedNodes) if (node.nodeType === Node.ELEMENT_NODE) { enhanceMoneyInputs(node); preserveLedgerLinks(node); }
   }).observe(document.body, {childList: true, subtree: true});
   const roleLabel = document.createElement("label"); roleLabel.textContent = "Reporting Role "; const roleSelect = document.createElement("select"); roleSelect.id = "categoryReportingRole"; option(roleSelect, "expense", "Expense"); option(roleSelect, "income", "Income"); roleLabel.append(roleSelect); document.querySelector("#categoryName").closest("label").after(roleLabel);
   if (browserSession.role === "auditor") applyAuditorControls();
@@ -1666,6 +1666,16 @@ async function start() {
     dialog.addEventListener("pointerdown", (event) => { pointerStartedOnBackdrop = event.target === dialog; });
     dialog.addEventListener("pointerup", (event) => { if (pointerStartedOnBackdrop && event.target === dialog) dialog.close(); pointerStartedOnBackdrop = false; });
   }
+  await initializeLedgerNavigation();
+  await loadRecipientInvitations();
+  if (!browserSession.ledgerId) {
+    for (const section of document.querySelectorAll("main > section")) section.hidden = !["noLedgerPage", "recipientInvitations"].includes(section.id);
+    document.querySelector("#invitationBanner").hidden = true;
+    document.querySelector("#mainNavigation").hidden = true;
+    document.querySelector("header .settingsLink").hidden = true;
+    return;
+  }
+  document.querySelector("#pendingForm").hidden = browserSession.role === "auditor";
   const application = await api("/api/application");
   document.querySelector("#applicationVersion").textContent = application.version;
   if (path === "/transactions") { await loadReferenceData(); await initializeDashboardPeriods(); renderReferenceSelectors(); await loadTransactions(); }
@@ -1674,15 +1684,15 @@ async function start() {
   if (path === "/budget") await loadBudget();
   if (path === "/simulator") await loadSimulator();
   if (path === "/settings") highlightSettingsTemplate();
-  if (path === "/pending") { await loadReferenceData(); await loadPendingReview(); }
-  if (browserSession.role === "owner") {
+  if (path === "/pending" && browserSession.role !== "auditor") { await loadReferenceData(); await loadPendingReview(); }
+  if (["owner", "member"].includes(browserSession.role)) {
     if (path === "/settings") await loadIntegrationSecrets();
     if (["/", "/new", "/transactions"].includes(path)) await refreshPendingCount();
   }
   if (path === "/" || path === "/new") { await loadReferenceData(); await initializeDashboardPeriods(); await loadDashboard(); }
-  if (path === "/new" && browserSession.role === "owner") {
+  if (path === "/new" && ["owner", "member"].includes(browserSession.role)) {
     const transactionDialog = document.querySelector("#transactionDialog");
-    transactionDialog.addEventListener("close", () => { if (window.location.pathname === "/new") window.history.replaceState({}, "", "/"); }, {once: true});
+    transactionDialog.addEventListener("close", () => { if (window.location.pathname === "/new") window.history.replaceState({}, "", ledgerUrl("/")); }, {once: true});
     await newTransaction();
   }
 }
@@ -1778,7 +1788,8 @@ async function loadIntegrationSecrets() {
   body.replaceChildren();
   for (const secret of secrets) {
     const row = body.insertRow();
-    row.insertCell().textContent = secret.label;
+    const labelCell = row.insertCell(); labelCell.textContent = secret.label;
+    if (secret.creatorUsername) { const creator = document.createElement("div"); creator.className = "secondaryText"; creator.textContent = `Added by: ${secret.creatorUsername}`; labelCell.append(creator); }
     const value = row.insertCell(); value.textContent = "••••••••"; value.className = "integrationSecretValue";
     row.insertCell().textContent = secret.status;
     const actions = row.insertCell();
@@ -1836,7 +1847,7 @@ async function loadIntegrationSecrets() {
 }
 
 async function refreshPendingCount() {
-  if (browserSession?.role !== "owner") return;
+  if (!["owner", "member"].includes(browserSession?.role)) return;
   const result = await api("/api/pending");
   const reviewButton = document.querySelector("#reviewPendingButton");
   reviewButton.textContent = `Review Pending (${result.count})`;
@@ -2090,7 +2101,7 @@ async function decidePendingSelection(decision, approveAll = false) {
   }
 }
 
-document.querySelector("#reviewPendingButton").addEventListener("click", () => window.location.assign("/pending"));
+document.querySelector("#reviewPendingButton").addEventListener("click", () => window.location.assign(ledgerUrl("/pending")));
 document.querySelector("#logOutButton").addEventListener("click", async () => { await api("/api/logout", {method: "POST"}); location.assign("/sign-in"); });
 document.querySelector("#integrationTransferSettingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2156,8 +2167,8 @@ async function saveEntryPending(kind) {
     await api("/api/pending/manual", {method: "POST", body: JSON.stringify({submissionId: form.pendingRequestId, ...entryPayload(kind)})});
     document.querySelector(`#${kind.toLowerCase()}Dialog`).close();
     simulatorRecordingRowId = null;
-    sendNotification("Saved — Item remains Pending until Owner approval.");
-    if (currentPath === "/new") window.location.assign("/");
+    sendNotification("Saved — Item remains Pending until Owner or Member approval.");
+    if (currentPath === "/new") window.location.assign(ledgerUrl("/"));
     else { await refreshDailyPage(); await refreshPendingCount(); }
   } catch (error) { showFormError(form, error); }
   finally { form.pendingBusy = false; }
@@ -2218,17 +2229,186 @@ for (const [prefix, id] of [["sinkingFund", "sinkingFundId"], ["expectedIncome",
   document.querySelector(`#${prefix}Template`).addEventListener("change", () => updateRequiredTemplateLink(prefix, Boolean(document.querySelector(`#${id}`).value)));
 }
 
-// Both database-inclusive downloads share one explicit export-only option.
-function updateLedgerDownloadOptions() {
-  const disableKeys = document.querySelector("#disableExportIntegrationKeys").checked;
-  for (const endpoint of ["/api/backup", "/api/package"]) {
-    document.querySelector(`a[href^="${endpoint}"]:not([href^="/api/package-no-db"])`).href = endpoint + (disableKeys ? "?disableIntegrationKeys=true" : "");
-  }
-}
-document.querySelector("#disableExportIntegrationKeys").addEventListener("change", updateLedgerDownloadOptions);
-window.addEventListener("pageshow", updateLedgerDownloadOptions);
-updateLedgerDownloadOptions();
-
 document.querySelector("#auditPerPage").addEventListener("change", () => navigateAuditPage(1));
 document.querySelector("#auditPrevious").addEventListener("click", () => navigateAuditPage(auditCurrentPage - 1));
 document.querySelector("#auditNext").addEventListener("click", () => navigateAuditPage(auditCurrentPage + 1));
+
+async function loadLedgerName() {
+  const ledger = await api("/api/ledger");
+  document.querySelector("#ledgerName").value = ledger.name;
+  document.querySelector("#ledgerName").disabled = browserSession?.role !== "owner";
+  document.querySelector("#saveLedgerNameButton").hidden = browserSession?.role !== "owner";
+}
+document.querySelector("#ledgerNameForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  document.querySelector("#ledgerNameStatus").textContent = "";
+  showFormError(event.currentTarget, {message: ""});
+  try {
+    const ledger = await api("/api/ledger", {method: "PUT", body: JSON.stringify({name: document.querySelector("#ledgerName").value})});
+    document.querySelector("#ledgerName").value = ledger.name;
+    document.querySelector("#ledgerNameStatus").textContent = "Ledger name saved";
+    const refreshed = await api("/api/session"); browserSession.ledgers = refreshed.ledgers;
+    const selector = document.querySelector("#ledgerSelect"); selector.replaceChildren();
+    for (const item of refreshed.ledgers) option(selector, item.id, item.id === browserSession.ledgerId ? `Ledger: ${item.label}` : item.label);
+    selector.value = browserSession.ledgerId;
+    ledgerFormFingerprints.set(document.querySelector("#ledgerNameForm"), formFingerprint(document.querySelector("#ledgerNameForm")));
+  } catch (error) { showFormError(document.querySelector("#ledgerNameForm"), error); }
+});
+
+function ledgerUrl(path, ledgerId = browserSession?.ledgerId) {
+  const target = new URL(path, location.href);
+  if (ledgerId) target.searchParams.set("ledger", ledgerId);
+  return `${target.pathname}${target.search}${target.hash}`;
+}
+
+const ledgerFormFingerprints = new Map();
+function formFingerprint(form) {
+  return JSON.stringify([...form.querySelectorAll("input, select")].map((control) => control.type === "checkbox" ? control.checked : control.value));
+}
+function rememberLedgerForms() {
+  for (const id of ["ledgerNameForm", "budgetSettingsForm", "integrationTransferSettingsForm", "sharingInviteForm"]) {
+    const form = document.querySelector(`#${id}`); ledgerFormFingerprints.set(form, formFingerprint(form));
+  }
+}
+function hasLedgerDrafts(excludeCreateDialog = false) {
+  const openDialog = [...document.querySelectorAll("dialog[open]")].some((dialog) => !excludeCreateDialog || dialog.id !== "createLedgerDialog");
+  return openDialog || activeSimulatorDirtyRows().length > 0 || document.querySelector(".unsavedRow") !== null || [...ledgerFormFingerprints].some(([form, saved]) => formFingerprint(form) !== saved);
+}
+
+async function initializeLedgerNavigation() {
+  const selector = document.querySelector("#ledgerSelect");
+  if (new URL(location.href).searchParams.get("notice") === "ledger-permissions") document.querySelector("#ledgerSwitchError").textContent = "Switched ledgers. Your role cannot access the previous section, so Dashboard is open.";
+  selector.replaceChildren();
+  if (!browserSession.ledgerId) option(selector, "", "Select ledger");
+  for (const ledger of browserSession.ledgers) option(selector, ledger.id, ledger.id === browserSession.ledgerId ? `Ledger: ${ledger.label}` : ledger.label);
+  selector.value = browserSession.ledgerId || "";
+  document.querySelector("#ledgerSelectLabel").hidden = browserSession.ledgers.length === 0;
+  if (browserSession.ledgerId) history.replaceState({}, "", ledgerUrl(location.href));
+  selector.addEventListener("change", async () => {
+    const destinationId = selector.value;
+    selector.value = browserSession.ledgerId || "";
+    if (!destinationId || destinationId === browserSession.ledgerId) return;
+    if (hasLedgerDrafts() && !confirm("Discard unsaved changes and switch ledgers?")) return;
+    try {
+      const destination = await api("/api/session", {headers: {"X-Ledger-ID": destinationId}});
+      if (destination.ledgerId !== destinationId) throw new Error("No access to the selected ledger");
+      const target = new URL(location.href);
+      target.search = ""; // Record filters and selected planning rows belong to the source ledger.
+      target.searchParams.set("ledger", destinationId);
+      if (destination.role === "auditor" && (currentPath === "/pending" || (currentPath === "/settings" && target.hash === "#integrations"))) {
+        target.pathname = "/"; target.hash = ""; target.searchParams.set("notice", "ledger-permissions");
+      }
+        simulatorDirtyRows.clear();
+      location.assign(target);
+    } catch (error) { document.querySelector("#ledgerSwitchError").textContent = error.message; }
+  });
+  // Keep ordinary links and download links tied to this tab's authorized context.
+  document.addEventListener("click", (event) => {
+    const link = event.target.closest("a");
+    if (!link || !browserSession.ledgerId) return;
+    const target = new URL(link.href, location.href);
+    if (target.origin === location.origin && !["/sign-in", "/docs", "/openapi.json"].includes(target.pathname) && !link.getAttribute("href").startsWith("#")) link.href = ledgerUrl(target);
+  }, true);
+  preserveLedgerLinks();
+  window.addEventListener("popstate", (event) => {
+    if (new URL(location.href).searchParams.get("ledger") !== browserSession.ledgerId) { event.stopImmediatePropagation(); location.reload(); }
+  }, true);
+}
+
+function sharingAction(cell, label, action) {
+  const button = document.createElement("button"); button.type = "button"; button.textContent = label;
+  button.dataset.viewControl = "true";
+  button.addEventListener("click", action); cell.append(button); return button;
+}
+
+async function loadSharing() {
+  const sharing = await api("/api/sharing");
+  const body = document.querySelector("#sharingMemberRows"); body.replaceChildren();
+  const isOwner = browserSession.role === "owner";
+  document.querySelector("#sharingInviteEntry").hidden = !isOwner;
+  document.querySelector("#sentInvitations").hidden = !isOwner;
+  for (const member of sharing.members) {
+    const row = body.insertRow();
+    row.insertCell().textContent = member.username + (!member.enabled ? " (access revoked)" : !member.loginEnabled ? " (login disabled)" : "");
+    const roleCell = row.insertCell(); const actions = row.insertCell();
+    if (member.role === "owner") row.className = "ownerAccessRow";
+    if (isOwner && member.role !== "owner") {
+      const role = document.createElement("select"); role.setAttribute("aria-label", `Role for ${member.username}`);
+      option(role, "member", "Member"); option(role, "auditor", "Auditor"); role.value = member.role; roleCell.append(role);
+      sharingAction(actions, "Save role", async () => {
+        try { await api(`/api/sharing/${member.id}`, {method: "PATCH", body: JSON.stringify({role: role.value})}); await loadSharing(); sendNotification("Role saved."); }
+        catch (error) { document.querySelector("#sharingStatus").textContent = error.message; }
+      });
+      if (member.enabled) sharingAction(actions, "Revoke access", async () => {
+        if (!confirm(`Revoke ${member.username}'s access to this ledger?`)) return;
+        try { await api(`/api/sharing/${member.id}`, {method: "PATCH", body: JSON.stringify({revoke: true})}); await loadSharing(); sendNotification("Access revoked."); }
+        catch (error) { document.querySelector("#sharingStatus").textContent = error.message; }
+      });
+    } else roleCell.textContent = member.role[0].toUpperCase() + member.role.slice(1);
+  }
+  const invitations = document.querySelector("#sentInvitationRows"); invitations.replaceChildren();
+  for (const invitation of sharing.invitations) {
+    const row = invitations.insertRow();
+    for (const value of [invitation.username, invitation.role, new Date(invitation.expiresAt * 1000).toLocaleString()]) row.insertCell().textContent = value;
+    sharingAction(row.insertCell(), "Cancel invitation", async () => {
+      try { await api(`/api/invitations/${invitation.id}/cancel`, {method: "POST"}); await loadSharing(); sendNotification("Invitation cancelled."); }
+      catch (error) { document.querySelector("#sharingStatus").textContent = error.message; }
+    });
+  }
+}
+
+document.querySelector("#sharingInviteForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await api("/api/invitations", {method: "POST", body: JSON.stringify({username: document.querySelector("#inviteUsername").value, role: document.querySelector("#inviteRole").value})});
+    document.querySelector("#sharingInviteForm").reset(); showFormError(document.querySelector("#sharingInviteForm"), {message: ""});
+    await loadSharing(); sendNotification("Invitation sent.");
+  } catch (error) { showFormError(document.querySelector("#sharingInviteForm"), error); }
+});
+
+async function loadRecipientInvitations() {
+  const invitations = await api("/api/invitations");
+  document.querySelector("#invitationBanner").hidden = !invitations.length || currentPath === "/pending" || !browserSession.ledgerId;
+  document.querySelector("#invitationBannerText").textContent = `${invitations.length} invitation(s): ` + invitations.map((invitation) => `${invitation.ledgerName} (${invitation.role})`).join(", ");
+  document.querySelector("#recipientInvitations").hidden = Boolean(browserSession.ledgerId) && currentPath !== "/pending";
+  const body = document.querySelector("#recipientInvitationRows"); body.replaceChildren();
+  for (const invitation of invitations) {
+    const row = body.insertRow();
+    for (const value of [invitation.ledgerName, invitation.inviter, invitation.role, new Date(invitation.expiresAt * 1000).toLocaleString()]) row.insertCell().textContent = value;
+    const actions = row.insertCell();
+    for (const decision of ["accept", "decline"]) sharingAction(actions, decision === "accept" ? "Accept" : "Decline", async () => {
+      if (hasLedgerDrafts() && !confirm("Discard unsaved changes before deciding this invitation?")) return;
+      try {
+        const result = await api(`/api/invitations/${invitation.id}/decision`, {method: "POST", body: JSON.stringify({decision})});
+        if (decision === "accept") { simulatorDirtyRows.clear(); location.assign(ledgerUrl("/", result.ledgerId)); }
+        else await loadRecipientInvitations();
+      } catch (error) { document.querySelector("#invitationDecisionError").textContent = error.message; }
+    });
+  }
+  if (!invitations.length) { const row = body.insertRow(); const cell = row.insertCell(); cell.colSpan = 5; cell.textContent = "No pending invitations."; }
+}
+
+for (const button of document.querySelectorAll("[data-create-ledger]")) button.addEventListener("click", () => {
+  const form = document.querySelector("#createLedgerForm"); form.reset(); showFormError(form, {message: ""});
+  document.querySelector("#newLedgerName").disabled = false;
+  document.querySelector("#createLedgerDialog").showModal();
+});
+document.querySelector("#createLedgerForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (hasLedgerDrafts(true) && !confirm("Discard unsaved changes and create a new ledger?")) return;
+  try {
+    const result = await api("/api/ledgers", {method: "POST", body: JSON.stringify({name: document.querySelector("#newLedgerName").value})});
+    simulatorDirtyRows.clear(); location.assign(ledgerUrl("/", result.id));
+  } catch (error) { showFormError(document.querySelector("#createLedgerForm"), error); }
+});
+document.querySelector("#noLedgerLogout").addEventListener("click", () => document.querySelector("#logOutButton").click());
+
+function preserveLedgerLinks(root = document) {
+  if (!browserSession?.ledgerId) return;
+  const links = [...root.querySelectorAll("a[href]")];
+  if (root.matches?.("a[href]")) links.push(root);
+  for (const link of links) {
+    const target = new URL(link.href, location.href);
+    if (!link.getAttribute("href").startsWith("#") && target.origin === location.origin && ["/", "/new", "/transactions", "/budget", "/simulator", "/settings", "/pending", "/api/backup", "/api/package", "/api/package-no-db"].includes(target.pathname)) link.href = ledgerUrl(target);
+  }
+}

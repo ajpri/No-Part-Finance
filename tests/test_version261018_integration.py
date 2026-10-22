@@ -78,8 +78,11 @@ class IntegrationRequestSizeTests(IntegrationApiFixture):
         response = self.client.post("/api/integration/submissions", data=oversized, content_type="application/json", headers=self.headers)
         self.assertEqual(401, response.status_code)
         self.assertEqual(before, self.snapshot())
+        self.connection.execute("PRAGMA foreign_keys = OFF")
         with self.connection:
-            self.connection.execute("DELETE FROM users")
+            self.connection.execute("DROP TRIGGER preserveOwnerMembership")
+            self.connection.execute("DELETE FROM ledgerAccess")
+        self.connection.execute("PRAGMA foreign_keys = ON")
         before = self.snapshot()
         response = self.client.post("/api/integration/submissions", data=oversized, content_type="application/json", headers=self.headers)
         self.assertEqual(503, response.status_code)

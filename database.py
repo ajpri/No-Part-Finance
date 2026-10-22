@@ -10,14 +10,16 @@ import logging
 import re
 import json
 import secrets
+import time
+import unicodedata
 from calendar import monthrange
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from uuid import uuid4
 
 
-schemaVersion = 26
+schemaVersion = 27
 
 
 class ValidationError(ValueError):
@@ -330,6 +332,8 @@ def initializeDatabase(databasePath):
             migrateToVersion25(connection)
         if currentVersion < 26:
             migrateToVersion26(connection)
+        if currentVersion < 27:
+            migrateToVersion27(connection)
         connection.execute(f"PRAGMA user_version = {schemaVersion}")
         connection.commit()
         foreignKeyFailure = connection.execute("PRAGMA foreign_key_check").fetchone()
@@ -3024,8 +3028,8 @@ def createIntegrationSecret(connection, label):
     label = integrationLabel(label)
     with connection:
         return connection.execute(
-            "INSERT INTO integrationSecrets (label, secret) VALUES (?, ?)",
-            (label, secrets.token_urlsafe(32)),
+            "INSERT INTO integrationSecrets (label, secret, creatorUserId) VALUES (?, ?, ?)",
+            (label, secrets.token_urlsafe(32), connection.actorId if connection.actorKind == "user" else connection.execute("SELECT userId FROM ledgerAccess WHERE ledgerId = currentLedgerId() AND role = 'owner'").fetchone()[0]),
         ).lastrowid
 
 
@@ -3415,6 +3419,25 @@ def requireLedger(connection):
     return connection.ledgerId
 
 
+def validateLedgerName(name):
+    if not isinstance(name, str):
+        raise ValidationError("Ledger name is required")
+    invalidCharacters = any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in name)
+    name = name.strip()
+    if not 1 <= len(name) <= 100 or invalidCharacters:
+        raise ValidationError("Ledger name must contain 1 through 100 characters without control characters")
+    return name
+
+
+def renameLedger(connection, name):
+    requireLedger(connection)
+    name = validateLedgerName(name)
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("UPDATE ledgers SET name = ? WHERE id = currentLedgerId()", (name,))
+    return name
+
+
 def installLedgerContext(connection):
     connection.create_function("currentLedgerId", 0, lambda: requireLedger(connection))
     connection.create_function("auditActorKind", 0, lambda: connection.actorKind)
@@ -3643,11 +3666,13 @@ def installAuditTriggers(connection):
 def setIntegrationState(connection, secretId, enabled):
     requireLedger(connection)
     with connection:
-        secret = connection.execute("SELECT revoked FROM scopedintegrationSecrets WHERE id = ?", (secretId,)).fetchone()
+        secret = connection.execute("SELECT revoked, credentialAvailable FROM scopedintegrationSecrets WHERE id = ?", (secretId,)).fetchone()
         if not secret:
             raise ValidationError("Integration secret does not exist")
         if secret["revoked"]:
             raise ValidationError("Revoked integration secrets cannot be enabled or disabled")
+        if enabled and not secret["credentialAvailable"]:
+            raise ValidationError("Exported integration keys have no credential; create a new key")
         connection.execute("UPDATE integrationSecrets SET active = ? WHERE ledgerId = currentLedgerId() AND id = ?", (int(enabled), secretId))
 
 
@@ -3669,16 +3694,17 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
             if sum(row["role"] == "owner" for row in memberships) != 1:
                 raise ValidationError("Export requires exactly one Owner")
             userIds = [row["userId"] for row in memberships]
-            for userId in userIds:
-                if snapshot.execute("SELECT COUNT(*) FROM ledgerAccess WHERE userId = ?", (userId,)).fetchone()[0] != 1:
-                    raise ValidationError("Shared-membership credential export is not supported")
             destination = sqlite3.connect(destinationPath)
             definitions = snapshot.execute("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type = 'table' DESC").fetchall()
-            allowedTables = (*ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents")
+            allowedTables = (*ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents", "sharingInvitations", "invitationAttempts")
             for definition in definitions:
                 if definition["type"] == "table" and definition["name"] in allowedTables:
                     destination.execute(definition["sql"])
             for table in allowedTables:
+                # Invitation recipients have not consented to membership in the copy.
+                # Keep these tables empty, but retain their schema for standalone startup.
+                if table in {"sharingInvitations", "invitationAttempts"}:
+                    continue
                 if table == "users":
                     rows = snapshot.execute("SELECT * FROM users WHERE id IN (SELECT userId FROM ledgerAccess WHERE ledgerId = ?)", (ledgerId,)).fetchall()
                 else:
@@ -3687,12 +3713,19 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
                 if rows:
                     columnNames = ", ".join(f'"{column}"' for column in rows[0].keys())
                     placeholders = ", ".join("?" for _ in rows[0])
-                    destination.executemany(f"INSERT INTO {table} ({columnNames}) VALUES ({placeholders})", [tuple(row) for row in rows])
+                    copiedRows = []
+                    for row in rows:
+                        copiedRow = dict(row)
+                        # Omit credentials BEFORE insertion: deleted SQLite bytes may survive.
+                        if table == "users":
+                            copiedRow.update(passwordHash="", passwordSetupRequired=1)
+                        elif table == "integrationSecrets":
+                            copiedRow.update(secret=None, credentialAvailable=0)
+                        copiedRows.append(tuple(copiedRow.values()))
+                    destination.executemany(f"INSERT INTO {table} ({columnNames}) VALUES ({placeholders})", copiedRows)
                     copied = destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                     if copied != len(rows):
                         raise RuntimeError("Export row preservation failed")
-            if disableIntegrationKeys:
-                destination.execute("UPDATE integrationSecrets SET active = 0 WHERE revoked = 0 AND active = 1")
             for definition in definitions:
                 if definition["type"] in {"index", "trigger"} and definition["tbl_name"] in allowedTables:
                     destination.execute(definition["sql"])
@@ -3883,11 +3916,13 @@ def auditDisplayEvent(events, currentCategories=None, currentAccounts=None):
     approval = last["groupKey"].startswith("approval:")
     if approval:
         approved = json.loads(last["afterValues"])
-        before = {"Status": "Pending"}
+        before = auditPendingValues(json.loads(last["beforeValues"]), currentCategories or {}, currentAccounts or {})
         transactionSnapshots = [json.loads(row["afterValues"]) for row in events if row["recordType"] == "transactions"]
         transfer = approved.get("kind") == "transfer"
         details = auditTransferValues(transactionSnapshots) if transfer else auditSnapshotValues(transactionSnapshots[0], transaction=True, currentCategories=currentCategories)
-        after = {"Status": "Approved", **details}
+        after = {"Status": "Approved", "Source": before["Source"], **details}
+        if "Pinned" in after:
+            before.setdefault("Pinned", "No")
         action = "Approved"
         recordType = "Pending transfer" if transfer else "Pending transaction"
     elif combined:
@@ -3899,7 +3934,7 @@ def auditDisplayEvent(events, currentCategories=None, currentAccounts=None):
         before = auditSnapshotValues(json.loads(last["beforeValues"]) if last["beforeValues"] else None, transaction=last["recordType"] == "transactions", currentCategories=currentCategories)
         after = auditSnapshotValues(json.loads(last["afterValues"]) if last["afterValues"] else None, transaction=last["recordType"] == "transactions", currentCategories=currentCategories)
         action = {"insert": "Created", "create": "Created", "update": "Updated", "delete": "Deleted", "remove": "Removed", "rename": "Renamed", "password-reset": "Password reset", "access-enable": "Access enabled", "access-disable": "Access disabled", "login-enable": "Login enabled", "login-disable": "Login disabled"}.get(last["action"], last["action"].replace("-", " ").capitalize())
-        recordType = {"transactions": "Transaction", "accounts": "Account", "categories": "Category", "users": "User", "ledgers": "Ledger", "applicationSettings": "Ledger setting", "transactionTemplates": "Template", "integrationSecrets": "Integration", "pendingSubmissions": "Pending entry", "simulatorPlans": "Simulator plan", "simulatorRows": "Simulator row", "sinkingFundPlans": "Recurring Budget item", "flexibleCategoryBudgets": "Flexible Budget", "expectedIncomePlans": "Expected Income", "plannedCreditPayments": "Planned Debt Payment"}.get(last["recordType"], last["recordType"])
+        recordType = {"transactions": "Transaction", "accounts": "Account", "categories": "Category", "users": "User", "ledgers": "Ledger", "sharingInvitations": "Invitation", "ledgerAccess": "Ledger access", "applicationSettings": "Ledger setting", "transactionTemplates": "Template", "integrationSecrets": "Integration", "pendingSubmissions": "Pending entry", "simulatorPlans": "Simulator plan", "simulatorRows": "Simulator row", "sinkingFundPlans": "Recurring Budget item", "flexibleCategoryBudgets": "Flexible Budget", "expectedIncomePlans": "Expected Income", "plannedCreditPayments": "Planned Debt Payment"}.get(last["recordType"], last["recordType"])
         snapshots = [json.loads(last[field]) for field in ("beforeValues", "afterValues") if last[field]]
         if last["recordType"] == "pendingSubmissions":
             original = json.loads(last["beforeValues"]) if last["beforeValues"] else None
@@ -3917,7 +3952,8 @@ def auditDisplayEvent(events, currentCategories=None, currentAccounts=None):
         if last["recordType"] == "transactions" and any(row.get("transferId") for row in snapshots):
             recordType = "Transfer row (legacy)" if last["operationId"] is None else "Transfer row (incomplete)"
     keys = list(dict.fromkeys([*(before or {}), *(after or {})]))
-    changed = [key for key in keys if before is None or after is None or before.get(key) != after.get(key)]
+    # Approval compares the complete saved proposal with the created ledger event.
+    changed = keys[:] if approval else [key for key in keys if before is None or after is None or before.get(key) != after.get(key)]
     # Keep the recorded description/name beside differences so the affected record is identifiable.
     for key in ("Username", "Name", "Description"):
         if key in keys and key not in changed:
@@ -3957,3 +3993,250 @@ def auditLogPage(connection, page="1", perPage="50"):
     return {"rows": rows, "page": pageNumber, "perPage": pageSize, "total": total,
             "start": (pageNumber - 1) * pageSize + 1 if total else 0,
             "end": min(pageNumber * pageSize, total), "hasPrevious": pageNumber > 1, "hasNext": pageNumber < lastPage}
+
+
+def migrateToVersion27(connection):
+    """Sharing preserves identities; legacy keys are explicitly assigned to the Owner."""
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("DROP VIEW IF EXISTS temp.scopedusers")
+    connection.execute("DROP VIEW IF EXISTS temp.scopedintegrationSecrets")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("ALTER TABLE users ADD COLUMN passwordSetupRequired INTEGER NOT NULL DEFAULT 0 CHECK(passwordSetupRequired IN (0, 1))")
+        connection.execute("""CREATE TABLE ledgerAccessNext (
+            userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            ledgerId TEXT NOT NULL REFERENCES ledgers(id),
+            role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'auditor')),
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1) AND (role != 'owner' OR enabled = 1)),
+            PRIMARY KEY(userId, ledgerId))""")
+        connection.execute("INSERT INTO ledgerAccessNext SELECT userId, ledgerId, role, enabled FROM ledgerAccess")
+        connection.execute("DROP TABLE ledgerAccess")
+        connection.execute("ALTER TABLE ledgerAccessNext RENAME TO ledgerAccess")
+        connection.execute("CREATE UNIQUE INDEX oneOwnerPerLedger ON ledgerAccess(ledgerId) WHERE role = 'owner'")
+        # Owner transfer/deletion is deliberately not a supported sharing operation.
+        connection.execute("""CREATE TRIGGER preserveOwnerAccess BEFORE UPDATE ON ledgerAccess
+            WHEN OLD.role = 'owner' AND (NEW.role != OLD.role OR NEW.userId != OLD.userId OR NEW.ledgerId != OLD.ledgerId)
+            BEGIN SELECT RAISE(ABORT, 'Owner membership is immutable'); END""")
+        connection.execute("CREATE TRIGGER preserveOwnerMembership BEFORE DELETE ON ledgerAccess WHEN OLD.role = 'owner' BEGIN SELECT RAISE(ABORT, 'Owner membership cannot be deleted'); END")
+        if connection.execute("""SELECT 1 FROM integrationSecrets k WHERE
+            (SELECT COUNT(*) FROM ledgerAccess a WHERE a.ledgerId = k.ledgerId AND a.role = 'owner') != 1""").fetchone():
+            raise ValidationError("Legacy key migration requires exactly one Owner per ledger")
+        definition = connection.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'integrationSecrets'").fetchone()[0]
+        definition = re.sub(r'CREATE TABLE(?: IF NOT EXISTS)?\s+"?integrationSecrets"?', 'CREATE TABLE integrationSecretsNext', definition, count=1, flags=re.I)
+        definition = definition.replace("secret TEXT NOT NULL UNIQUE", "secret TEXT UNIQUE")
+        opening = definition.index("(") + 1
+        definition = definition[:opening] + "creatorUserId INTEGER NOT NULL REFERENCES users(id), creatorMigrationAssigned INTEGER NOT NULL DEFAULT 0 CHECK(creatorMigrationAssigned IN (0,1)), credentialAvailable INTEGER NOT NULL DEFAULT 1 CHECK(credentialAvailable IN (0,1)), " + definition[opening:]
+        closing = definition.rfind(")")
+        definition = definition[:closing] + ", FOREIGN KEY(creatorUserId, ledgerId) REFERENCES ledgerAccess(userId, ledgerId)" + definition[closing:]
+        connection.execute(definition)
+        columns = [row["name"] for row in connection.execute("PRAGMA table_info(integrationSecrets)")]
+        columnSql = ", ".join(f'"{column}"' for column in columns)
+        connection.execute(f"""INSERT INTO integrationSecretsNext ({columnSql}, creatorUserId, creatorMigrationAssigned)
+            SELECT {columnSql}, (SELECT userId FROM ledgerAccess WHERE ledgerId = integrationSecrets.ledgerId AND role = 'owner'), 1 FROM integrationSecrets""")
+        schemaObjects = connection.execute("SELECT sql FROM sqlite_master WHERE tbl_name = 'integrationSecrets' AND type IN ('index', 'trigger') AND sql IS NOT NULL").fetchall()
+        allocatedSequence = connection.execute("SELECT seq FROM sqlite_sequence WHERE name = 'integrationSecrets'").fetchone()
+        connection.execute("DROP TABLE integrationSecrets")
+        connection.execute("ALTER TABLE integrationSecretsNext RENAME TO integrationSecrets")
+        # Historical audit identities must not be reused after a table rebuild.
+        if allocatedSequence:
+            connection.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'integrationSecrets'", (allocatedSequence[0],))
+        for definition in schemaObjects:
+            connection.execute(definition[0])
+        connection.execute("""CREATE TRIGGER integrationCreatorImmutable BEFORE UPDATE OF creatorUserId ON integrationSecrets
+            WHEN NEW.creatorUserId != OLD.creatorUserId BEGIN SELECT RAISE(ABORT, 'Integration creator is immutable'); END""")
+        connection.execute("""CREATE TABLE sharingInvitations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ledgerId TEXT NOT NULL REFERENCES ledgers(id),
+            recipientUserId INTEGER NOT NULL REFERENCES users(id),
+            invitedBy INTEGER NOT NULL REFERENCES users(id),
+            role TEXT NOT NULL CHECK(role IN ('member', 'auditor')),
+            status TEXT NOT NULL DEFAULT 'Pending' CHECK(status IN ('Pending','Accepted','Declined','Cancelled')),
+            createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL CHECK(expiresAt = createdAt + 604800))""")
+        connection.execute("CREATE INDEX invitationRecipientIndex ON sharingInvitations(recipientUserId, status, expiresAt)")
+        connection.execute("CREATE INDEX invitationLedgerIndex ON sharingInvitations(ledgerId, status)")
+        connection.execute("CREATE TABLE invitationAttempts (ownerId INTEGER NOT NULL REFERENCES users(id), attemptedAt INTEGER NOT NULL)")
+        connection.execute("CREATE INDEX invitationAttemptIndex ON invitationAttempts(ownerId, attemptedAt)")
+        if connection.execute("PRAGMA foreign_key_check").fetchone():
+            raise RuntimeError("Sharing migration foreign key verification failed")
+        connection.execute("PRAGMA user_version = 27")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+        installLedgerContext(connection)
+
+
+class InvitationRateLimit(ValidationError):
+    def __init__(self, retryAfter):
+        self.retryAfter = retryAfter
+        super().__init__(f"Invitation limit reached. Try again in {(retryAfter + 59) // 60} minutes.")
+
+
+def accessibleLedgers(connection, userId):
+    rows = [dict(row) for row in connection.execute("""SELECT l.id, l.name, a.role, owner.username AS ownerUsername
+        FROM ledgerAccess a JOIN ledgers l ON l.id = a.ledgerId
+        JOIN ledgerAccess oa ON oa.ledgerId = l.id AND oa.role = 'owner'
+        JOIN users owner ON owner.id = oa.userId
+        WHERE a.userId = ? AND a.enabled = 1""", (userId,))]
+    rows.sort(key=lambda row: (row["name"].casefold(), row["ownerUsername"].casefold(), row["id"]))
+    for row in rows:
+        duplicate = sum(other["name"].casefold() == row["name"].casefold() for other in rows) > 1
+        row["label"] = f"{row['name']} ({row['ownerUsername']})" if duplicate else row["name"]
+    return rows
+
+
+def recordSharingEvent(connection, ledgerId, action, recordType, recordId, before, after):
+    connection.execute("""INSERT INTO auditEvents
+        (ledgerId, changedAt, actorKind, actorId, actorLabel, action, recordType, recordId, beforeValues, afterValues, operationId)
+        VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), auditActorKind(), auditActorId(), auditActorLabel(), ?, ?, ?, ?, ?, auditOperationId())""",
+        (ledgerId, action, recordType, str(recordId), json.dumps(before) if before is not None else None, json.dumps(after) if after is not None else None))
+
+
+def requireOwnerActor(connection):
+    ledgerId = requireLedger(connection)
+    if connection.actorKind != "user" or not connection.execute("""SELECT 1 FROM ledgerAccess a JOIN users u ON u.id = a.userId
+        WHERE a.ledgerId = ? AND a.userId = ? AND a.role = 'owner' AND a.enabled = 1 AND u.enabled = 1""", (ledgerId, connection.actorId)).fetchone():
+        raise ValidationError("Owner access required")
+    return ledgerId
+
+
+def createPersonalLedger(connection, userId, name):
+    name = validateLedgerName(name)
+    previousContext = (connection.ledgerId, connection.actorKind, connection.actorId, connection.actorLabel)
+    try:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            user = connection.execute("SELECT username FROM users WHERE id = ? AND enabled = 1 AND passwordSetupRequired = 0", (userId,)).fetchone()
+            if not user:
+                raise ValidationError("Enabled login required")
+            ledgerId = str(uuid4())
+            connection.execute("INSERT INTO ledgers (id, name) VALUES (?, ?)", (ledgerId, name))
+            bindLedger(connection, ledgerId, "user", userId, user["username"])
+            connection.execute("INSERT INTO ledgerAccess (userId, ledgerId, role) VALUES (?, ?, 'owner')", (userId, ledgerId))
+            recordSharingEvent(connection, ledgerId, "create", "ledgers", ledgerId, None, {"name": name, "owner": user["username"]})
+            createExternalSystemAccount(connection)
+            return ledgerId
+    finally:
+        connection.ledgerId, connection.actorKind, connection.actorId, connection.actorLabel = previousContext
+
+
+def checkInvitationLimit(connection, now=None):
+    requireOwnerActor(connection)
+    now = int(time.time()) if now is None else now
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        timestamps = [row[0] for row in connection.execute("SELECT attemptedAt FROM invitationAttempts WHERE ownerId = ? AND attemptedAt > ? ORDER BY attemptedAt", (connection.actorId, now - 86400))]
+        waits = []
+        if len(timestamps) >= 20:
+            waits.append(timestamps[-20] + 86400 - now)
+        recent = [stamp for stamp in timestamps if stamp > now - 600]
+        if len(recent) >= 5:
+            waits.append(recent[-5] + 600 - now)
+        if waits:
+            raise InvitationRateLimit(max(waits))
+        connection.execute("DELETE FROM invitationAttempts WHERE attemptedAt <= ?", (now - 86400,))
+        connection.execute("INSERT INTO invitationAttempts VALUES (?, ?)", (connection.actorId, now))
+
+
+def invitationSnapshot(connection, invitation):
+    return {"ledger": connection.execute("SELECT name FROM ledgers WHERE id = ?", (invitation["ledgerId"],)).fetchone()[0],
+            "username": connection.execute("SELECT username FROM users WHERE id = ?", (invitation["recipientUserId"],)).fetchone()[0],
+            "inviter": connection.execute("SELECT username FROM users WHERE id = ?", (invitation["invitedBy"],)).fetchone()[0],
+            "role": invitation["role"], "status": invitation["status"],
+            "expiresAt": datetime.fromtimestamp(invitation["expiresAt"], timezone.utc).isoformat()}
+
+
+def sendSharingInvitation(connection, username, role, now=None):
+    ledgerId = requireOwnerActor(connection)
+    now = int(time.time()) if now is None else now
+    # Admission commits separately so invalid lookups consume quota as well.
+    checkInvitationLimit(connection, now)
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        requireOwnerActor(connection)
+        if not isinstance(username, str) or not username.strip():
+            raise ValidationError("Username is required")
+        if role not in {"member", "auditor"}:
+            raise ValidationError("Choose Member or Auditor")
+        recipient = connection.execute("SELECT id, enabled FROM users WHERE usernameKey = ?", (username.strip().casefold(),)).fetchone()
+        if not recipient:
+            raise ValidationError("User not found")
+        if not recipient["enabled"]:
+            raise ValidationError("User is disabled")
+        existingAccess = connection.execute("SELECT enabled FROM ledgerAccess WHERE ledgerId = ? AND userId = ?", (ledgerId, recipient["id"])).fetchone()
+        if existingAccess and existingAccess["enabled"]:
+            raise ValidationError("User already has access")
+        if connection.execute("SELECT 1 FROM sharingInvitations WHERE ledgerId = ? AND recipientUserId = ? AND status = 'Pending' AND expiresAt > ?", (ledgerId, recipient["id"], now)).fetchone():
+            raise ValidationError("Invitation already pending")
+        invitationId = connection.execute("INSERT INTO sharingInvitations (ledgerId, recipientUserId, invitedBy, role, createdAt, expiresAt) VALUES (?, ?, ?, ?, ?, ?)", (ledgerId, recipient["id"], connection.actorId, role, now, now + 604800)).lastrowid
+        invitation = connection.execute("SELECT * FROM sharingInvitations WHERE id = ?", (invitationId,)).fetchone()
+        recordSharingEvent(connection, ledgerId, "invitation-sent", "sharingInvitations", invitationId, None, invitationSnapshot(connection, invitation))
+        return invitationId
+
+
+def recipientInvitations(connection, userId, now=None):
+    now = int(time.time()) if now is None else now
+    return [dict(row) for row in connection.execute("""SELECT i.id, i.ledgerId, l.name AS ledgerName, u.username AS inviter, i.role, i.expiresAt
+        FROM sharingInvitations i JOIN ledgers l ON l.id = i.ledgerId JOIN users u ON u.id = i.invitedBy
+        WHERE i.recipientUserId = ? AND i.status = 'Pending' AND i.expiresAt > ? ORDER BY i.createdAt, i.id""", (userId, now))]
+
+
+def decideSharingInvitation(connection, invitationId, userId, decision, now=None):
+    now = int(time.time()) if now is None else now
+    if decision not in {"accept", "decline", "cancel"}:
+        raise ValidationError("Invalid invitation decision")
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        invitation = connection.execute("SELECT * FROM sharingInvitations WHERE id = ?", (invitationId,)).fetchone()
+        # An invitation ID never grants access to another recipient's invitation.
+        if not invitation or (decision != "cancel" and invitation["recipientUserId"] != userId) or (decision == "cancel" and invitation["ledgerId"] != connection.ledgerId):
+            raise ValidationError("Invitation does not exist")
+        if decision == "cancel":
+            requireOwnerActor(connection)
+        elif not connection.execute("SELECT 1 FROM users WHERE id = ? AND enabled = 1 AND passwordSetupRequired = 0", (userId,)).fetchone():
+            raise ValidationError("Enabled login required")
+        if invitation["status"] != "Pending" or invitation["expiresAt"] <= now:
+            raise SubmissionConflict("Invitation is no longer pending or has expired")
+        before = invitationSnapshot(connection, invitation)
+        if decision == "accept":
+            if not connection.execute("SELECT 1 FROM ledgerAccess WHERE ledgerId = ? AND role = 'owner'", (invitation["ledgerId"],)).fetchone():
+                raise ValidationError("Ledger Owner is unavailable")
+            membership = connection.execute("SELECT role, enabled FROM ledgerAccess WHERE ledgerId = ? AND userId = ?", (invitation["ledgerId"], userId)).fetchone()
+            if membership and membership["enabled"]:
+                raise SubmissionConflict("User already has access")
+            connection.execute("""INSERT INTO ledgerAccess (userId, ledgerId, role, enabled) VALUES (?, ?, ?, 1)
+                ON CONFLICT(userId, ledgerId) DO UPDATE SET role = excluded.role, enabled = 1""", (userId, invitation["ledgerId"], invitation["role"]))
+            recordSharingEvent(connection, invitation["ledgerId"], "access-restored" if membership else "access-granted", "ledgerAccess", userId,
+                               {"username": before["username"], "role": membership["role"], "accessEnabled": membership["enabled"]} if membership else None,
+                               {"username": before["username"], "role": invitation["role"], "accessEnabled": True})
+        status = {"accept": "Accepted", "decline": "Declined", "cancel": "Cancelled"}[decision]
+        connection.execute("UPDATE sharingInvitations SET status = ? WHERE id = ?", (status, invitationId))
+        recordSharingEvent(connection, invitation["ledgerId"], "invitation-" + status.lower(), "sharingInvitations", invitationId, before, {**before, "status": status})
+        return invitation["ledgerId"]
+
+
+def sharingAccessList(connection):
+    ledgerId = requireLedger(connection)
+    return [dict(row) for row in connection.execute("""SELECT u.id, u.username, a.role, a.enabled, u.enabled AS loginEnabled
+        FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE a.ledgerId = ?
+        ORDER BY a.role != 'owner', u.usernameKey, u.id""", (ledgerId,))]
+
+
+def changeSharingAccess(connection, userId, role=None, revoke=False):
+    ledgerId = requireOwnerActor(connection)
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        member = connection.execute("SELECT u.username, a.role, a.enabled FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE a.ledgerId = ? AND a.userId = ?", (ledgerId, userId)).fetchone()
+        if not member or member["role"] == "owner":
+            raise ValidationError("Choose an existing Member or Auditor")
+        if not revoke and role not in {"member", "auditor"}:
+            raise ValidationError("Choose Member or Auditor")
+        before = {"username": member["username"], "role": member["role"], "accessEnabled": bool(member["enabled"])}
+        after = {**before, "role": member["role"] if revoke else role, "accessEnabled": False if revoke else before["accessEnabled"]}
+        if before == after:
+            return
+        connection.execute("UPDATE ledgerAccess SET role = ?, enabled = ? WHERE ledgerId = ? AND userId = ?", (after["role"], int(after["accessEnabled"]), ledgerId, userId))
+        recordSharingEvent(connection, ledgerId, "access-revoked" if revoke else "role-changed", "ledgerAccess", userId, before, after)

@@ -144,7 +144,7 @@ class MoneyOperationTests(unittest.TestCase):
         self.assertEqual(offsetsBefore, [tuple(row) for row in self.connection.execute("SELECT id, balanceOffsetCents FROM accounts WHERE accountClass != 'system' ORDER BY id")])
         self.assertEqual((30000, -18000), (self.balance(self.cashAccountId), self.balance(self.creditAccountId)))
         self.assertEqual(reportBefore, dashboardReport(self.connection, "custom", "2020-01-01", "2020-01-31"))
-        backupPaths = list((self.databasePath.parent / "backups").glob("pre-migration-v17-to-v26-*.db"))
+        backupPaths = list((self.databasePath.parent / "backups").glob("pre-migration-v17-to-v27-*.db"))
         self.assertEqual(1, len(backupPaths))
         backupConnection = sqlite3.connect(backupPaths[0])
         try:

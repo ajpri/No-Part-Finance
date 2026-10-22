@@ -118,8 +118,9 @@ class UserProvisioningTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "synthetic planning migration failure"):
                 ledger.initializeDatabase(self.path)
         self.assertEqual(beforeDump, list(self.connection.iterdump()))
-        ledger.initializeDatabase(self.path)
-        self.assertEqual(26, self.connection.execute("PRAGMA user_version").fetchone()[0])
+        with patch.object(ledger, "migrateToVersion27"):
+            ledger.initializeDatabase(self.path)
+        self.assertEqual(27, self.connection.execute("PRAGMA user_version").fetchone()[0])
         for table, recordedRows in beforeRows.items():
             self.assertEqual(recordedRows, [tuple(row) for row in self.connection.execute(f"SELECT * FROM {table}")], table)
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'auditsimulator*'").fetchone()[0])
@@ -179,7 +180,7 @@ class UserProvisioningTests(unittest.TestCase):
         setAuditorAccess(self.connection, self.auditor, False)
         self.assertEqual(401, first.get("/api/accounts").status_code)
         self.assertEqual(200, second.get("/api/accounts").status_code)
-        self.assertEqual(401, self.login("Auditor", "auditor password")[1].status_code)
+        self.assertEqual(302, self.login("Auditor", "auditor password")[1].status_code)
         setAuditorAccess(self.connection, self.auditor, True)
         self.assertEqual(401, first.get("/api/accounts").status_code)
         self.assertEqual(302, self.login("Auditor", "auditor password")[1].status_code)
@@ -287,7 +288,8 @@ class UserProvisioningTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "synthetic migration failure"):
                 ledger.initializeDatabase(self.path)
         self.assertEqual(before, list(self.connection.iterdump()))
-        ledger.initializeDatabase(self.path)
+        with patch.object(ledger, "migrateToVersion27"):
+            ledger.initializeDatabase(self.path)
         self.assertEqual(3, self.connection.execute("SELECT COUNT(*) FROM ledgerAccess WHERE enabled = 1").fetchone()[0])
         self.assertEqual([], self.connection.execute("PRAGMA foreign_key_check").fetchall())
 
@@ -317,7 +319,7 @@ class UserProvisioningTests(unittest.TestCase):
         setUserEnabled(self.connection, self.auditor, False)
         setAuditorAccess(self.connection, self.auditor, False)
         setUserEnabled(self.connection, self.auditor, True)
-        self.assertEqual(401, self.login("Auditor", "auditor password")[1].status_code)
+        self.assertEqual(302, self.login("Auditor", "auditor password")[1].status_code)
         setUserEnabled(self.connection, self.auditor, False)
         setAuditorAccess(self.connection, self.auditor, True)
         self.assertEqual(401, self.login("Auditor", "auditor password")[1].status_code)
@@ -532,6 +534,13 @@ class UserProvisioningTests(unittest.TestCase):
         self.assertIn({"label": "Description", "value": "Corrected refund"}, pending[0]["newValues"])
         self.assertIn({"label": "Status", "value": "Approved"}, pending[0]["newValues"])
         self.assertIn({"label": "Status", "value": "Pending"}, pending[0]["oldValues"])
+        approvedOld = {item["label"]: item["value"] for item in pending[0]["oldValues"]}
+        approvedNew = {item["label"]: item["value"] for item in pending[0]["newValues"]}
+        for label, value in (("Description", "Corrected refund"), ("Amount", "-$5.67"),
+                             ("Account", "Checking"), ("Category", "Shopping"), ("Date", "2026-10-21"),
+                             ("Source", "Integration"), ("Pinned", "No")):
+            self.assertEqual(value, approvedOld[label])
+            self.assertEqual(value, approvedNew[label])
         self.assertIn({"label": "Amount", "value": "-$5.67"}, pending[0]["newValues"])
         self.assertEqual(0, len([event for event in events if event["type"] == "Transaction"]))
         for hidden in ("private-retry-identity", "Original proposal", "Reviewed proposal", "Review version", "Original reporting role", "Source snapshot"):
@@ -591,6 +600,14 @@ class UserProvisioningTests(unittest.TestCase):
             self.assertIn({"label": "Amount", "value": "$10.00"}, transfer["newValues"])
         final = next(row for row in events if row["type"] == "Pending transaction" and {"label": "Description", "value": "Final approved purchase"} in row["newValues"])
         self.assertIn({"label": "Amount", "value": "$15.00"}, final["newValues"])
+        self.assertIn({"label": "Amount", "value": "$10.00"}, final["oldValues"])
+        self.assertIn({"label": "Description", "value": "Batch 0"}, final["oldValues"])
+        for transfer in transfers:
+            old = {item["label"]: item["value"] for item in transfer["oldValues"]}
+            new = {item["label"]: item["value"] for item in transfer["newValues"]}
+            self.assertEqual("Pending", old.pop("Status"))
+            self.assertEqual("Approved", new.pop("Status"))
+            self.assertEqual(old, new)
         self.assertEqual(beforeDump, list(self.connection.iterdump()))
         approvedTransaction = self.connection.execute("SELECT transactionId FROM scopedpendingSubmissions WHERE submissionId = 'batch-0'").fetchone()[0]
         approvedTransfer = self.connection.execute("SELECT transferId FROM scopedpendingSubmissions WHERE submissionId = 'batch-6'").fetchone()[0]

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-applicationVersion = "26.10.22"
+applicationVersion = "26.10.23"
 archiveRootName = "No-Part-Finance"
 includedFiles = (
     "app.py",
@@ -17,6 +17,7 @@ includedFiles = (
     "docs.html",
     "openapi.json",
     "tests/__init__.py",
+    "tests/test_version261023.py",
     "tests/test_version261022.py",
     "tests/test_release_2610.py",
     "tests/test_pending_next.py",
@@ -209,7 +210,7 @@ def argumentParser():
     )
     parser.epilog = (
         "The ZIP includes maintained application files, documentation, tests, launchers, and a verified "
-        "finance.db by default. WARNING: the default package contains your complete unencrypted financial database and recoverable credentials. "
+        "finance.db by default, including every ledger, User, membership, password hash, integration secret, invitation, and audit record. WARNING: the default package contains your complete unencrypted financial database and recoverable credentials. Browser database downloads are selected-ledger, credential-free copies; they are not equivalent to this full-installation package. "
         "Use --no-db for an application-only package. Examples: packageWindows.bat --no-db "
         "--output D:\\Packages | ./packageLinux.sh --no-db --output /srv/packages"
     )
@@ -230,10 +231,10 @@ def main(arguments=None):
     print(f"Archive size: {result['sizeBytes']} bytes")
     if result["includesDatabase"]:
         print("WARNING: This ZIP contains the complete unencrypted financial database and recoverable credentials.")
-        print("Browser download (sign in as Owner first): http://HOST:PORT/api/package")
+        print("Browser download (selected ledger, credentials excluded; sign in as Owner first): http://HOST:PORT/api/package")
     else:
         print("This ZIP does not contain finance.db.")
-        print("Browser download (sign in as Owner or Auditor first): http://HOST:PORT/api/package-no-db")
+        print("Browser download (sign in as Owner, Member, or Auditor first): http://HOST:PORT/api/package-no-db")
 
 
 if __name__ == "__main__":

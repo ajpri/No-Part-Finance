@@ -20,6 +20,9 @@ from users import configureOnStartup, manageUsers, check_password_hash, password
 
 from database import (
     ValidationError,
+    renameLedger, accessibleLedgers, createPersonalLedger, sharingAccessList,
+    sendSharingInvitation, recipientInvitations, decideSharingInvitation,
+    changeSharingAccess, InvitationRateLimit,
     localTimestamp, auditLogPage,
     bindLedger, connectInitialLedgerDatabase, exportLedgerDatabase, setIntegrationState,
     reconcileAccountBalance,
@@ -194,7 +197,7 @@ def createApp(databasePathOverride=None):
         if request.path.startswith("/api/integration/"):
             secret = authorizationParts[1] if isBearer and len(authorizationParts) == 2 else ""
             if secret:
-                g.integration = connection.execute("SELECT id, label, ledgerId FROM integrationSecrets WHERE secret = ? AND active = 1 AND revoked = 0 AND EXISTS (SELECT 1 FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE a.ledgerId = integrationSecrets.ledgerId AND a.role = 'owner' AND a.enabled = 1 AND u.enabled = 1)", (secret,)).fetchone()
+                g.integration = connection.execute("SELECT id, label, ledgerId FROM integrationSecrets WHERE secret = ? AND active = 1 AND revoked = 0 AND credentialAvailable = 1 AND EXISTS (SELECT 1 FROM ledgerAccess creator JOIN users cu ON cu.id = creator.userId WHERE creator.userId = integrationSecrets.creatorUserId AND creator.ledgerId = integrationSecrets.ledgerId AND creator.enabled = 1 AND cu.enabled = 1 AND cu.passwordSetupRequired = 0 AND creator.role IN ('owner', 'member')) AND EXISTS (SELECT 1 FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE a.ledgerId = integrationSecrets.ledgerId AND a.role = 'owner' AND a.enabled = 1 AND u.enabled = 1)", (secret,)).fetchone()
             if not g.integration:
                 return jsonify({"error": "Valid integration Bearer authentication required"}), 401
             bindLedger(connection, g.integration["ledgerId"], "integration", g.integration["id"], g.integration["label"])
@@ -209,24 +212,39 @@ def createApp(databasePathOverride=None):
             for expiredToken in [key for key, value in sessions.items() if value["expiresAt"] <= now]:
                 del sessions[expiredToken]
             g.browserSession = sessions.get(token)
+        g.accessibleLedgers = []
         if g.browserSession and g.browserSession.get("userId"):
-            memberships = connection.execute("SELECT u.id, u.username, u.authVersion, u.enabled AS loginEnabled, a.ledgerId, a.role, a.enabled AS accessEnabled FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE u.id = ?", (g.browserSession["userId"],)).fetchall()
-            if len(memberships) == 1:
-                user = memberships[0]
-                owner = connection.execute("SELECT 1 FROM ledgerAccess WHERE ledgerId = ? AND role = 'owner'", (user["ledgerId"],)).fetchone()
-                if owner and user["loginEnabled"] and user["accessEnabled"] and user["authVersion"] == g.browserSession["authVersion"]:
-                    g.user = user
-                    bindLedger(connection, user["ledgerId"], "user", user["id"], user["username"])
+            user = connection.execute("SELECT id, username, authVersion, enabled AS loginEnabled, passwordSetupRequired FROM users WHERE id = ?", (g.browserSession["userId"],)).fetchone()
+            if user and user["loginEnabled"] and not user["passwordSetupRequired"] and user["authVersion"] == g.browserSession["authVersion"]:
+                g.accessibleLedgers = accessibleLedgers(connection, user["id"])
+                requestedLedger = request.headers.get("X-Ledger-ID") or request.args.get("ledger")
+                if request.headers.get("X-Ledger-ID") and request.args.get("ledger") and request.headers["X-Ledger-ID"] != request.args["ledger"]:
+                    return jsonify({"error": "Conflicting ledger selection"}), 409
+                selected = next((item for item in g.accessibleLedgers if item["id"] == requestedLedger), None) if requestedLedger else next((item for item in g.accessibleLedgers if item["role"] == "owner"), g.accessibleLedgers[0] if g.accessibleLedgers else None)
+                g.user = {**dict(user), "ledgerId": selected["id"] if selected else None, "role": selected["role"] if selected else None}
+                if selected:
+                    bindLedger(connection, selected["id"], "user", user["id"], user["username"])
+                else:
+                    connection.actorKind, connection.actorId, connection.actorLabel = "user", user["id"], user["username"]
         if request.endpoint == "signIn":
             return None
         if not g.user:
             if request.path.startswith("/api/") or request.path == "/health":
                 return jsonify({"error": "Sign In required"}), 401
             return redirect("/sign-in")
-        ownerOnly = request.endpoint in {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "changeIntegrationState", "reviewPending", "savePendingRow", "previewPending", "summarizePending", "decidePending", "pendingPage", "downloadBackup", "downloadApplicationPackage", "transactionPendingSnapshot", "transferPendingSnapshot"}
         isMutation = request.method not in {"GET", "HEAD", "OPTIONS"}
-        nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut"}
-        if g.user["role"] == "auditor" and (ownerOnly or (isMutation and request.endpoint not in nonpersistentPosts)):
+        identityEndpoints = {"sessionDetails", "ledgers", "invitations", "invitationDecision", "logOut"}
+        identityOnly = request.endpoint in identityEndpoints and not (request.endpoint == "invitations" and isMutation)
+        if request.path.startswith("/api/") and len(g.accessibleLedgers) > 1 and not (request.headers.get("X-Ledger-ID") or request.args.get("ledger")) and not identityOnly:
+            return jsonify({"error": "Select a ledger for this request"}), 409
+        if not g.user["ledgerId"] and request.path.startswith("/api/") and request.endpoint not in identityEndpoints:
+            return jsonify({"error": "No access to the selected ledger"}), 403
+        ownerOnly = request.endpoint in {"downloadBackup", "downloadApplicationPackage", "sharingMember", "cancelInvitation"} or (request.endpoint == "saveLedgerName" and isMutation) or (request.endpoint == "invitations" and isMutation)
+        if ownerOnly and g.user["role"] != "owner":
+            return jsonify({"error": "Owner access required"}), 403
+        auditorRestricted = {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "changeIntegrationState", "reviewPending", "savePendingRow", "previewPending", "summarizePending", "decidePending", "transactionPendingSnapshot", "transferPendingSnapshot"}
+        nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut", "ledgers", "invitationDecision"}
+        if g.user["role"] == "auditor" and (request.endpoint in auditorRestricted or (isMutation and request.endpoint not in nonpersistentPosts)):
             return jsonify({"error": "Read-only Auditor access"}), 403
         if isMutation and not csrfValid():
             return jsonify({"error": "CSRF validation failed. Reload and try again."}), 403
@@ -263,18 +281,15 @@ def createApp(databasePathOverride=None):
             user = connection.execute("SELECT * FROM users WHERE usernameKey = ?", (username,)).fetchone()
             valid = len(password) <= 128 and check_password_hash(user["passwordHash"] if user else dummyPasswordHash, password)
             memberships = connection.execute("SELECT ledgerId, enabled FROM ledgerAccess WHERE userId = ?", (user["id"],)).fetchall() if user else []
-            if not user or not valid or not user["enabled"] or len(memberships) != 1 or not memberships[0]["enabled"]:
+            if not user or not valid or not user["enabled"] or user["passwordSetupRequired"]:
                 failures += 1
                 usernameAttempts[username] = (failures, now + 300 if failures == 5 else until)
-                return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
-            ledgerId = memberships[0]["ledgerId"]
-            if not connection.execute("SELECT 1 FROM ledgerAccess WHERE ledgerId = ? AND role = 'owner'", (ledgerId,)).fetchone():
                 return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
             token = secrets.token_urlsafe(32)
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                currentUser = connection.execute("SELECT u.authVersion, u.enabled, a.enabled AS accessEnabled FROM users u JOIN ledgerAccess a ON a.userId = u.id WHERE u.id = ? AND a.ledgerId = ?", (user["id"], ledgerId)).fetchone()
-                if not currentUser or not currentUser["enabled"] or not currentUser["accessEnabled"] or currentUser["authVersion"] != user["authVersion"]:
+                currentUser = connection.execute("SELECT authVersion, enabled, passwordSetupRequired FROM users WHERE id = ?", (user["id"],)).fetchone()
+                if not currentUser or not currentUser["enabled"] or currentUser["passwordSetupRequired"] or currentUser["authVersion"] != user["authVersion"]:
                     return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
                 connection.execute("UPDATE users SET lastLoginAt = ? WHERE id = ?", (datetime.fromtimestamp(now, timezone.utc).isoformat(), user["id"]))
             sessions.pop(request.cookies.get("npfSession"), None)
@@ -293,7 +308,67 @@ def createApp(databasePathOverride=None):
 
     @app.get("/api/session")
     def sessionDetails():
-        return {"role": g.user["role"], "username": g.user["username"], "csrfToken": g.browserSession["csrfToken"], "expiresAt": g.browserSession["expiresAt"]}
+        return {"role": g.user["role"], "username": g.user["username"], "csrfToken": g.browserSession["csrfToken"], "expiresAt": g.browserSession["expiresAt"], "ledgerId": g.user["ledgerId"], "ledgers": g.accessibleLedgers}
+
+    @app.route("/api/ledgers", methods=["GET", "POST"])
+    def ledgers():
+        if request.method == "GET":
+            return jsonify(g.accessibleLedgers)
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict) or set(submitted) != {"name"}:
+            raise ValidationError("Submit the ledger name")
+        ledgerId = createPersonalLedger(getDatabase(), g.user["id"], submitted["name"])
+        return jsonify({"id": ledgerId}), 201
+
+    @app.get("/api/sharing")
+    def sharingDetails():
+        connection = getDatabase()
+        invitationRows = []
+        if g.user["role"] == "owner":
+            invitationRows = [dict(row) for row in connection.execute("""SELECT i.id, u.username, i.role, i.expiresAt FROM sharingInvitations i
+                JOIN users u ON u.id = i.recipientUserId WHERE i.ledgerId = currentLedgerId() AND i.status = 'Pending' AND i.expiresAt > ? ORDER BY i.id""", (int(time.time()),))]
+        return jsonify({"members": sharingAccessList(connection), "invitations": invitationRows})
+
+    @app.patch("/api/sharing/<int:userId>")
+    def sharingMember(userId):
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict) or (set(submitted) != {"role"} and submitted != {"revoke": True}):
+            raise ValidationError("Submit a role or revoke access")
+        changeSharingAccess(getDatabase(), userId, submitted.get("role"), submitted.get("revoke", False))
+        return jsonify({"status": "ok"})
+
+    @app.route("/api/invitations", methods=["GET", "POST"])
+    def invitations():
+        if request.method == "GET":
+            return jsonify(recipientInvitations(getDatabase(), g.user["id"]))
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict):
+            raise ValidationError("Submit Username and role")
+        invitationId = sendSharingInvitation(getDatabase(), submitted.get("username"), submitted.get("role"))
+        return jsonify({"id": invitationId}), 201
+
+    @app.post("/api/invitations/<int:invitationId>/decision")
+    def invitationDecision(invitationId):
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict) or submitted.get("decision") not in {"accept", "decline"}:
+            raise ValidationError("Choose Accept or Decline")
+        ledgerId = decideSharingInvitation(getDatabase(), invitationId, g.user["id"], submitted["decision"])
+        return jsonify({"ledgerId": ledgerId})
+
+    @app.post("/api/invitations/<int:invitationId>/cancel")
+    def cancelInvitation(invitationId):
+        decideSharingInvitation(getDatabase(), invitationId, g.user["id"], "cancel")
+        return jsonify({"status": "ok"})
+
+    @app.route("/api/ledger", methods=["GET", "PUT"])
+    def saveLedgerName():
+        connection = getDatabase()
+        if request.method == "PUT":
+            submitted = request.get_json(silent=True)
+            if not isinstance(submitted, dict):
+                raise ValidationError("Submit the ledger name")
+            renameLedger(connection, submitted.get("name"))
+        return dict(connection.execute("SELECT id, name FROM ledgers WHERE id = currentLedgerId()").fetchone())
 
     @app.after_request
     def disallowIndexing(response):
@@ -322,6 +397,10 @@ def createApp(databasePathOverride=None):
 
     @app.errorhandler(ValidationError)
     def validationFailure(error):
+        if isinstance(error, InvitationRateLimit):
+            response = jsonify({"error": str(error)})
+            response.headers["Retry-After"] = str(error.retryAfter)
+            return response, 429
         return jsonify({"error": str(error)}), 409 if isinstance(error, SubmissionConflict) else 400
 
     @app.errorhandler(RequestEntityTooLarge)
@@ -345,8 +424,6 @@ def createApp(databasePathOverride=None):
     @app.route("/simulator")
     @app.route("/pending")
     def pageShell():
-        if request.path == "/pending" and g.user["role"] != "owner":
-            return jsonify({"error": "Owner access required"}), 403
         return Response((projectDirectory / "index.html").read_text().replace("__APPLICATION_VERSION__", applicationVersion), mimetype="text/html")
 
     @app.route("/styles.css")
@@ -393,12 +470,9 @@ def createApp(databasePathOverride=None):
         return packageDownloadResponse(False)
 
     def disableIntegrationKeysOption():
-        if set(request.args) - {"disableIntegrationKeys"}:
+        if set(request.args) - {"ledger"}:
             raise ValidationError("Unsupported download option")
-        value = request.args.get("disableIntegrationKeys", "false")
-        if value not in {"true", "false"}:
-            raise ValidationError("disableIntegrationKeys must be true or false")
-        return value == "true"
+        return False
 
     def packageDownloadResponse(includeDatabase):
         try:
@@ -701,7 +775,7 @@ def createApp(databasePathOverride=None):
             planId = int(rawPlanId) if rawPlanId else None
         except ValueError:
             planId = None
-        return jsonify(simulatorWorkspace(getDatabase(), planId, repairMissingLinks=bool(g.user and g.user["role"] == "owner")))
+        return jsonify(simulatorWorkspace(getDatabase(), planId, repairMissingLinks=bool(g.user and g.user["role"] in {"owner", "member"})))
 
     @app.get("/api/simulator/send-preview")
     def simulatorSendPreview():
@@ -1284,7 +1358,7 @@ def createApp(databasePathOverride=None):
                 raise ValidationError("Label must be text")
             secretId = createIntegrationSecret(connection, secretRequest["label"])
             return jsonify({"id": secretId}), 201
-        return jsonify([dict(row) for row in connection.execute("SELECT id, label, active, revoked, CASE WHEN revoked = 1 THEN 'Revoked' WHEN active = 1 THEN 'Enabled' ELSE 'Disabled' END AS status FROM scopedintegrationSecrets ORDER BY id")])
+        return jsonify([dict(row) for row in connection.execute("SELECT k.id, k.label, k.active, k.revoked, k.credentialAvailable, k.creatorMigrationAssigned, u.username AS creatorUsername, CASE WHEN credentialAvailable = 0 THEN 'Credential excluded' WHEN revoked = 1 THEN 'Revoked' WHEN active = 1 THEN 'Enabled' ELSE 'Disabled' END AS status FROM scopedintegrationSecrets k JOIN users u ON u.id = k.creatorUserId ORDER BY k.id")])
 
     @app.patch("/api/integration-secrets/<int:secretId>")
     def editIntegrationLabel(secretId):
@@ -1297,8 +1371,8 @@ def createApp(databasePathOverride=None):
     @app.post("/api/integration-secrets/<int:secretId>/reveal")
     def revealIntegrationSecret(secretId):
         secret = getDatabase().execute("SELECT secret FROM scopedintegrationSecrets WHERE id = ?", (secretId,)).fetchone()
-        if not secret:
-            raise ValidationError("Integration secret does not exist")
+        if not secret or not secret["secret"]:
+            raise ValidationError("Integration credential is unavailable; create a new key")
         return jsonify({"secret": secret["secret"]})
 
     @app.delete("/api/integration-secrets/<int:secretId>")
@@ -1360,14 +1434,14 @@ def createApp(databasePathOverride=None):
 
     @app.get("/api/transactions/<int:transactionId>/pending-snapshot")
     def transactionPendingSnapshot(transactionId):
-        if g.user["role"] != "owner":
-            return jsonify({"error": "Owner access required"}), 403
+        if g.user["role"] not in {"owner", "member"}:
+            return jsonify({"error": "Owner or Member access required"}), 403
         return jsonify({"snapshot": ledgerMoveSnapshot(getDatabase(), transactionId=transactionId)})
 
     @app.get("/api/transfers/<transferId>/pending-snapshot")
     def transferPendingSnapshot(transferId):
-        if g.user["role"] != "owner":
-            return jsonify({"error": "Owner access required"}), 403
+        if g.user["role"] not in {"owner", "member"}:
+            return jsonify({"error": "Owner or Member access required"}), 403
         return jsonify({"snapshot": ledgerMoveSnapshot(getDatabase(), transferId=transferId)})
 
     def movePendingRequest(transactionId=None, transferId=None):
