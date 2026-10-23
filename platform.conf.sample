@@ -1,0 +1,62 @@
+# No Part Finance server configuration
+# Rename platform.conf.sample to platform.conf, then restart the server.
+# Missing settings use these defaults. Only full-line # comments are supported.
+# Startup refreshes this sample and updates an existing platform.conf.
+# Configured values and commented settings are kept; new settings use defaults.
+# A missing platform.conf is never created automatically.
+# For repeated settings, the last active value above Extra data wins.
+# Comments are retained; unrecognized entries move to Extra data below.
+# SECURITY: This file can contain your SMTP password. Keep it private.
+# Linux: restrict permissions (for example chmod 600 platform.conf) so only
+# the administrator/application account can read or change it.
+# Windows: use Properties > Security to restrict access to those accounts.
+# Use a dedicated, revocable SMTP/app password where your provider supports it.
+# Never share your real file. CLI packages can include it and private logs;
+# handle those ZIP files as private installation copies. Browser ZIPs omit both.
+
+
+# --- Account usernames ---
+# Choose whether usernames must use an email address format.
+
+enforceEmailUsernames = false
+
+# --- Reverse proxy ---
+# Identify trusted proxies that forward the visitor's IP and HTTPS status.
+
+# Enter NGINX's internal/source IP as seen by the finance application.
+# This is NOT your dynamic public IP or dynamic-DNS hostname.
+# A different subnet across a Layer 3 router is fine if routable.
+# If source NAT intervenes, use the address the app sees, provided it
+# identifies only trusted proxy traffic. Keep that address stable.
+# Separate exact IPv4/IPv6 addresses with commas; no hostnames/subnets.
+trustedProxyAddresses =
+
+# --- Web registration ---
+# Choose whether visitors can create their own user accounts.
+
+allowWebRegistration = false
+
+# --- Email delivery (SMTP) ---
+# Configure the mail server used to send verification codes.
+
+smtpEnabled = false
+smtpHost =
+# Omit port to use 587 for starttls or 465 for tls (TLS-on-connect).
+# smtpPort =
+# Use starttls or tls. Encryption and certificate checks are required.
+smtpSecurity = starttls
+smtpUsername =
+smtpPassword =
+smtpFromAddress =
+smtpFromName =
+# Timeout per blocking network operation, not the total email attempt.
+smtpTimeoutSeconds = 10
+
+# --- Email verification ---
+# Choose whether users must verify their email before account access.
+
+# true requires enforceEmailUsernames and smtpEnabled with valid settings.
+requireRegistrationVerification = false
+
+# --- Extra data (ignored) ---
+# Entries in this section are preserved but are not applied.

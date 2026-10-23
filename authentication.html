@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive"><title>No Part Finance — {{ title }}</title>
+  <meta name="theme-color" content="#202124"><meta name="apple-mobile-web-app-title" content="No Part Finance"><meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="/pwa.webmanifest"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+  <script src="/theme.js"></script><link rel="stylesheet" href="/styles.css"><script src="/authentication.js" defer></script>
+</head>
+<body><main class="signIn"><h1>No Part Finance</h1>
+{% if mode == "signIn" %}
+<h2>Sign In</h2>
+<form method="post" action="/sign-in">
+  <input type="hidden" name="csrfToken" value="{{ csrfToken }}">
+  <label>Username <input name="username" autocomplete="username" required maxlength="64"></label>
+  <label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="128"></label>
+  <p role="alert">{{ message }}</p><button type="submit">Sign In</button>
+</form>
+{% if registrationEnabled %}<p><a href="/register" data-register>Register</a></p>{% endif %}
+{% endif %}
+{% if mode == "unconfigured" %}<p>{{ message }}</p>{% endif %}
+{% if mode == "signIn" and registrationEnabled or mode == "register" %}
+<dialog id="registrationDialog" {% if mode == "register" %}data-initial-dialog{% endif %} aria-labelledby="registrationTitle">
+<h2 id="registrationTitle">Register</h2>
+<form method="post" action="/register">
+  <input type="hidden" name="csrfToken" value="{{ csrfToken }}">
+  <label>Username <input name="username" autocomplete="username" value="{{ fields.get('username', '') }}" required maxlength="64"></label>
+  <label>First name <input name="firstName" autocomplete="given-name" value="{{ fields.get('firstName', '') }}" required maxlength="40"></label>
+  <label>Last name (optional) <input name="lastName" autocomplete="family-name" value="{{ fields.get('lastName', '') }}" maxlength="40"></label>
+  <label>Password <input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+  <label>Confirm password <input name="confirmation" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+  <p>Use 8–128 characters. Choose a password that is not commonly used.</p>
+  <p role="alert">{% if mode == "register" %}{{ message }}{% endif %}</p>
+  <div class="dialogActions"><a href="/sign-in" data-cancel-registration>Cancel</a><button type="submit">Register</button></div>
+</form></dialog>
+{% endif %}
+{% if mode == "profile" %}
+<dialog data-initial-dialog aria-labelledby="profileTitle"><h2 id="profileTitle">Complete your account</h2>
+<p>Add your name{% if migrateUsername %} and an email username{% endif %} to continue.</p>
+<form method="post" action="/complete-profile">
+  <input type="hidden" name="csrfToken" value="{{ csrfToken }}">
+  {% if migrateUsername %}<label>Email username <input name="username" autocomplete="username" value="{{ fields.get('username', '') }}" required maxlength="64"></label>{% endif %}
+  <label>First name <input name="firstName" autocomplete="given-name" value="{{ fields.get('firstName', '') }}" required maxlength="40"></label>
+  <label>Last name (optional) <input name="lastName" autocomplete="family-name" value="{{ fields.get('lastName', '') }}" maxlength="40"></label>
+  <p role="alert">{{ message }}</p><button type="submit">Continue</button>
+</form>
+<form method="post" action="/api/logout"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><button type="submit">Log Out</button></form>
+</dialog>
+{% endif %}
+{% if mode == "verify" %}
+<dialog data-initial-dialog aria-labelledby="verificationTitle"><h2 id="verificationTitle">Verify your email</h2>
+<p>{% if migrationChallenge %}Enter the code emailed to your proposed email username to complete the change.{% else %}Your account hasn’t been verified yet. Enter the code emailed to you to continue.{% endif %}</p>
+<form method="post" action="/verify">
+  <input type="hidden" name="csrfToken" value="{{ csrfToken }}">
+  <label>Verification code <input name="code" type="text" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
+  <p role="status">{{ message }}</p><button type="submit">Verify</button>
+</form>
+<form method="post" action="/verify/resend"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><button type="submit">Resend</button></form>
+{% if migrationChallenge %}<p><a href="/complete-profile">Change proposed email or name</a></p>{% endif %}
+<form method="post" action="/api/logout"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><button type="submit">Log Out</button></form>
+</dialog>
+{% endif %}
+{% if mode == "welcome" %}
+<h2>Would you like to create your own ledger?</h2>
+<form method="post" action="/welcome"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><button name="choice" value="yes">Yes</button> <button name="choice" value="no">No</button></form>
+{% endif %}
+</main><footer class="signInVersion">No Part Finance {{ version }}</footer></body></html>

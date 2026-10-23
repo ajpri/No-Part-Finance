@@ -11,6 +11,7 @@ from pathlib import Path
 
 import database as ledger
 from app import createApp
+from tests.test_support import createPreProfileOwner
 from users import createOwner, createUser, renameUser
 
 
@@ -22,10 +23,10 @@ class LedgerNameTests(unittest.TestCase):
         ledger.initializeDatabase(self.path)
         self.connection = ledger.connectDatabase(self.path)
         self.addCleanup(self.connection.close)
-        self.owner = createOwner(self.connection, "Owner", "owner password")
+        self.owner = createOwner(self.connection, "Owner", "owner password", firstName="Owner")
         self.ledgerId = self.connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (self.owner,)).fetchone()[0]
         ledger.bindLedger(self.connection, self.ledgerId)
-        self.auditor = createUser(self.connection, "auditor", "Auditor", "auditor password")
+        self.auditor = createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
         self.application = createApp(self.path)
 
     def login(self, username="Owner", password="owner password"):
@@ -58,7 +59,7 @@ class LedgerNameTests(unittest.TestCase):
     def testRenameAuditRollbackIsolationAndDownload(self):
         client = self.login()
         ledger.bindLedger(self.connection, self.ledgerId)
-        otherOwner = createOwner(self.connection, "Other", "owner password")
+        otherOwner = createOwner(self.connection, "Other", "owner password", firstName="Other")
         otherLedger = self.connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (otherOwner,)).fetchone()[0]
         self.connection.execute("CREATE TRIGGER failRenameAudit BEFORE INSERT ON auditEvents WHEN NEW.recordType = 'ledgers' BEGIN SELECT RAISE(ABORT, 'audit failure'); END")
         self.connection.commit()
@@ -90,7 +91,7 @@ class SharingTests(unittest.TestCase):
 
     def setUp(self):
         LedgerNameTests.setUp(self)
-        self.otherOwner = createOwner(self.connection, "Other", "other password")
+        self.otherOwner = createOwner(self.connection, "Other", "other password", firstName="Other")
         self.otherLedger = self.connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (self.otherOwner,)).fetchone()[0]
         ledger.bindLedger(self.connection, self.ledgerId, "user", self.owner, "Owner")
 
@@ -200,7 +201,7 @@ class SharingTests(unittest.TestCase):
         self.connection.commit()
         # A different synthetic User retains a Disabled membership and can sign in.
         ledger.bindLedger(self.connection, self.ledgerId)
-        noAccessId = createUser(self.connection, "auditor", "No access", "no access password")
+        noAccessId = createUser(self.connection, "auditor", "No access", "no access password", firstName="No access")
         self.connection.execute("UPDATE ledgerAccess SET enabled = 0 WHERE userId = ?", (noAccessId,))
         self.connection.commit()
         noAccess = self.login("No access", "no access password")
@@ -263,7 +264,7 @@ class SharingTests(unittest.TestCase):
             ledger.initializeDatabase(legacyPath)
         connection = ledger.connectDatabase(legacyPath)
         try:
-            ownerId = createOwner(connection, "Legacy", "legacy password")
+            ownerId = createPreProfileOwner(connection, "Legacy", "legacy password")
             ledgerId = connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (ownerId,)).fetchone()[0]
             ledger.bindLedger(connection, ledgerId)
             with connection:
@@ -354,7 +355,7 @@ class SharingTests(unittest.TestCase):
             ledger.initializeDatabase(legacyPath)
         connection = ledger.connectDatabase(legacyPath)
         try:
-            owner = createOwner(connection, "Legacy", "legacy password")
+            owner = createPreProfileOwner(connection, "Legacy", "legacy password")
             # A permitted empty initial schema has no keys; inject a migration failure
             # after the table rebuild to prove rollback restores that exact schema.
             original = connection.iterdump()
@@ -399,7 +400,7 @@ class FullInstallationPackagingTests(unittest.TestCase):
         with self.connection:
             self.connection.execute("UPDATE integrationSecrets SET active = 0, revoked = 1 WHERE id = ?", (keys[2],))
         ledger.submitPendingEntry(self.connection, None, {"submissionId": "synthetic-package-pending", "date": "2026-10-22", "accountId": cash, "description": "Synthetic pending", "categoryId": category, "amount": "1.23", "pinned": False})
-        recipient = createOwner(self.connection, "Recipient", "recipient password")
+        recipient = createOwner(self.connection, "Recipient", "recipient password", firstName="Recipient")
         self.invite("Recipient")
         setUserEnabled(self.connection, self.auditor, False)
         secret = self.connection.execute("SELECT secret FROM integrationSecrets WHERE id = ?", (keys[0],)).fetchone()[0]

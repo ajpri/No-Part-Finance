@@ -27,6 +27,8 @@ __pycache__/
 htmlcov/
 
 # Local credentials, deployment overrides, and editor/agent state.
+platform.conf
+logs/
 .env
 .env.*
 !.env.example

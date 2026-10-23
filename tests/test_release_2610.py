@@ -44,8 +44,8 @@ class OctoberTests(unittest.TestCase):
         self.app = createApp(self.path)
         self.app.config["PACKAGE_OUTPUT_DIRECTORY"] = str(Path(self.directory.name) / "packages")
         self.connection = connectDatabase(self.path)
-        createUser(self.connection, "owner", "Owner", "owner password")
-        createUser(self.connection, "auditor", "Auditor", "auditor password")
+        createUser(self.connection, "owner", "Owner", "owner password", firstName="Owner")
+        createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
         self.cashId = createAccount(self.connection, "Example Cash", "cash", openingBalance="100.00")
         self.creditId = createAccount(self.connection, "Example Card", "credit", "Credit Card", openingBalance="50.00")
         self.expenseId = createCategory(self.connection, "Example Expense")
@@ -88,16 +88,19 @@ class OctoberTests(unittest.TestCase):
                 url = re.sub(r"<[^>]+>", "1", str(rule))
                 for method in rule.methods & {"POST", "PATCH", "PUT", "DELETE"}:
                     with self.subTest(route=url, method=method):
-                        self.assertEqual(401, visitor.open(url, method=method, json={}).status_code)
+                        self.assertEqual(403 if rule.endpoint == "register" else 302 if rule.endpoint in {"completeProfile", "verifyCode", "resendCode", "registrationWelcome"} else 401, visitor.open(url, method=method, json={}).status_code)
                         for token in (None, "incorrect-token", otherToken):
                             headers = {} if token is None else {"X-CSRF-Token": token}
                             response = self.owner.open(url, method=method, json={}, headers=headers)
                             self.assertEqual(403, response.status_code)
-                            self.assertIn("CSRF", response.get_json()["error"])
+                            if rule.endpoint == "register":
+                                self.assertIn("disabled", response.get_data(as_text=True))
+                            else:
+                                self.assertIn("CSRF", response.get_json()["error"])
                             self.assertTrue(before == self.taskFourSnapshot(), "Rejected CSRF changed database state")
                         self.assertEqual(403, self.agent.open(url, method=method, json={}, headers=self.headers).status_code)
                         if rule.endpoint not in {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut", "ledgers", "invitationDecision"}:
-                            self.assertEqual(400 if rule.endpoint in {"ledgers", "invitationDecision"} else 403, auditor.open(url, method=method, json={}).status_code)
+                            self.assertEqual(302 if rule.endpoint in {"completeProfile", "verifyCode", "registrationWelcome"} else 400 if rule.endpoint in {"ledgers", "invitationDecision", "resendCode"} else 403, auditor.open(url, method=method, json={}).status_code)
                         self.assertTrue(before == self.taskFourSnapshot(), "Unauthorized write changed database state")
         finally:
             self.owner.environ_base["HTTP_X_CSRF_TOKEN"] = validToken
@@ -271,9 +274,15 @@ class OctoberTests(unittest.TestCase):
         self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
         auditor = self.app.test_client()
         signIn(auditor, "Auditor", "auditor password")
-        with self.connection:
+        # Retained identity audit records now prevent deleting an established User.
+        with self.assertRaises(sqlite3.IntegrityError), self.connection:
             self.connection.execute("DELETE FROM users WHERE id IN (SELECT userId FROM ledgerAccess WHERE role = 'auditor')")
-        createUser(self.connection, "auditor", "Auditor", "replacement password")
+        from users import setUserEnabled
+        auditorId = self.connection.execute("SELECT id FROM users WHERE username = 'Auditor'").fetchone()[0]
+        setUserEnabled(self.connection, auditorId, False)
+        createUser(self.connection, "auditor", "Replacement Auditor", "replacement password", firstName="Auditor")
+        with self.assertRaises(ValidationError):
+            createUser(self.connection, "auditor", "Auditor", "replacement password", firstName="Auditor")
         self.assertEqual(401, auditor.get("/api/session").status_code)
 
     def testProxyAuthorizationDoesNotReplaceBrowserLoginOrCsrf(self):
@@ -319,7 +328,7 @@ class OctoberTests(unittest.TestCase):
             url = re.sub(r"<[^>]+>", "1", str(rule))
             for method in rule.methods & {"POST", "PATCH", "PUT", "DELETE"}:
                 with self.subTest(route=url, method=method):
-                    self.assertEqual(400 if rule.endpoint in {"ledgers", "invitationDecision"} else 403, auditor.open(url, method=method, json={}).status_code)
+                    self.assertEqual(302 if rule.endpoint in {"completeProfile", "verifyCode", "registrationWelcome"} else 400 if rule.endpoint in {"ledgers", "invitationDecision", "resendCode"} else 403, auditor.open(url, method=method, json={}).status_code)
                     self.assertEqual(403, self.agent.open(url, method=method, json={}, headers=self.headers).status_code)
         for url in ["/api/backup", "/api/package", "/api/integration-secrets", "/api/pending"]:
             self.assertEqual(403, auditor.get(url).status_code)
@@ -658,7 +667,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 copiedPath = Path(self.directory.name) / "package-database.db"
                 copiedPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
-                self.assertIn('applicationVersion = "26.10.23"', archive.read("No-Part-Finance/packageApplication.py").decode())
+                self.assertIn('applicationVersion = "26.10.24"', archive.read("No-Part-Finance/packageApplication.py").decode())
                 self.assertIn("No-Part-Finance/users.py", archive.namelist())
                 self.assertIn("No-Part-Finance/openapi.json", archive.namelist())
             connection = connectDatabase(copiedPath)
@@ -675,7 +684,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 self.assertNotIn("No-Part-Finance/finance.db", archive.namelist())
                 self.assertFalse(any(self.secret.encode() in archive.read(name) for name in archive.namelist()))
-        self.assertEqual("26.10.23", applicationVersion)
+        self.assertEqual("26.10.24", applicationVersion)
 
     def testAuditorAndIntegrationSimulatorReadsNeverWrite(self):
         planId = createSimulatorPlan(self.connection, "Example Plan", "2026-10-01")
@@ -697,16 +706,16 @@ class UserManagementAndMigrationTests(unittest.TestCase):
             try:
                 for username in ["", "x" * 65, "bad\nname"]:
                     with self.assertRaises(ValidationError):
-                        createUser(connection, "owner", username, "valid password")
+                        createUser(connection, "owner", username, "valid password", firstName="Test")
                 for password in ["short", "x" * 129]:
                     with self.assertRaises(ValidationError):
-                        createUser(connection, "owner", "Owner", password)
-                createUser(connection, "owner", "  Straße  ", "  password α  ")
+                        createUser(connection, "owner", "Owner", password, firstName="Owner")
+                createUser(connection, "owner", "  Straße  ", "  password α  ", firstName="Straße")
                 self.assertEqual("Straße", connection.execute("SELECT username FROM users").fetchone()[0])
                 with self.assertRaises(ValidationError):
-                    createUser(connection, "auditor", "STRASSE", "valid password")
+                    createUser(connection, "auditor", "STRASSE", "valid password", firstName="STRASSE")
                 with self.assertRaises(ValidationError):
-                    createUser(connection, "owner", "Other", "valid password")
+                    createUser(connection, "owner", "Other", "valid password", firstName="Other")
             finally:
                 connection.close()
 
@@ -725,7 +734,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                     self.assertIn("startWindows.bat manage-users", setupText)
                     self.assertIn("./startLinux.sh manage-users", setupText)
                     self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-                with patch("users.input", side_effect=["y", "Owner", "y", "Auditor"]), patch("users.getpass.getpass", side_effect=["valid password", "valid password", "mismatch", "different"]), patch("builtins.print") as output:
+                with patch("users.input", side_effect=["y", "Owner", "Owner", "", "y", "Auditor", "Auditor", ""]), patch("users.getpass.getpass", side_effect=["valid password", "valid password", "mismatch", "different"]), patch("builtins.print") as output:
                     configureOnStartup(connection)
                 setupText = str(output.call_args_list)
                 self.assertIn("Your Owner is saved and can sign in", setupText)
@@ -737,13 +746,15 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
                 with connection:
                     connection.execute("DROP TRIGGER preserveOwnerMembership")
+                    connection.execute("DROP TRIGGER userEventsNoDELETE")
+                    connection.execute("DELETE FROM userEvents")
                     connection.execute("DELETE FROM users")
                 originalCreateUser = createUser
-                def failOptionalAuditor(connection, role, username, password):
+                def failOptionalAuditor(connection, role, username, password, firstName="", lastName=""):
                     if role == "auditor":
                         raise sqlite3.OperationalError("fixture write failure")
-                    return originalCreateUser(connection, role, username, password)
-                with patch("users.input", side_effect=["y", "Owner", "y", "Auditor"]), patch("users.getpass.getpass", return_value="valid password"), patch("users.createUser", side_effect=failOptionalAuditor), patch("builtins.print") as output:
+                    return originalCreateUser(connection, role, username, password, firstName, lastName)
+                with patch("users.input", side_effect=["y", "Owner", "Owner", "", "y", "Auditor", "Auditor", ""]), patch("users.getpass.getpass", return_value="valid password"), patch("users.createUser", side_effect=failOptionalAuditor), patch("builtins.print") as output:
                     configureOnStartup(connection)
                 self.assertIn("Your Owner is saved and can sign in", str(output.call_args_list))
                 self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
@@ -768,13 +779,13 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                     warnings.warn("Password input may be echoed", getpass.GetPassWarning)
                     self.fail("Unprotected password input must never proceed")
 
-                with patch("users.input", side_effect=["y", "Example Owner"]), patch("users.getpass.getpass", side_effect=unavailablePasswordInput), patch("builtins.print") as output:
+                with patch("users.input", side_effect=["y", "Example Owner", "Example", ""]), patch("users.getpass.getpass", side_effect=unavailablePasswordInput), patch("builtins.print") as output:
                     configureOnStartup(connection)
                 self.assertIn("Protected password input is unavailable", str(output.call_args_list))
                 self.assertIn("No Owner was created", str(output.call_args_list))
                 self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
-                with patch("users.input", side_effect=["y", "Example Owner", ""]), patch("users.getpass.getpass", return_value="  password α  ") as passwordInput, patch("builtins.print") as output:
+                with patch("users.input", side_effect=["y", "Example Owner", "Example", "", ""]), patch("users.getpass.getpass", return_value="  password α  ") as passwordInput, patch("builtins.print") as output:
                     configureOnStartup(connection)
                 setupText = str(output.call_args_list)
                 self.assertIn("8–128 characters", setupText)
@@ -789,12 +800,12 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 startupInput.assert_not_called()
                 output.assert_not_called()
 
-                with patch("users.input", side_effect=["3", "1", "Example Auditor"]), patch("users.getpass.getpass", side_effect=unavailablePasswordInput), patch("builtins.print") as output:
+                with patch("users.input", side_effect=["3", "1", "Example Auditor", "Example", ""]), patch("users.getpass.getpass", side_effect=unavailablePasswordInput), patch("builtins.print") as output:
                     manageUsers(path)
                 self.assertIn("User management closed", str(output.call_args_list))
                 self.assertIn("interactive Command Prompt or terminal", str(output.call_args_list))
                 self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
-                with patch("users.input", side_effect=["3", "1", "Example Auditor", "0"]), patch("users.getpass.getpass", return_value="auditor password"), patch("builtins.print"):
+                with patch("users.input", side_effect=["3", "1", "Example Auditor", "Example", "", "0"]), patch("users.getpass.getpass", return_value="auditor password"), patch("builtins.print"):
                     manageUsers(path)
                 self.assertEqual(302, signIn(client, "Example Auditor", "auditor password").status_code)
                 self.assertEqual(403, client.post("/api/accounts", json={}).status_code)
@@ -804,9 +815,9 @@ class UserManagementAndMigrationTests(unittest.TestCase):
     def testStartupExplainsBrowserAccessAfterSkippedOrCompletedSetup(self):
         scenarios = (
             ([""], []),
-            (["y", "Example Owner", ""], ["owner"]),
-            (["y", "Example Owner", "y", "Example Auditor"], ["auditor", "owner"]),
-            (["y", "Example Owner", KeyboardInterrupt()], ["owner"]),
+            (["y", "Example Owner", "Example", "", ""], ["owner"]),
+            (["y", "Example Owner", "Example", "", "y", "Example Auditor", "Example", ""], ["auditor", "owner"]),
+            (["y", "Example Owner", "Example", "", KeyboardInterrupt()], ["owner"]),
         )
         for responses, expectedRoles in scenarios:
             with self.subTest(expectedRoles=expectedRoles, interrupted=isinstance(responses[-1], KeyboardInterrupt)), tempfile.TemporaryDirectory() as directory:
@@ -837,7 +848,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
             initializeDatabase(path)
             connection = connectDatabase(path)
             try:
-                createUser(connection, "owner", "Migration Owner", "owner password")
+                createUser(connection, "owner", "Migration Owner", "owner password", firstName="Migration Owner")
                 cashId = createAccount(connection, "Migration Cash", "cash", openingBalance="100.00")
                 categoryId = createCategory(connection, "Migration Expense")
                 createTransaction(connection, cashId, "2026-09-30", "Existing ledger", categoryId, "10.00")
@@ -870,7 +881,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v27-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v28-*.db"))
             self.assertEqual(1, len(backups))
 
     def testMigrationPreservesEveryExistingTableAndBackup(self):
@@ -904,7 +915,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v27-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v28-*.db"))
             self.assertEqual(1, len(backups))
             backup = sqlite3.connect(backups[0])
             try:

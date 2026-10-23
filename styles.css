@@ -4,6 +4,8 @@
 [hidden] { display: none !important; }
 body { background: var(--background); color: var(--text); margin: 0; } header { align-items: center; border-bottom: 1px solid var(--border); display: grid; column-gap: 2rem; row-gap: .5rem; grid-template-columns: auto auto 1fr; padding: .9rem 1.25rem .5rem; } .brandRow { align-items: center; display: flex; white-space: nowrap; } .settingsLink { justify-self: end; } nav { display: flex; gap: 1rem; } a { color: var(--link); } a[aria-current="page"] { color: var(--text); font-weight: 600; text-decoration: none; }
 .applicationVersion { font-weight: 600; }
+#signedInAs { min-width: 0; overflow-wrap: anywhere; }
+#registrationDialog .dialogActions { justify-content: space-between; }
 .emptyState { border: 1px solid var(--border); padding: .75rem; }
 .utilizationBadge { border-radius: 2px; display: inline-block; font-size: .75rem; font-weight: 500; padding: .08rem .3rem; white-space: nowrap; }
 .creditUtilizationTotal { align-items: center; display: grid; font-size: 1rem; grid-template-columns: 1fr auto; padding: .55rem .5rem 0; }
@@ -99,6 +101,7 @@ dialog { background: var(--background); border: 1px solid var(--input-border); c
   .filterForm .descriptionFilter { flex: 0 1 auto; }
   header { gap: .75rem; grid-template-columns: 1fr auto; }
   #mainNavigation { flex-wrap: wrap; grid-column: 1 / -1; grid-row: 2; row-gap: .5rem; }
+  .settingsIdentity { align-items: flex-start; flex-direction: column; }
   .settingsNavigation { flex-wrap: wrap; }
   .settingsNavigation a { flex: none; white-space: nowrap; }
   .headingRow { align-items: flex-start; flex-direction: column; }

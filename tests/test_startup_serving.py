@@ -46,6 +46,10 @@ class StartupServingTests(unittest.TestCase):
                     return "y"
                 if prompt.startswith("Owner username"):
                     return "Example Owner"
+                if prompt.startswith("First name"):
+                    return "Example"
+                if prompt.startswith("Last name"):
+                    return ""
                 self.assertTrue(prompt.startswith("Create an optional"))
                 # The Owner is already committed while optional setup awaits input.
                 try:
@@ -119,7 +123,7 @@ class StartupServingTests(unittest.TestCase):
                 connection = connectDatabase(databasePath)
                 try:
                     if ownerConfigured:
-                        createUser(connection, "owner", "Example Owner", "startup password")
+                        createUser(connection, "owner", "Example Owner", "startup password", firstName="Example Owner")
                     beforeStartup = "\n".join(connection.iterdump())
                 finally:
                     connection.close()

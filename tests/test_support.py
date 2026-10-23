@@ -51,7 +51,7 @@ def ownerClient(application, copiedDatabase=False):
     try:
         owner = connection.execute("SELECT username FROM scopedusers WHERE role = 'owner'").fetchone()
         if not owner:
-            createUser(connection, "owner", "Test Owner", "test-owner-password")
+            createUser(connection, "owner", "Test Owner", "test-owner-password", firstName="Test Owner")
         elif copiedDatabase:
             # Only disposable integration copies receive a known test password.
             # Preserve the copied identity and never require the source Owner's credentials.
@@ -144,10 +144,24 @@ def useHistoricalSchema21(connection):
 
 
 def snapshotWithoutLoginTime(connection):
-    """Financial/state assertions exclude the separately tested sign-in timestamp."""
-    import re
-    hasLoginTime = any(row[1] == "lastLoginAt" for row in connection.execute("PRAGMA table_info(users)"))
+    """Exclude only the recorded login timestamp, independent of schema column order."""
     statements = list(connection.iterdump())
-    if hasLoginTime:
-        statements = [re.sub(r",(?:NULL|'[^']*')(?=,[01](?:,[01])?\);$)", ",NULL", statement) if statement.startswith('INSERT INTO "users"') else statement for statement in statements]
+    if any(row[1] == "lastLoginAt" for row in connection.execute("PRAGMA table_info(users)")):
+        loginTimes = [row[0] for row in connection.execute("SELECT lastLoginAt FROM users WHERE lastLoginAt IS NOT NULL")]
+        for index, statement in enumerate(statements):
+            if statement.startswith('INSERT INTO "users"'):
+                for timestamp in loginTimes:
+                    statement = statement.replace("'" + timestamp.replace("'", "''") + "'", "NULL")
+                statements[index] = statement
     return statements
+
+
+def createPreProfileOwner(connection, username, password, **ignored):
+    """Explicit historical identity fixture, before profile fields existed."""
+    from users import passwordHash
+    from database import bindInitialLedger
+    bindInitialLedger(connection)
+    with connection:
+        userId = connection.execute("INSERT INTO users (username, usernameKey, passwordHash) VALUES (?, ?, ?)", (username, username.casefold(), passwordHash(password))).lastrowid
+        connection.execute("INSERT INTO ledgerAccess (userId, ledgerId, role) VALUES (?, currentLedgerId(), 'owner')", (userId,))
+    return userId

@@ -25,8 +25,8 @@ class LedgerFoundationTests(unittest.TestCase):
         self.connection = ledger.connectInitialLedgerDatabase(self.path)
         self.addCleanup(self.connection.close)
         self.firstLedger = self.connection.ledgerId
-        self.ownerId = createUser(self.connection, "owner", "Owner", "owner password")
-        self.auditorId = createUser(self.connection, "auditor", "Auditor", "auditor password")
+        self.ownerId = createUser(self.connection, "owner", "Owner", "owner password", firstName="Owner")
+        self.auditorId = createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
         self.account = ledger.createAccount(self.connection, "Shared name", "cash", openingBalance="100")
         self.category = ledger.createCategory(self.connection, "Shared category")
         self.transaction = ledger.createTransaction(self.connection, self.account, "2026-10-20", "First ledger", self.category, "13")
@@ -36,7 +36,7 @@ class LedgerFoundationTests(unittest.TestCase):
         self.secondLedger = str(uuid4())
         with self.connection:
             self.connection.execute("INSERT INTO ledgers VALUES (?, ?)", (self.secondLedger, "Foreign ledger marker"))
-            self.foreignOwner = self.connection.execute("INSERT INTO users (username, usernameKey, passwordHash) VALUES ('Other', 'other', ?)", (passwordHash("other password"),)).lastrowid
+            self.foreignOwner = self.connection.execute("INSERT INTO users (username, usernameKey, passwordHash, firstName) VALUES ('Other', 'other', ?, 'Test')", (passwordHash("other password"),)).lastrowid
             self.connection.execute("INSERT INTO ledgerAccess (userId, ledgerId, role) VALUES (?, ?, 'owner')", (self.foreignOwner, self.secondLedger))
         ledger.bindLedger(self.connection, self.secondLedger)
         ledger.createExternalSystemAccount(self.connection)
@@ -290,7 +290,7 @@ class LedgerMigrationTests(unittest.TestCase):
             try:
                 barrier.wait(timeout=5)
                 try:
-                    createUser(connection, "auditor", f"Auditor {index}", "auditor password")
+                    createUser(connection, "auditor", f"Auditor {index}", "auditor password", firstName="Test")
                     return "created"
                 except ledger.ValidationError:
                     return "rejected"

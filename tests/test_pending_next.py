@@ -24,8 +24,8 @@ class PendingNextTests(unittest.TestCase):
         self.backupsPath.mkdir()
         ledger.initializeDatabase(self.path)
         self.connection = connectDatabase(self.path)
-        createUser(self.connection, "owner", "Owner", "owner password")
-        createUser(self.connection, "auditor", "Auditor", "auditor password")
+        createUser(self.connection, "owner", "Owner", "owner password", firstName="Owner")
+        createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
         self.cash = ledger.createAccount(self.connection, "Example Cash", "cash", openingBalance="100.00")
         self.card = ledger.createAccount(self.connection, "Example Card", "credit", "Credit Card", openingBalance="20.00")
         self.expense = ledger.createCategory(self.connection, "Example Expense")
@@ -163,7 +163,7 @@ class PendingNextTests(unittest.TestCase):
     def testDocumentedRequestsVersionAndOwnerOnlyContract(self):
         from packageApplication import applicationVersion
         contract = self.owner.get("/openapi.json").get_json()
-        self.assertEqual("26.10.23", applicationVersion)
+        self.assertEqual("26.10.24", applicationVersion)
         self.assertEqual(applicationVersion, contract["info"]["version"])
         body = contract["paths"]["/api/integration/submissions"]["post"]["requestBody"]["content"]["application/json"]
         shapes = body["schema"]["oneOf"]
@@ -446,7 +446,7 @@ class PendingNextTests(unittest.TestCase):
                 cashId = connection.execute("INSERT INTO accounts (name, accountClass, balanceOffsetCents, displayOrder) VALUES ('Historical Cash', 'cash', 12345, 77)").lastrowid
                 categoryId = connection.execute("INSERT INTO categories (name, reportingRole) VALUES ('Historical Expense', 'expense')").lastrowid
                 connection.execute("INSERT INTO transactions (id, accountId, date, description, amountCents, categoryId, pinned) VALUES (42, ?, '2020-01-01', 'Historical purchase', -123, ?, 1)", (cashId, categoryId))
-            createUser(connection, "owner", "Historical Owner", "owner password")
+            createUser(connection, "owner", "Historical Owner", "owner password", firstName="Historical Owner")
             secretId = ledger.createIntegrationSecret(connection, "Historical Agent")
             content = json.dumps({"submissionId":"original", "date":"2020-01-01", "accountId":cashId, "categoryId":categoryId, "description":"Original", "amount":"5.00"}, sort_keys=True)
             corrected = json.dumps({"date":"2020-01-02", "accountId":cashId, "categoryId":categoryId, "description":"Saved correction", "amount":"-2.00"}, sort_keys=True)
@@ -472,12 +472,12 @@ class PendingNextTests(unittest.TestCase):
                 self.assertEqual(0, connection.execute("SELECT SUM(pinnedForSelection) FROM accounts").fetchone()[0])
                 self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
-                self.assertEqual(27, connection.execute("PRAGMA user_version").fetchone()[0])
+                self.assertEqual(28, connection.execute("PRAGMA user_version").fetchone()[0])
                 created = ledger.createTransaction(connection, cashId, "2026-10-02", "New event", categoryId, "1.00")
                 self.assertGreater(created, 42)
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v20-to-v27-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v20-to-v28-*.db"))
             self.assertEqual(1, len(backups))
             backup = sqlite3.connect(backups[0])
             try:
@@ -855,7 +855,7 @@ class PendingNextTests(unittest.TestCase):
     def testIntegrationPendingPublishedContractAndExamples(self):
         from packageApplication import applicationVersion
         contract = self.owner.get("/openapi.json").get_json()
-        self.assertEqual("26.10.23", applicationVersion)
+        self.assertEqual("26.10.24", applicationVersion)
         self.assertEqual(applicationVersion, contract["info"]["version"])
         pending = contract["paths"]["/api/integration/pending"]["get"]
         update = contract["paths"]["/api/integration/submissions/{proposalId}"]["put"]

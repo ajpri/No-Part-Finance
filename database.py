@@ -19,7 +19,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-schemaVersion = 27
+schemaVersion = 28
 
 
 class ValidationError(ValueError):
@@ -334,6 +334,8 @@ def initializeDatabase(databasePath):
             migrateToVersion26(connection)
         if currentVersion < 27:
             migrateToVersion27(connection)
+        if currentVersion < 28 <= schemaVersion:
+            migrateToVersion28(connection)
         connection.execute(f"PRAGMA user_version = {schemaVersion}")
         connection.commit()
         foreignKeyFailure = connection.execute("PRAGMA foreign_key_check").fetchone()
@@ -3394,20 +3396,35 @@ class LedgerConnection(sqlite3.Connection):
             self.auditOperation = str(uuid4())
         return self.auditOperation
 
+    def flushUserLogs(self):
+        messages = getattr(self, "pendingUserLogs", [])
+        self.pendingUserLogs = []
+        logs = getattr(self, "operationalLogs", None)
+        if logs:
+            for message in messages:
+                logs.write("userManagement", message)
+
     def __exit__(self, *arguments):
         try:
-            return super().__exit__(*arguments)
+            result = super().__exit__(*arguments)
+            if arguments[0] is None:
+                self.flushUserLogs()
+            return result
         finally:
+            self.pendingUserLogs = []
             self.auditOperation = None
 
     def commit(self):
         try:
-            return super().commit()
+            result = super().commit()
+            self.flushUserLogs()
+            return result
         finally:
             self.auditOperation = None
 
     def rollback(self):
         try:
+            self.pendingUserLogs = []
             return super().rollback()
         finally:
             self.auditOperation = None
@@ -3696,17 +3713,19 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
             userIds = [row["userId"] for row in memberships]
             destination = sqlite3.connect(destinationPath)
             definitions = snapshot.execute("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type = 'table' DESC").fetchall()
-            allowedTables = (*ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents", "sharingInvitations", "invitationAttempts")
+            allowedTables = (*ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents", "sharingInvitations", "invitationAttempts", "userEvents", "verificationChallenges", "verificationState", "verificationSendAttempts", "registrationAttempts")
             for definition in definitions:
                 if definition["type"] == "table" and definition["name"] in allowedTables:
                     destination.execute(definition["sql"])
             for table in allowedTables:
                 # Invitation recipients have not consented to membership in the copy.
                 # Keep these tables empty, but retain their schema for standalone startup.
-                if table in {"sharingInvitations", "invitationAttempts"}:
+                if table in {"sharingInvitations", "invitationAttempts", "registrationAttempts"}:
                     continue
                 if table == "users":
                     rows = snapshot.execute("SELECT * FROM users WHERE id IN (SELECT userId FROM ledgerAccess WHERE ledgerId = ?)", (ledgerId,)).fetchall()
+                elif table in {"userEvents", "verificationChallenges", "verificationState", "verificationSendAttempts"}:
+                    rows = snapshot.execute(f"SELECT * FROM {table} WHERE userId IN (SELECT userId FROM ledgerAccess WHERE ledgerId = ?)", (ledgerId,)).fetchall()
                 else:
                     column = "id" if table == "ledgers" else "ledgerId"
                     rows = snapshot.execute(f"SELECT * FROM {table} WHERE {column} = ?", (ledgerId,)).fetchall()
@@ -4240,3 +4259,38 @@ def changeSharingAccess(connection, userId, role=None, revoke=False):
             return
         connection.execute("UPDATE ledgerAccess SET role = ?, enabled = ? WHERE ledgerId = ? AND userId = ?", (after["role"], int(after["accessEnabled"]), ledgerId, userId))
         recordSharingEvent(connection, ledgerId, "access-revoked" if revoke else "role-changed", "ledgerAccess", userId, before, after)
+
+
+def migrateToVersion28(connection):
+    """Account identity/challenge state is separate from every financial ledger."""
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for definition in (
+            "firstName TEXT NOT NULL DEFAULT ''",
+            "lastName TEXT NOT NULL DEFAULT ''",
+            "verificationStatus TEXT NOT NULL DEFAULT 'accepted' CHECK(verificationStatus IN ('accepted','pending'))",
+            "acceptanceMethod TEXT NOT NULL DEFAULT 'existing'",
+            "registrationCreatedAt INTEGER",
+            "registrationExpiresAt INTEGER",
+            "registrationExpired INTEGER NOT NULL DEFAULT 0 CHECK(registrationExpired IN (0,1))",
+        ):
+            connection.execute("ALTER TABLE users ADD COLUMN " + definition)
+        connection.execute("""CREATE TABLE userEvents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, userId INTEGER NOT NULL REFERENCES users(id),
+            changedAt TEXT NOT NULL, actorKind TEXT NOT NULL, actorId TEXT NOT NULL,
+            actorLabel TEXT NOT NULL, action TEXT NOT NULL, beforeValues TEXT, afterValues TEXT)""")
+        for action in ("UPDATE", "DELETE"):
+            connection.execute(f"CREATE TRIGGER userEventsNo{action} BEFORE {action} ON userEvents BEGIN SELECT RAISE(ABORT, 'User events are append-only'); END")
+        connection.execute("""CREATE TABLE verificationChallenges (
+            userId INTEGER PRIMARY KEY REFERENCES users(id), purpose TEXT NOT NULL CHECK(purpose IN ('registration','migration')),
+            address TEXT NOT NULL, verifier TEXT NOT NULL, issuedAt INTEGER NOT NULL,
+            expiresAt INTEGER NOT NULL, consumedAt INTEGER, firstName TEXT NOT NULL, lastName TEXT NOT NULL)""")
+        connection.execute("""CREATE TABLE verificationState (
+            userId INTEGER PRIMARY KEY REFERENCES users(id), failedAttempts INTEGER NOT NULL DEFAULT 0,
+            cooldownUntil INTEGER NOT NULL DEFAULT 0)""")
+        connection.execute("CREATE TABLE verificationSendAttempts (userId INTEGER NOT NULL REFERENCES users(id), address TEXT NOT NULL, attemptedAt INTEGER NOT NULL)")
+        connection.execute("CREATE INDEX verificationSendUserTime ON verificationSendAttempts(userId, attemptedAt)")
+        connection.execute("CREATE INDEX verificationSendAddressTime ON verificationSendAttempts(address, attemptedAt)")
+        connection.execute("CREATE TABLE registrationAttempts (address TEXT NOT NULL, attemptedAt INTEGER NOT NULL)")
+        connection.execute("CREATE INDEX registrationAddressTime ON registrationAttempts(address, attemptedAt)")
+        connection.execute("PRAGMA user_version = 28")

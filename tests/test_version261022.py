@@ -25,11 +25,11 @@ class UserProvisioningTests(unittest.TestCase):
         ledger.initializeDatabase(self.path)
         self.connection = ledger.connectDatabase(self.path)
         self.addCleanup(self.connection.close)
-        self.owner = createOwner(self.connection, "Owner", "owner password")
+        self.owner = createOwner(self.connection, "Owner", "owner password", firstName="Owner")
         self.firstLedger = self.connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (self.owner,)).fetchone()[0]
         ledger.bindLedger(self.connection, self.firstLedger)
-        self.auditor = createUser(self.connection, "auditor", "Auditor", "auditor password")
-        self.otherAuditor = createUser(self.connection, "auditor", "Other Auditor", "auditor password")
+        self.auditor = createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
+        self.otherAuditor = createUser(self.connection, "auditor", "Other Auditor", "auditor password", firstName="Other Auditor")
         self.application = createApp(self.path)
 
     def login(self, username="Owner", password="owner password", client=None):
@@ -118,9 +118,9 @@ class UserProvisioningTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "synthetic planning migration failure"):
                 ledger.initializeDatabase(self.path)
         self.assertEqual(beforeDump, list(self.connection.iterdump()))
-        with patch.object(ledger, "migrateToVersion27"):
+        with patch.object(ledger, "migrateToVersion27"), patch.object(ledger, "migrateToVersion28"):
             ledger.initializeDatabase(self.path)
-        self.assertEqual(27, self.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(28, self.connection.execute("PRAGMA user_version").fetchone()[0])
         for table, recordedRows in beforeRows.items():
             self.assertEqual(recordedRows, [tuple(row) for row in self.connection.execute(f"SELECT * FROM {table}")], table)
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'auditsimulator*'").fetchone()[0])
@@ -132,7 +132,7 @@ class UserProvisioningTests(unittest.TestCase):
 
     def testProvisioningPreservesInitialAndCreatesIndependentLedger(self):
         account = ledger.createAccount(self.connection, "Local", "cash", openingBalance="12.34")
-        secondOwner = createOwner(self.connection, "Second", "second password")
+        secondOwner = createOwner(self.connection, "Second", "second password", firstName="Second")
         secondLedger = self.connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (secondOwner,)).fetchone()[0]
         self.assertNotEqual(self.firstLedger, secondLedger)
         self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM auditEvents WHERE ledgerId = ? AND recordType = 'ledgers' AND action = 'create'", (secondLedger,)).fetchone()[0])
@@ -151,7 +151,7 @@ class UserProvisioningTests(unittest.TestCase):
         try:
             originalLedger = initialConnection.ledgerId
             existingAccount = ledger.createAccount(initialConnection, "Existing history", "cash", openingBalance="25")
-            initialOwner = createOwner(initialConnection, "Initial", "owner password")
+            initialOwner = createOwner(initialConnection, "Initial", "owner password", firstName="Initial")
             self.assertEqual([(originalLedger,)], [tuple(row) for row in initialConnection.execute("SELECT id FROM ledgers")])
             self.assertEqual(originalLedger, initialConnection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (initialOwner,)).fetchone()[0])
             self.assertEqual(2500, initialConnection.execute("SELECT balanceOffsetCents FROM scopedaccounts WHERE id = ?", (existingAccount,)).fetchone()[0])
@@ -163,7 +163,7 @@ class UserProvisioningTests(unittest.TestCase):
         self.connection.execute("CREATE TRIGGER failAudit BEFORE INSERT ON auditEvents BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
         baseline = list(self.connection.iterdump())
         for operation in (
-            lambda: createOwner(self.connection, "Second", "second password"),
+            lambda: createOwner(self.connection, "Second", "second password", firstName="Second"),
             lambda: renameUser(self.connection, self.auditor, "Renamed"),
             lambda: setAuditorAccess(self.connection, self.auditor, False),
             lambda: resetPassword(self.connection, self.owner, "new password"),
@@ -194,7 +194,7 @@ class UserProvisioningTests(unittest.TestCase):
         renameUser(self.connection, self.auditor, "Straße")
         setAuditorAccess(self.connection, self.auditor, False)
         for action in (lambda: renameUser(self.connection, self.otherAuditor, "STRASSE"),
-                       lambda: createOwner(self.connection, "STRASSE", "owner password")):
+                       lambda: createOwner(self.connection, "STRASSE", "owner password", firstName="STRASSE")):
             with self.assertRaises(ledger.ValidationError):
                 action()
         self.assertEqual(ledgerName, self.connection.execute("SELECT name FROM ledgers WHERE id = ?", (self.firstLedger,)).fetchone()[0])
@@ -207,7 +207,7 @@ class UserProvisioningTests(unittest.TestCase):
 
     def testListSearchPaginationAndExplicitSelection(self):
         for index in range(21):
-            createUser(self.connection, "auditor", f"Person {index:02}", "auditor password")
+            createUser(self.connection, "auditor", f"Person {index:02}", "auditor password", firstName="Test")
         with patch("users.input", side_effect=["n", "1"]), patch("builtins.print") as output:
             selected = selectRecord(self.connection, "users")
         self.assertIn("page 2 of 2", str(output.call_args_list))
@@ -220,7 +220,7 @@ class UserProvisioningTests(unittest.TestCase):
         self.assertIn("No matches", str(output.call_args_list))
 
     def testCliCreationAndUserSelection(self):
-        responses = ["2", "Second", "3", "2", "Second Auditor", "1", "s", "Second Auditor", "1", "1", "Renamed Auditor", "0", "0"]
+        responses = ["2", "Second", "Second", "", "3", "2", "Second Auditor", "Second", "", "1", "s", "Second Auditor", "1", "1", "Renamed Auditor", "0", "0"]
         with patch("users.input", side_effect=responses), patch("users.getpass.getpass", return_value="valid password"), patch("builtins.print") as output:
             manageUsers(self.path)
         self.assertIn("User management does not start the server", str(output.call_args_list))
@@ -228,10 +228,10 @@ class UserProvisioningTests(unittest.TestCase):
         self.assertNotIn("valid password", str(output.call_args_list))
 
     def testMultipleLedgerBrowserIntegrationAndPortableDownloads(self):
-        secondOwner = createOwner(self.connection, "Second", "second password")
+        secondOwner = createOwner(self.connection, "Second", "second password", firstName="Second")
         secondLedger = self.connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (secondOwner,)).fetchone()[0]
         ledger.bindLedger(self.connection, secondLedger)
-        createUser(self.connection, "auditor", "Second Auditor", "auditor password")
+        createUser(self.connection, "auditor", "Second Auditor", "auditor password", firstName="Second Auditor")
         foreignAccount = ledger.createAccount(self.connection, "FOREIGN marker", "cash")
         foreignCategory = ledger.createCategory(self.connection, "FOREIGN category")
         secretId = ledger.createIntegrationSecret(self.connection, "Second agent")
@@ -288,7 +288,7 @@ class UserProvisioningTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "synthetic migration failure"):
                 ledger.initializeDatabase(self.path)
         self.assertEqual(before, list(self.connection.iterdump()))
-        with patch.object(ledger, "migrateToVersion27"):
+        with patch.object(ledger, "migrateToVersion27"), patch.object(ledger, "migrateToVersion28"):
             ledger.initializeDatabase(self.path)
         self.assertEqual(3, self.connection.execute("SELECT COUNT(*) FROM ledgerAccess WHERE enabled = 1").fetchone()[0])
         self.assertEqual([], self.connection.execute("PRAGMA foreign_key_check").fetchall())
@@ -382,7 +382,7 @@ class UserProvisioningTests(unittest.TestCase):
     def testAuditPaginationRolesIsolationAndReadOnly(self):
         for index in range(55):
             ledger.createCategory(self.connection, f"Category {index}")
-        secondOwner = createOwner(self.connection, "Second", "second password")
+        secondOwner = createOwner(self.connection, "Second", "second password", firstName="Second")
         secondLedger = self.connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (secondOwner,)).fetchone()[0]
         ledger.bindLedger(self.connection, secondLedger)
         ledger.createCategory(self.connection, "FOREIGN secret category")
@@ -468,7 +468,7 @@ class UserProvisioningTests(unittest.TestCase):
     def testLegacyAuditCategoryFallbackUsesCurrentLedgerAndPreservesRecordedContext(self):
         expense = ledger.createCategory(self.connection, "Current Expense")
         income = ledger.createCategory(self.connection, "Current Income", reportingRole="income")
-        foreignOwner = createOwner(self.connection, "Foreign Owner", "owner password")
+        foreignOwner = createOwner(self.connection, "Foreign Owner", "owner password", firstName="Foreign Owner")
         foreignLedger = self.connection.execute("SELECT ledgerId FROM ledgerAccess WHERE userId = ?", (foreignOwner,)).fetchone()[0]
         ledger.bindLedger(self.connection, foreignLedger)
         foreignCategory = ledger.createCategory(self.connection, "Private Foreign Category")

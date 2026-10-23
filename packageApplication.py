@@ -8,16 +8,23 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from platformConfiguration import configurationSample
 
-applicationVersion = "26.10.23"
+
+applicationVersion = "26.10.24"
 archiveRootName = "No-Part-Finance"
 includedFiles = (
     "app.py",
     "users.py",
+    "platformConfiguration.py",
+    "common-passwords.txt",
+    "authentication.html",
+    "authentication.js",
     "docs.html",
     "openapi.json",
     "tests/__init__.py",
     "tests/test_version261023.py",
+    "tests/test_version261024.py",
     "tests/test_version261022.py",
     "tests/test_release_2610.py",
     "tests/test_pending_next.py",
@@ -145,7 +152,7 @@ def validateIncludedFiles(repositoryPath):
         raise PackagingError(f"Required package file is absent: {missing[0]}")
 
 
-def createApplicationPackage(repositoryPath=None, databasePath=None, outputPath=None, createdAt=None, includeDatabase=True):
+def createApplicationPackage(repositoryPath=None, databasePath=None, outputPath=None, createdAt=None, includeDatabase=True, includeServerFiles=True):
     repositoryPath = Path(repositoryPath or Path(__file__).resolve().parent).resolve()
     databasePath = Path(databasePath or repositoryPath / "finance.db").resolve()
     createdAt = createdAt or datetime.now().astimezone()
@@ -174,6 +181,19 @@ def createApplicationPackage(repositoryPath=None, databasePath=None, outputPath=
                         archive.writestr(fileDetails, sourcePath.read_bytes())
                     else:
                         archive.write(sourcePath, archiveName)
+                # Always synthesize safe defaults, even when the source sample is absent.
+                archive.writestr(f"{archiveRootName}/platform.conf.sample", configurationSample())
+                if includeServerFiles:
+                    configurationPath = repositoryPath / "platform.conf"
+                    if configurationPath.is_file() and not configurationPath.is_symlink():
+                        archive.write(configurationPath, f"{archiveRootName}/platform.conf")
+                    logsPath = repositoryPath / "logs"
+                    if logsPath.is_dir() and not logsPath.is_symlink():
+                        for logName in ("startup", "email", "userManagement"):
+                            for logPath in sorted(logsPath.glob(f"{logName}.log*")):
+                                suffix = logPath.name.removeprefix(f"{logName}.log")
+                                if logPath.is_file() and not logPath.is_symlink() and (not suffix or suffix.startswith(".") and suffix[1:].isdecimal()):
+                                    archive.write(logPath, f"{archiveRootName}/logs/{logPath.name}")
                 if includeDatabase:
                     archive.write(verifiedDatabasePath, f"{archiveRootName}/finance.db")
             with temporaryArchivePath.open("rb") as sourceArchive, archivePath.open("xb") as finalArchive:
@@ -211,7 +231,7 @@ def argumentParser():
     parser.epilog = (
         "The ZIP includes maintained application files, documentation, tests, launchers, and a verified "
         "finance.db by default, including every ledger, User, membership, password hash, integration secret, invitation, and audit record. WARNING: the default package contains your complete unencrypted financial database and recoverable credentials. Browser database downloads are selected-ledger, credential-free copies; they are not equivalent to this full-installation package. "
-        "Use --no-db for an application-only package. Examples: packageWindows.bat --no-db "
+        "CLI packages also include platform.conf and operational logs when present, even with --no-db; these can contain SMTP credentials and private account activity. Keep CLI packages private. Browser packages always omit runtime configuration and logs and include only the safe default sample. Use the browser application-only download for public distribution. Use --no-db for an application-only package. Examples: packageWindows.bat --no-db "
         "--output D:\\Packages | ./packageLinux.sh --no-db --output /srv/packages"
     )
     return parser

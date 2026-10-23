@@ -1648,6 +1648,7 @@ function useSettingsFragmentNavigation(event) {
 
 async function start() {
   browserSession = await api("/api/session");
+  document.querySelector("#signedInAs").textContent = `Signed in as: ${[browserSession.firstName, browserSession.lastName].filter(Boolean).join(" ")}`;
   document.body.dataset.role = browserSession.role;
   document.querySelector("#auditorBanner").hidden = browserSession.role !== "auditor";
   if (browserSession.role === "auditor") applyAuditorControls();
@@ -1668,6 +1669,10 @@ async function start() {
   }
   await initializeLedgerNavigation();
   await loadRecipientInvitations();
+  if (new URLSearchParams(location.search).get("createLedger") === "1") {
+    document.querySelector("[data-create-ledger]").click();
+    const cleanUrl = new URL(location.href); cleanUrl.searchParams.delete("createLedger"); history.replaceState({}, "", cleanUrl);
+  }
   if (!browserSession.ledgerId) {
     for (const section of document.querySelectorAll("main > section")) section.hidden = !["noLedgerPage", "recipientInvitations"].includes(section.id);
     document.querySelector("#invitationBanner").hidden = true;
@@ -2391,6 +2396,7 @@ async function loadRecipientInvitations() {
 for (const button of document.querySelectorAll("[data-create-ledger]")) button.addEventListener("click", () => {
   const form = document.querySelector("#createLedgerForm"); form.reset(); showFormError(form, {message: ""});
   document.querySelector("#newLedgerName").disabled = false;
+  document.querySelector("#newLedgerName").value = browserSession.defaultLedgerName || "";
   document.querySelector("#createLedgerDialog").showModal();
 });
 document.querySelector("#createLedgerForm").addEventListener("submit", async (event) => {

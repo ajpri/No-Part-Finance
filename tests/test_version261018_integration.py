@@ -20,7 +20,7 @@ class IntegrationApiFixture(unittest.TestCase):
         self.backupsPath.mkdir()
         self.application = createApp(self.databasePath)
         self.connection = connectDatabase(self.databasePath)
-        createUser(self.connection, "owner", "Owner", "owner password")
+        createUser(self.connection, "owner", "Owner", "owner password", firstName="Owner")
         self.cash = ledger.createAccount(self.connection, "Example Cash", "cash")
         self.expense = ledger.createCategory(self.connection, "Example Expense")
         self.integrationId = ledger.createIntegrationSecret(self.connection, "Example Agent")
@@ -112,7 +112,7 @@ class IntegrationRequestSizeTests(IntegrationApiFixture):
 class IntegrationHistoryFilterTests(IntegrationApiFixture):
     def setUp(self):
         super().setUp()
-        createUser(self.connection, "auditor", "Auditor", "auditor password")
+        createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
         self.otherCash = ledger.createAccount(self.connection, "Other Cash", "cash")
         self.purchase = ledger.createTransaction(self.connection, self.cash, "2026-10-01", "Example purchase", self.expense, "10.00")
         self.refund = ledger.createTransaction(self.connection, self.cash, "2026-10-02", "Example refund", self.expense, "-2.00")

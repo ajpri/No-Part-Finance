@@ -16,10 +16,16 @@ from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.serving import make_server
 
 from packageApplication import PackagingError, applicationVersion, createApplicationPackage
-from users import configureOnStartup, manageUsers, check_password_hash, passwordHash
+from users import (
+    configureOnStartup, manageUsers, check_password_hash, passwordHash,
+    defaultLedgerName, configuredUsername, validateProfile, identityNeedsProfile, emailLikeUsername,
+    registrationIsExpired, registerUser, admitRegistration, acceptPendingForPolicy,
+    saveIdentity, issueVerification, verifyIdentityCode, IdentityRateLimit,
+)
+from platformConfiguration import loadConfiguration, synchronizeConfigurationFiles, OperationalLogs, TrustedProxy, ConfigurationError
 
 from database import (
-    ValidationError,
+    ValidationError, testDatabaseGuardEnabled,
     renameLedger, accessibleLedgers, createPersonalLedger, sharingAccessList,
     sendSharingInvitation, recipientInvitations, decideSharingInvitation,
     changeSharingAccess, InvitationRateLimit,
@@ -155,10 +161,26 @@ def accountEligibility(account):
     }
 
 
-def createApp(databasePathOverride=None):
-    app = Flask(__name__)
+def createApp(databasePathOverride=None, configurationDirectory=None):
+    app = Flask(__name__, static_folder=None)
     activeDatabasePath = Path(databasePathOverride or databasePath)
-    initializeDatabase(activeDatabasePath)
+    configurationDirectory = Path(configurationDirectory or (activeDatabasePath.parent if databasePathOverride or testDatabaseGuardEnabled else projectDirectory))
+    operationalLogs = OperationalLogs(configurationDirectory)
+    try:
+        configuration = loadConfiguration(configurationDirectory)
+        synchronizeConfigurationFiles(configurationDirectory, operationalLogs)
+    except ConfigurationError as error:
+        operationalLogs.write("startup", str(error))
+        raise
+    app.config["PLATFORM_CONFIGURATION"] = configuration
+    app.config["OPERATIONAL_LOGS"] = operationalLogs
+    app.wsgi_app = TrustedProxy(app.wsgi_app, configuration["trustedProxyAddresses"], operationalLogs)
+    try:
+        initializeDatabase(activeDatabasePath)
+    except Exception:
+        operationalLogs.write("startup", "Database setup or upgrade failed. The server was not started. Check the terminal and retain the verified backup for recovery.")
+        raise
+    operationalLogs.write("startup", f"No Part Finance {applicationVersion} initialized successfully. Database schema {schemaVersion} is ready.")
     app.config["DATABASE_PATH"] = str(activeDatabasePath)
     app.config["PACKAGE_OUTPUT_DIRECTORY"] = str(projectDirectory / "packages")
     app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
@@ -168,8 +190,47 @@ def createApp(databasePathOverride=None):
     authenticationLock = threading.RLock()
     dummyPasswordHash = passwordHash(secrets.token_urlsafe(32))
 
+    def identityPage(mode, message="", fields=None, status=200):
+        return render_template_string((projectDirectory / "authentication.html").read_text(),
+            mode=mode, title={"signIn": "Sign In", "register": "Register", "profile": "Complete account", "verify": "Verify email", "welcome": "Welcome"}.get(mode, "Setup"),
+            csrfToken=g.browserSession["csrfToken"] if g.browserSession else "",
+            registrationEnabled=configuration["allowWebRegistration"], version=applicationVersion,
+            message=message or "", fields=fields or {},
+            migrateUsername=bool(g.get("user") and configuration["enforceEmailUsernames"] and not emailLikeUsername(g.user["username"])),
+            migrationChallenge=bool(g.get("user") and getDatabase().execute("SELECT 1 FROM verificationChallenges WHERE userId = ? AND purpose = 'migration' AND consumedAt IS NULL", (g.user["id"],)).fetchone())), status
+
     def authenticationPage(message=None, csrfToken=None, status=200):
-        return render_template_string("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>No Part Finance — Sign In</title><meta name="theme-color" content="#202124"><meta name="apple-mobile-web-app-title" content="No Part Finance"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/pwa.webmanifest"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png"><script src="/theme.js"></script><link rel="stylesheet" href="/styles.css"></head><body><main class="signIn"><h1>No Part Finance</h1>{% if csrfToken %}<h2>Sign In</h2><form method="post" action="/sign-in"><input type="hidden" name="csrfToken" value="{{ csrfToken }}"><label>Username <input name="username" autocomplete="username" required maxlength="64"></label><label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="128"></label><p role="alert">{{ message or "" }}</p><button type="submit">Sign In</button></form>{% else %}<p>{{ message }}</p>{% endif %}</main><footer class="signInVersion">No Part Finance {{ version }}</footer></body></html>""", message=message, csrfToken=csrfToken, version=applicationVersion), status
+        return identityPage("signIn" if csrfToken else "unconfigured", message or "", status=status)
+
+    def establishSession(user, welcome=False, expiresAt=None):
+        now = time.time()
+        token = secrets.token_urlsafe(32)
+        with authenticationLock:
+            sessions.pop(request.cookies.get("npfSession"), None)
+            sessions[token] = {"userId": user["id"], "authVersion": user["authVersion"],
+                "expiresAt": expiresAt or now + 168 * 3600, "csrfToken": secrets.token_urlsafe(32),
+                "registrationWelcome": welcome}
+        return token
+
+    def identityDestination(user, browserSession=None):
+        if user["verificationStatus"] == "pending":
+            return "/verify"
+        if identityNeedsProfile(user, configuration):
+            return "/complete-profile"
+        if browserSession and browserSession.get("registrationWelcome"):
+            return "/welcome"
+        return "/"
+
+    def finishIdentityChange(destination=None):
+        user = getDatabase().execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+        if not user or not user["enabled"] or user["passwordSetupRequired"] or user["authVersion"] != g.user["authVersion"] + 1:
+            raise ValidationError("Your account changed. Sign in again.")
+        # Never extend the fixed login lifetime while upgrading a restricted session.
+        with authenticationLock:
+            for oldToken in [key for key, value in sessions.items() if value.get("userId") == user["id"] and key != request.cookies.get("npfSession")]:
+                del sessions[oldToken]
+            token = establishSession(user, g.browserSession.get("registrationWelcome", False), g.browserSession["expiresAt"])
+        return setSessionCookie(redirect(destination or identityDestination(user, sessions[token])), token, max(1, int(sessions[token]["expiresAt"] - time.time())))
 
     def setSessionCookie(response, token, maxAge):
         response.set_cookie("npfSession", token, max_age=maxAge, httponly=True, secure=request.is_secure, samesite="Lax")
@@ -184,7 +245,7 @@ def createApp(databasePathOverride=None):
         g.user = None
         g.integration = None
         g.browserSession = None
-        if request.endpoint in {"robots", "styles", "javascript", "apiDocumentation", "openApiDocument", "webAppManifest", "themeJavascript", "pwaIcon"} or request.endpoint is None:
+        if request.endpoint in {"robots", "styles", "javascript", "apiDocumentation", "openApiDocument", "webAppManifest", "themeJavascript", "pwaIcon", "authenticationJavascript"} or request.endpoint is None:
             return None
         connection = getDatabase()
         if not connection.execute("SELECT 1 FROM ledgerAccess WHERE role = 'owner'").fetchone():
@@ -214,8 +275,8 @@ def createApp(databasePathOverride=None):
             g.browserSession = sessions.get(token)
         g.accessibleLedgers = []
         if g.browserSession and g.browserSession.get("userId"):
-            user = connection.execute("SELECT id, username, authVersion, enabled AS loginEnabled, passwordSetupRequired FROM users WHERE id = ?", (g.browserSession["userId"],)).fetchone()
-            if user and user["loginEnabled"] and not user["passwordSetupRequired"] and user["authVersion"] == g.browserSession["authVersion"]:
+            user = connection.execute("SELECT *, enabled AS loginEnabled FROM users WHERE id = ?", (g.browserSession["userId"],)).fetchone()
+            if user and user["loginEnabled"] and not user["passwordSetupRequired"] and not registrationIsExpired(user) and user["authVersion"] == g.browserSession["authVersion"]:
                 g.accessibleLedgers = accessibleLedgers(connection, user["id"])
                 requestedLedger = request.headers.get("X-Ledger-ID") or request.args.get("ledger")
                 if request.headers.get("X-Ledger-ID") and request.args.get("ledger") and request.headers["X-Ledger-ID"] != request.args["ledger"]:
@@ -226,14 +287,19 @@ def createApp(databasePathOverride=None):
                     bindLedger(connection, selected["id"], "user", user["id"], user["username"])
                 else:
                     connection.actorKind, connection.actorId, connection.actorLabel = "user", user["id"], user["username"]
-        if request.endpoint == "signIn":
+        if request.endpoint in {"signIn", "register"}:
             return None
         if not g.user:
             if request.path.startswith("/api/") or request.path == "/health":
                 return jsonify({"error": "Sign In required"}), 401
             return redirect("/sign-in")
+        if g.user["verificationStatus"] == "pending" or identityNeedsProfile(g.user, configuration):
+            if request.endpoint not in {"completeProfile", "verifyCode", "resendCode", "logOut"}:
+                if request.path.startswith("/api/") or request.path == "/health":
+                    return jsonify({"error": "Complete account verification and required profile fields before using the application"}), 403
+                return redirect(identityDestination(g.user))
         isMutation = request.method not in {"GET", "HEAD", "OPTIONS"}
-        identityEndpoints = {"sessionDetails", "ledgers", "invitations", "invitationDecision", "logOut"}
+        identityEndpoints = {"sessionDetails", "ledgers", "invitations", "invitationDecision", "logOut", "completeProfile", "verifyCode", "resendCode", "registrationWelcome"}
         identityOnly = request.endpoint in identityEndpoints and not (request.endpoint == "invitations" and isMutation)
         if request.path.startswith("/api/") and len(g.accessibleLedgers) > 1 and not (request.headers.get("X-Ledger-ID") or request.args.get("ledger")) and not identityOnly:
             return jsonify({"error": "Select a ledger for this request"}), 409
@@ -243,7 +309,7 @@ def createApp(databasePathOverride=None):
         if ownerOnly and g.user["role"] != "owner":
             return jsonify({"error": "Owner access required"}), 403
         auditorRestricted = {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "changeIntegrationState", "reviewPending", "savePendingRow", "previewPending", "summarizePending", "decidePending", "transactionPendingSnapshot", "transferPendingSnapshot"}
-        nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut", "ledgers", "invitationDecision"}
+        nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut", "ledgers", "invitationDecision", "completeProfile", "verifyCode", "resendCode", "registrationWelcome"}
         if g.user["role"] == "auditor" and (request.endpoint in auditorRestricted or (isMutation and request.endpoint not in nonpersistentPosts)):
             return jsonify({"error": "Read-only Auditor access"}), 403
         if isMutation and not csrfValid():
@@ -257,6 +323,7 @@ def createApp(databasePathOverride=None):
             with authenticationLock:
                 sessions.pop(request.cookies.get("npfSession"), None)
                 sessions[token] = {"expiresAt": time.time() + 600, "csrfToken": csrfToken}
+                g.browserSession = sessions[token]
             response = app.make_response(authenticationPage(csrfToken=csrfToken))
             return setSessionCookie(response, token, 600)
         if not csrfValid():
@@ -281,34 +348,158 @@ def createApp(databasePathOverride=None):
             user = connection.execute("SELECT * FROM users WHERE usernameKey = ?", (username,)).fetchone()
             valid = len(password) <= 128 and check_password_hash(user["passwordHash"] if user else dummyPasswordHash, password)
             memberships = connection.execute("SELECT ledgerId, enabled FROM ledgerAccess WHERE userId = ?", (user["id"],)).fetchall() if user else []
-            if not user or not valid or not user["enabled"] or user["passwordSetupRequired"]:
+            if not user or not valid or not user["enabled"] or user["passwordSetupRequired"] or registrationIsExpired(user):
                 failures += 1
                 usernameAttempts[username] = (failures, now + 300 if failures == 5 else until)
                 return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
+            if user["verificationStatus"] == "pending" and not configuration["requireRegistrationVerification"]:
+                connection.actorKind, connection.actorId, connection.actorLabel = "user", str(user["id"]), user["username"]
+                originalVersion = user["authVersion"]
+                try:
+                    acceptPendingForPolicy(connection, user["id"], expectedVersion=originalVersion)
+                except ValidationError:
+                    return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
+                user = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+                if not user or user["authVersion"] != originalVersion + 1:
+                    return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
             token = secrets.token_urlsafe(32)
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                currentUser = connection.execute("SELECT authVersion, enabled, passwordSetupRequired FROM users WHERE id = ?", (user["id"],)).fetchone()
-                if not currentUser or not currentUser["enabled"] or currentUser["passwordSetupRequired"] or currentUser["authVersion"] != user["authVersion"]:
+                currentUser = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+                if not currentUser or not currentUser["enabled"] or currentUser["passwordSetupRequired"] or currentUser["authVersion"] != user["authVersion"] or registrationIsExpired(currentUser):
                     return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
                 connection.execute("UPDATE users SET lastLoginAt = ? WHERE id = ?", (datetime.fromtimestamp(now, timezone.utc).isoformat(), user["id"]))
             sessions.pop(request.cookies.get("npfSession"), None)
-            sessions[token] = {"userId": user["id"], "authVersion": user["authVersion"], "expiresAt": now + 168 * 3600, "csrfToken": secrets.token_urlsafe(32)}
+            sessions[token] = {"userId": user["id"], "authVersion": user["authVersion"], "expiresAt": now + 168 * 3600, "csrfToken": secrets.token_urlsafe(32), "registrationWelcome": bool(user["registrationCreatedAt"] and user["verificationStatus"] == "pending")}
             loginAttempts.pop(address, None)
             usernameAttempts.pop(username, None)
-        return setSessionCookie(redirect("/"), token, 168 * 3600)
+        return setSessionCookie(redirect(identityDestination(user, sessions[token])), token, 168 * 3600)
 
     @app.post("/api/logout")
     def logOut():
         with authenticationLock:
             sessions.pop(request.cookies.get("npfSession"), None)
-        response = jsonify({"status": "ok"})
+        response = redirect("/sign-in") if request.form else jsonify({"status": "ok"})
         response.delete_cookie("npfSession", secure=request.is_secure, httponly=True, samesite="Lax")
         return response
 
+    @app.route("/register", methods=["GET", "POST"])
+    def register():
+        if not configuration["allowWebRegistration"]:
+            return identityPage("unconfigured", "Web registration is disabled.", status=403)
+        if g.user:
+            return redirect(identityDestination(g.user, g.browserSession))
+        if request.method == "GET":
+            if not g.browserSession:
+                token = secrets.token_urlsafe(32)
+                with authenticationLock:
+                    sessions[token] = {"expiresAt": time.time() + 600, "csrfToken": secrets.token_urlsafe(32)}
+                    g.browserSession = sessions[token]
+                return setSessionCookie(app.make_response(identityPage("register")), token, 600)
+            return identityPage("register")
+        if not csrfValid():
+            return identityPage("register", "Registration form expired. Reload and try again.", status=403)
+        fields = {key: request.form.get(key, "") for key in ("username", "firstName", "lastName")}
+        try:
+            # Admitted validation failures count; blocked retries never hash passwords.
+            admitRegistration(getDatabase(), request.remote_addr or "unknown")
+            userId = registerUser(getDatabase(), fields["username"], fields["firstName"], fields["lastName"], request.form.get("password", ""), request.form.get("confirmation", ""))
+        except ValidationError as error:
+            response = app.make_response(identityPage("register", str(error), fields, 429 if isinstance(error, IdentityRateLimit) else 400))
+            if isinstance(error, IdentityRateLimit):
+                response.headers["Retry-After"] = str(error.retryAfter)
+            return response
+        user = getDatabase().execute("SELECT * FROM users WHERE id = ?", (userId,)).fetchone()
+        token = establishSession(user, welcome=True)
+        message = ""
+        if user["verificationStatus"] == "pending":
+            try:
+                message = issueVerification(getDatabase(), userId, request.remote_addr or "unknown")
+            except ValidationError as error:
+                message = str(error)
+            sessions[token]["verificationMessage"] = message
+        return setSessionCookie(redirect(identityDestination(user, sessions[token])), token, 168 * 3600)
+
+    @app.route("/complete-profile", methods=["GET", "POST"])
+    def completeProfile():
+        if g.user["verificationStatus"] == "pending":
+            return redirect("/verify")
+        if not identityNeedsProfile(g.user, configuration):
+            return redirect(identityDestination(g.user, g.browserSession))
+        connection = getDatabase()
+        challenge = connection.execute("SELECT * FROM verificationChallenges WHERE userId = ? AND purpose = 'migration' AND consumedAt IS NULL", (g.user["id"],)).fetchone()
+        fields = {key: challenge["address"] if key == "username" and challenge else challenge[key] if challenge else g.user[key] for key in ("username", "firstName", "lastName")}
+        if request.method == "GET":
+            return identityPage("profile", fields=fields)
+        fields = {key: request.form.get(key, g.user[key] if key == "username" else "") for key in ("username", "firstName", "lastName")}
+        if not (configuration["enforceEmailUsernames"] and not emailLikeUsername(g.user["username"])):
+            fields["username"] = g.user["username"]
+        try:
+            username = configuredUsername(connection, fields["username"])
+            firstName, lastName = validateProfile(fields["firstName"], fields["lastName"])
+            if configuration["requireRegistrationVerification"] and username != g.user["username"]:
+                # A changed proposed address supersedes its old code even if sending is limited.
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    current = connection.execute("SELECT authVersion, enabled FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+                    if not current or not current["enabled"] or current["authVersion"] != g.browserSession["authVersion"]:
+                        raise ValidationError("Your account changed. Sign in again.")
+                    connection.execute("DELETE FROM verificationChallenges WHERE userId = ? AND purpose = 'migration' AND address != ?", (g.user["id"], username))
+                message = issueVerification(connection, g.user["id"], request.remote_addr or "unknown", purpose="migration", firstName=firstName, lastName=lastName, proposedUsername=username, expectedVersion=g.browserSession["authVersion"])
+                g.browserSession["verificationMessage"] = message
+                return redirect("/verify")
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = connection.execute("SELECT authVersion FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+                if current["authVersion"] != g.browserSession["authVersion"]:
+                    raise ValidationError("Your account changed. Sign in again.")
+                saveIdentity(connection, g.user["id"], username, firstName, lastName)
+                connection.execute("DELETE FROM verificationChallenges WHERE userId = ?", (g.user["id"],))
+            return finishIdentityChange()
+        except ValidationError as error:
+            return identityPage("profile", str(error), fields, 429 if isinstance(error, IdentityRateLimit) else 400)
+
+    @app.route("/verify", methods=["GET", "POST"])
+    def verifyCode():
+        connection = getDatabase()
+        challenge = connection.execute("SELECT * FROM verificationChallenges WHERE userId = ? AND consumedAt IS NULL", (g.user["id"],)).fetchone()
+        if g.user["verificationStatus"] != "pending" and not challenge:
+            return redirect(identityDestination(g.user, g.browserSession))
+        if request.method == "GET":
+            return identityPage("verify", g.browserSession.pop("verificationMessage", ""))
+        try:
+            verifyIdentityCode(connection, g.user["id"], request.form.get("code", ""), expectedVersion=g.browserSession["authVersion"])
+            return finishIdentityChange()
+        except ValidationError as error:
+            response = app.make_response(identityPage("verify", str(error), status=429 if isinstance(error, IdentityRateLimit) else 400))
+            if isinstance(error, IdentityRateLimit):
+                response.headers["Retry-After"] = str(error.retryAfter)
+            return response
+
+    @app.post("/verify/resend")
+    def resendCode():
+        challenge = getDatabase().execute("SELECT purpose FROM verificationChallenges WHERE userId = ? AND consumedAt IS NULL", (g.user["id"],)).fetchone()
+        try:
+            purpose = challenge["purpose"] if challenge else "registration" if g.user["verificationStatus"] == "pending" else "migration"
+            message = issueVerification(getDatabase(), g.user["id"], request.remote_addr or "unknown", purpose=purpose, expectedVersion=g.browserSession["authVersion"])
+            return identityPage("verify", message)
+        except ValidationError as error:
+            return identityPage("verify", str(error), status=429 if isinstance(error, IdentityRateLimit) else 400)
+
+    @app.route("/welcome", methods=["GET", "POST"])
+    def registrationWelcome():
+        if not g.browserSession.get("registrationWelcome"):
+            return redirect("/")
+        if request.method == "GET":
+            return identityPage("welcome")
+        if request.form.get("choice") not in {"yes", "no"}:
+            raise ValidationError("Choose Yes or No")
+        g.browserSession["registrationWelcome"] = False
+        return redirect("/?createLedger=1" if request.form["choice"] == "yes" else "/")
+
     @app.get("/api/session")
     def sessionDetails():
-        return {"role": g.user["role"], "username": g.user["username"], "csrfToken": g.browserSession["csrfToken"], "expiresAt": g.browserSession["expiresAt"], "ledgerId": g.user["ledgerId"], "ledgers": g.accessibleLedgers}
+        return {"role": g.user["role"], "username": g.user["username"], "firstName": g.user["firstName"], "lastName": g.user["lastName"], "csrfToken": g.browserSession["csrfToken"], "expiresAt": g.browserSession["expiresAt"], "ledgerId": g.user["ledgerId"], "ledgers": g.accessibleLedgers, "defaultLedgerName": defaultLedgerName(g.user["firstName"], g.user["lastName"])}
 
     @app.route("/api/ledgers", methods=["GET", "POST"])
     def ledgers():
@@ -387,6 +578,8 @@ def createApp(databasePathOverride=None):
     def getDatabase():
         if "database" not in g:
             g.database = connectDatabase(app.config["DATABASE_PATH"])
+            g.database.configuration = configuration
+            g.database.operationalLogs = operationalLogs
         return g.database
 
     @app.teardown_appcontext
@@ -397,7 +590,7 @@ def createApp(databasePathOverride=None):
 
     @app.errorhandler(ValidationError)
     def validationFailure(error):
-        if isinstance(error, InvitationRateLimit):
+        if isinstance(error, (InvitationRateLimit, IdentityRateLimit)):
             response = jsonify({"error": str(error)})
             response.headers["Retry-After"] = str(error.retryAfter)
             return response, 429
@@ -413,6 +606,7 @@ def createApp(databasePathOverride=None):
     def unexpectedFailure(error):
         if isinstance(error, HTTPException):
             return error
+        operationalLogs.write("startup", "An application request failed. No successful save was reported. Check the server terminal for diagnostic details before retrying.")
         app.logger.exception("Unexpected request failure")
         return jsonify({"error": "Unexpected application error"}), 500
 
@@ -443,6 +637,10 @@ def createApp(databasePathOverride=None):
         if filename not in {"icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"}:
             return Response(status=404)
         return send_from_directory(projectDirectory / "assets", filename, mimetype="image/png")
+
+    @app.route("/authentication.js")
+    def authenticationJavascript():
+        return send_from_directory(projectDirectory, "authentication.js")
 
     @app.route("/app.js")
     def javascript():
@@ -486,6 +684,7 @@ def createApp(databasePathOverride=None):
                     databasePath=exportedPath,
                     outputPath=Path(directory) / "packages",
                     includeDatabase=includeDatabase,
+                    includeServerFiles=False,
                 )
                 archiveBytes = result["archivePath"].read_bytes()
                 archiveName = result["archivePath"].name
@@ -1595,6 +1794,8 @@ def runApplication(app):
     logging.info("Development server host: 0.0.0.0")
     try:
         connection = connectDatabase(app.config["DATABASE_PATH"])
+        connection.configuration = app.config["PLATFORM_CONFIGURATION"]
+        connection.operationalLogs = app.config["OPERATIONAL_LOGS"]
         try:
             ownerConfigured = connection.execute("SELECT 1 FROM ledgerAccess WHERE role = 'owner'").fetchone() is not None
             signInGuidance = "Sign in to use the application." if ownerConfigured else "Complete Owner setup below, then reload to sign in."
@@ -1618,9 +1819,12 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--version"]:
         print(applicationVersion)
         sys.exit(0)
-    app = createApp()
+    try:
+        app = createApp()
+    except ConfigurationError as error:
+        sys.exit(str(error))
     if sys.argv[1:] == ["manage-users"]:
-        manageUsers(app.config["DATABASE_PATH"])
+        manageUsers(app.config["DATABASE_PATH"], app.config["PLATFORM_CONFIGURATION"], app.config["OPERATIONAL_LOGS"])
         sys.exit(0)
     if sys.argv[1:]:
         sys.exit("Usage: app.py [manage-users | --version]")

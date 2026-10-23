@@ -19,8 +19,8 @@ class DashboardUtilizationTests(unittest.TestCase):
         self.backupsPath.mkdir()
         self.application = createApp(self.databasePath)
         self.connection = connectDatabase(self.databasePath)
-        createUser(self.connection, "owner", "Owner", "owner password")
-        createUser(self.connection, "auditor", "Auditor", "auditor password")
+        createUser(self.connection, "owner", "Owner", "owner password", firstName="Owner")
+        createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
         integrationId = ledger.createIntegrationSecret(self.connection, "Example Agent")
         self.secret = self.connection.execute("SELECT secret FROM integrationSecrets WHERE id = ?", (integrationId,)).fetchone()[0]
         self.headers = {"Authorization": "Bearer " + self.secret}
