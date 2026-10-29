@@ -12,15 +12,55 @@ No items remain.
 
 ## Version Soon
 
-No items remain.
+### Account Management
+
+Approved design for Version Soon only; implementation requires explicit promotion to Version Next. Provide self-service profile/password changes, own-session and notification-device management, and optional web password recovery. No browser system administration, other-User management, username/email editing, login enable/disable, ownership transfer, or User/ledger deletion. Preserve CLI management, ledger isolation, and the trusted deployment boundary.
+
+#### My Account
+
+Add My Account to existing Settings navigation and make it the default section when no explicit fragment is supplied. Preserve direct section links and Back/Forward behavior; do not split Account Settings and Ledger Settings into separate pages.
+
+Always show the authenticated User's full profile name and username/email at least read-only. Username/email is never browser-editable; existing CLI username changes remain available. Account-wide controls concern only the signed-in User across their ledgers, including Owners, Members, Auditors, and enabled Users without ledger access. Preserve restricted verification and required-profile-completion states without granting financial access.
+
+Add installation-wide `allowAccountSelfService`, default true, using existing platform.conf parsing, restart, sample-documentation, and secret-file rules. When false, hide name/password editing and reject direct updates server-side; retain read-only identity, sessions, notification devices, and logout. Required profile completion remains independently available.
+
+When enabled, use separate Save name and Change password actions. Apply existing required first-name and optional last-name validation. Password change requires Current password, New password, and Confirm new password; preserve existing password validation, offline common-password rejection, hashing, Unicode/space handling, and secrecy. Keep the completing session active and invalidate other sessions for that User. Preserve existing profile-change session safeguards, stable identity, memberships, stored ledger names, financial history, historical actor labels, and atomic identity/audit writes.
+
+#### Sessions
+
+Show only the signed-in User's active sessions across their ledgers, with Client | Last IP | Signed in | Last active | Action. Decode user agent into browser/operating-system labels with Unknown client fallback; these labels are not verified device identities. Mark This session. Never expose usable session tokens.
+
+Offer individual Log out and Log out other sessions. Individual revocation denies subsequent protected requests immediately; current-session logout returns to sign-in. Log out other sessions retains the requesting session. Preserve fixed 168-hour expiry without activity extension and process-local sessions ending on server restart.
+
+Last IP reflects the latest authenticated request, including background requests, using existing configured trusted-proxy handling rather than trusting arbitrary forwarding headers. Last active reflects intentional page navigation and requests triggered by User actions, excluding automatic polling, background refreshes, and service-worker requests. Purely local interactions need not update it; do not add mouse/keystroke tracking. Viewing the session table must not mark every session active.
+
+#### Notification Devices
+
+Provide a separate Notification devices table with Client | Ledger | Action, individual Disable notifications, and Disable all notifications for the signed-in User. Enrollments belong to a User/browser installation/ledger and remain listed and independently removable after session expiry or server restart. Do not expose endpoints or push secrets as UI identifiers.
+
+Explicit session logout, including Log out other sessions, also removes that browser installation's notification enrollments for the User across their ledgers. Establish explicit session-to-notification-installation association; matching IP or user-agent text is insufficient. Password-change invalidation uses the same cleanup for other sessions. Natural expiry and server restart preserve enrollments. Preserve other Users' sessions/enrollments.
+
+Removal stops future server sends; it cannot recall already-sent notifications, erase remote content, or revoke native permission. Re-enabling requires explicit action on that device and existing role, ledger, session, CSRF, and native-permission checks. Preserve delivery-time authorization, generic payloads, post-commit delivery, and per-ledger enrollment semantics. Own-enrollment removal grants no new enrollment or financial privileges.
+
+#### Optional Web Password Recovery and CLI Recovery Trust
+
+Add independent installation-wide `allowWebPasswordRecovery`, default false. Enabled recovery requires enabled, valid SMTP; missing dependencies stop startup with a sanitized configuration error. Apply existing configuration/sample/restart/packaging rules. When disabled, hide Forgot password and deny direct recovery requests. Trusted CLI password reset remains available regardless of either self-service setting.
+
+Forgot password on Sign In asks for the email username and always returns the same public response for existing, nonexistent, and ineligible accounts. Eligibility requires the current email username to have been verified by emailed code or explicitly trusted for recovery through CLI. Email-like formatting and existing manual registration acceptance alone are insufficient. Non-email usernames retain CLI recovery.
+
+Add a CLI action to trust the selected User's current email username for recovery with explicit confirmation. Record administrator trust distinctly from mailbox verification. Bind eligibility to stable User identity and exact email username. CLI username changes clear eligibility until the new address is verified or explicitly trusted; do not infer verification from old acceptance status.
+
+Email a short-lived single-use reset link. Collect New password and Confirm password using existing authoritative validation/hashing. Successful recovery invalidates all the User's sessions, removes their notification enrollments, and requires fresh sign-in. It never enables Disabled login, changes memberships, grants ledger access, or bypasses required registration verification/profile completion. Preserve financial history and attribution. Password update, single-use consumption, invalidation, and safe audit recording require atomic failure handling.
+
+Reset links expire exactly 15 minutes after issuance using server-authoritative time. Require 30 seconds between recovery emails, with at most 5 send attempts per rolling 10 minutes and 20 per rolling 24 hours, enforced per account and per client IP using existing trusted-proxy address handling. Require an explicit externally reachable public application URL in platform.conf for recovery links; arbitrary request Host/forwarding values must not determine their origin. A newly issued link invalidates the previous link. Successful password changes, password resets (including CLI resets), and username changes invalidate all outstanding recovery links for that User. Require safe token storage, no token/password disclosure in logs/audits, concurrent single-use consumption, generic eligibility responses, and fake SMTP tests.
+
+#### Acceptance
+
+Verify defaults and disabled-state backend denial; Settings default/direct-fragment behavior; read-only identity and hidden editing; every role and no-ledger Users; name/password validation and current-password checks; completing-session continuity, own-session-only access/revocation, fixed expiry/restart behavior, trusted IP and background-activity exclusions; explicit notification-installation association, logout cleanup, preserved enrollments after expiry/restart, individual/all removal and cross-User isolation; CLI reset/trust attribution and address-change invalidation; recovery SMTP dependencies, eligibility, generic responses, expiry, rate limits, invalid/superseded/consumed links, concurrency, rollback, and disabled/verification safeguards. Preserve CSRF, server authorization, ledger isolation, safe atomic auditing, financial history, offline-access limits, and credential-free exports. Use guarded temporary databases, synthetic fixtures, and fake SMTP only.
 
 ## Version Later
 
 These ideas preserve product direction but are not approved implementation scope. Promote and fully design one before implementation.
-
-### Account Management
-
-Bring relevant CLI user-management workflows into the web UI, including username and password management and administrative enable/disable operations. Design authorization, self-service versus administrative actions, credential/session effects, and cross-ledger User implications before implementation. Do not assume a new installation-administrator role. Preserve ledger isolation, authentication controls, and the trusted deployment boundary. Optional Web Registration is implemented in SPEC.md; broader Account Management remains deferred.
 
 ### Ledger Ownership Transfer
 
@@ -30,9 +70,6 @@ Design an explicit transfer of the sole Owner role to another User. Preserve exa
 
 Consider ledger-specific currency, fiscal-year-start, and locale configuration only after defining their actual effects. Resolve supported currency precision and financial calculations, calendar versus fiscal reporting, historical-data treatment, and date/number presentation before promotion. Do not add inert settings or silently reinterpret existing USD amounts and calendar-year reports. These remain deferred design candidates, not committed behavior.
 
-### Read-Only Offline Dashboard (Separate from PWA Installation)
-
-Deferred and not approved as part of online-only PWA support. Consider a read-only offline Dashboard snapshot. Offline mode would cache the latest balances, reporting state, and seven days of recent events on the current browser, clearly label stale data, disable writes and unavailable features, and recover only after a real API refresh. It must not queue writes or create server-side state. HTTPS remains the reverse proxy's responsibility unless separately designed.
 
 ### Automatic Backups and Production Server
 
@@ -40,22 +77,10 @@ Consider one consistent SQLite backup before the first successful write of each 
 
 Replace Flask's development server with Waitress for normal startup while retaining portable Windows and Linux launch scripts and existing binding and reverse-proxy behavior.
 
-### Sensitive Financial Information
-
-Do not store full card, routing, ACH, or CVV credentials as ordinary fields. Prefer a password manager and retain only non-secret references such as institution, nickname, last four digits, or payment URL. Any in-application vault requires complete authentication, encryption, key-management, recovery, display, backup, and deployment-security design.
-
-### Primary Navigation
-
-Consider a plain, accessible hamburger menu shared by desktop and mobile while preserving Settings and all destinations. Do not introduce a persistent sidebar, bottom navigation, or separate mobile model.
-
 ### New Transaction URL
 
 Prefer a #new fragment on the current page so opening, closing, refresh, Back, and Forward preserve the underlying page state. Apply it only to ordinary transaction creation and reuse the existing form. Decide separately whether /new redirects, remains compatible, or is retired.
 
-
-### Future Integration Extensions
-
-Authenticated financial JSON reads, ordinary transaction proposals, durable retry identity, public agent documentation, and Owner review are already implemented in SPEC.md. Do not duplicate them with a direct-to-ledger transaction API. Any additional integration operations require separate scope and approval while preserving the current human-review boundary.
 
 ### Telegram and Daily Summaries
 

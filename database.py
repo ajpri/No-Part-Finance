@@ -19,7 +19,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-schemaVersion = 28
+schemaVersion = 30
 
 
 class ValidationError(ValueError):
@@ -336,6 +336,12 @@ def initializeDatabase(databasePath):
             migrateToVersion27(connection)
         if currentVersion < 28 <= schemaVersion:
             migrateToVersion28(connection)
+        if currentVersion < 29 <= schemaVersion:
+            from push import migratePush
+            migratePush(connection)
+        if currentVersion < 30 <= schemaVersion:
+            from cliDeletion import migration
+            migration(connection)
         connection.execute(f"PRAGMA user_version = {schemaVersion}")
         connection.commit()
         foreignKeyFailure = connection.execute("PRAGMA foreign_key_check").fetchone()
@@ -3433,6 +3439,11 @@ class LedgerConnection(sqlite3.Connection):
 def requireLedger(connection):
     if not isinstance(connection, LedgerConnection) or not connection.ledgerId:
         raise ValidationError("Authorized ledger context is required")
+    if connection.actorKind == "user":
+        authorized = connection.execute("""SELECT 1 FROM users u JOIN ledgerAccess a ON a.userId = u.id
+            WHERE u.id = ? AND a.ledgerId = ? AND u.enabled = 1 AND u.passwordSetupRequired = 0 AND a.enabled = 1""", (connection.actorId, connection.ledgerId)).fetchone()
+        if not authorized:
+            raise ValidationError("Ledger access is no longer available")
     return connection.ledgerId
 
 
@@ -3711,21 +3722,23 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
             if sum(row["role"] == "owner" for row in memberships) != 1:
                 raise ValidationError("Export requires exactly one Owner")
             userIds = [row["userId"] for row in memberships]
+            # Retain creator identities even after their memberships are removed.
+            userSelection = "SELECT userId FROM ledgerAccess WHERE ledgerId = ? UNION SELECT creatorUserId FROM integrationSecrets WHERE ledgerId = ?"
             destination = sqlite3.connect(destinationPath)
             definitions = snapshot.execute("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type = 'table' DESC").fetchall()
-            allowedTables = (*ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents", "sharingInvitations", "invitationAttempts", "userEvents", "verificationChallenges", "verificationState", "verificationSendAttempts", "registrationAttempts")
+            allowedTables = ("pushConfiguration", "pushSubscriptions", *ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents", "sharingInvitations", "invitationAttempts", "userEvents", "verificationChallenges", "verificationState", "verificationSendAttempts", "registrationAttempts")
             for definition in definitions:
                 if definition["type"] == "table" and definition["name"] in allowedTables:
                     destination.execute(definition["sql"])
             for table in allowedTables:
                 # Invitation recipients have not consented to membership in the copy.
                 # Keep these tables empty, but retain their schema for standalone startup.
-                if table in {"sharingInvitations", "invitationAttempts", "registrationAttempts"}:
+                if table in {"pushConfiguration", "pushSubscriptions", "sharingInvitations", "invitationAttempts", "registrationAttempts"}:
                     continue
                 if table == "users":
-                    rows = snapshot.execute("SELECT * FROM users WHERE id IN (SELECT userId FROM ledgerAccess WHERE ledgerId = ?)", (ledgerId,)).fetchall()
+                    rows = snapshot.execute(f"SELECT * FROM users WHERE id IN ({userSelection})", (ledgerId, ledgerId)).fetchall()
                 elif table in {"userEvents", "verificationChallenges", "verificationState", "verificationSendAttempts"}:
-                    rows = snapshot.execute(f"SELECT * FROM {table} WHERE userId IN (SELECT userId FROM ledgerAccess WHERE ledgerId = ?)", (ledgerId,)).fetchall()
+                    rows = snapshot.execute(f"SELECT * FROM {table} WHERE userId IN ({userSelection})", (ledgerId, ledgerId)).fetchall()
                 else:
                     column = "id" if table == "ledgers" else "ledgerId"
                     rows = snapshot.execute(f"SELECT * FROM {table} WHERE {column} = ?", (ledgerId,)).fetchall()

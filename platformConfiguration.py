@@ -14,6 +14,8 @@ configurationDefaults = {
     "enforceEmailUsernames": False,
     "trustedProxyAddresses": "",
     "allowWebRegistration": False,
+    "pwaOfflineEnabled": False,
+    "pushNotificationsEnabled": False,
     "smtpEnabled": False,
     "smtpHost": "",
     "smtpPort": None,
@@ -57,6 +59,7 @@ def configurationSample():
         "enforceEmailUsernames": ("Account usernames", "Choose whether usernames must use an email address format."),
         "trustedProxyAddresses": ("Reverse proxy", "Identify trusted proxies that forward the visitor's IP and HTTPS status."),
         "allowWebRegistration": ("Web registration", "Choose whether visitors can create their own user accounts."),
+        "pwaOfflineEnabled": ("PWA features", "Opt in to offline Dashboard storage and system push notifications independently. Restart after changes; the manifest remains available."),
         "smtpEnabled": ("Email delivery (SMTP)", "Configure the mail server used to send verification codes."),
         "requireRegistrationVerification": ("Email verification", "Choose whether users must verify their email before account access."),
     }

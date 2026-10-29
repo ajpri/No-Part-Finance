@@ -26,3 +26,8 @@ document.querySelector("[data-cancel-registration]")?.addEventListener("click", 
     registrationDialog.querySelector("form").reset();
   }
 });
+
+// Refresh administrator policy even when the returning installation is signed out.
+OfflineFinance.ready.then(() => {
+  if (window.isSecureContext && "serviceWorker" in navigator) return navigator.serviceWorker.register("/service-worker.js");
+}).catch(() => {});

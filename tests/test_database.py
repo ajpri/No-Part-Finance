@@ -192,7 +192,7 @@ class DatabaseTests(unittest.TestCase):
         self.connection.close()
         initializeDatabase(self.databasePath)
         self.connection = connectDatabase(self.databasePath)
-        backups = list((self.databasePath.parent / "backups").glob("pre-migration-v4-to-v28-*.db"))
+        backups = list((self.databasePath.parent / "backups").glob("pre-migration-v4-to-v30-*.db"))
         self.assertEqual(1, len(backups))
         self.assertEqual("Preserved", self.connection.execute("SELECT name FROM accounts WHERE id = ?", (accountId,)).fetchone()[0])
         self.assertEqual("ok", self.connection.execute("PRAGMA integrity_check").fetchone()[0])

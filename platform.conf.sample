@@ -36,6 +36,12 @@ trustedProxyAddresses =
 
 allowWebRegistration = false
 
+# --- PWA features ---
+# Opt in to offline Dashboard storage and system push notifications independently. Restart after changes; the manifest remains available.
+
+pwaOfflineEnabled = false
+pushNotificationsEnabled = false
+
 # --- Email delivery (SMTP) ---
 # Configure the mail server used to send verification codes.
 

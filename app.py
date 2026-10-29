@@ -245,7 +245,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
         g.user = None
         g.integration = None
         g.browserSession = None
-        if request.endpoint in {"robots", "styles", "javascript", "apiDocumentation", "openApiDocument", "webAppManifest", "themeJavascript", "pwaIcon", "authenticationJavascript"} or request.endpoint is None:
+        if request.endpoint in {"robots", "styles", "javascript", "apiDocumentation", "openApiDocument", "webAppManifest", "themeJavascript", "pwaIcon", "authenticationJavascript", "serviceWorker", "offlineJavascript", "offlineShell", "pwaPolicy"} or request.endpoint is None:
             return None
         connection = getDatabase()
         if not connection.execute("SELECT 1 FROM ledgerAccess WHERE role = 'owner'").fetchone():
@@ -308,7 +308,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
         ownerOnly = request.endpoint in {"downloadBackup", "downloadApplicationPackage", "sharingMember", "cancelInvitation"} or (request.endpoint == "saveLedgerName" and isMutation) or (request.endpoint == "invitations" and isMutation)
         if ownerOnly and g.user["role"] != "owner":
             return jsonify({"error": "Owner access required"}), 403
-        auditorRestricted = {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "changeIntegrationState", "reviewPending", "savePendingRow", "previewPending", "summarizePending", "decidePending", "transactionPendingSnapshot", "transferPendingSnapshot"}
+        auditorRestricted = {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "changeIntegrationState", "reviewPending", "pendingStatus", "pushEnrollment", "savePendingRow", "previewPending", "summarizePending", "decidePending", "transactionPendingSnapshot", "transferPendingSnapshot"}
         nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut", "ledgers", "invitationDecision", "completeProfile", "verifyCode", "resendCode", "registrationWelcome"}
         if g.user["role"] == "auditor" and (request.endpoint in auditorRestricted or (isMutation and request.endpoint not in nonpersistentPosts)):
             return jsonify({"error": "Read-only Auditor access"}), 403
@@ -499,7 +499,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
 
     @app.get("/api/session")
     def sessionDetails():
-        return {"role": g.user["role"], "username": g.user["username"], "firstName": g.user["firstName"], "lastName": g.user["lastName"], "csrfToken": g.browserSession["csrfToken"], "expiresAt": g.browserSession["expiresAt"], "ledgerId": g.user["ledgerId"], "ledgers": g.accessibleLedgers, "defaultLedgerName": defaultLedgerName(g.user["firstName"], g.user["lastName"])}
+        return {"userId": g.user["id"], "role": g.user["role"], "username": g.user["username"], "firstName": g.user["firstName"], "lastName": g.user["lastName"], "csrfToken": g.browserSession["csrfToken"], "expiresAt": g.browserSession["expiresAt"], "ledgerId": g.user["ledgerId"], "ledgers": g.accessibleLedgers, "defaultLedgerName": defaultLedgerName(g.user["firstName"], g.user["lastName"])}
 
     @app.route("/api/ledgers", methods=["GET", "POST"])
     def ledgers():
@@ -536,6 +536,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
         if not isinstance(submitted, dict):
             raise ValidationError("Submit Username and role")
         invitationId = sendSharingInvitation(getDatabase(), submitted.get("username"), submitted.get("role"))
+        g.pushInvitationId = invitationId
         return jsonify({"id": invitationId}), 201
 
     @app.post("/api/invitations/<int:invitationId>/decision")
@@ -627,6 +628,29 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
     @app.route("/pwa.webmanifest", methods=["GET", "HEAD"])
     def webAppManifest():
         return send_from_directory(projectDirectory, "pwa.webmanifest", mimetype="application/manifest+json")
+
+    @app.get("/pwa-policy")
+    def pwaPolicy():
+        response = jsonify({key: configuration[key] for key in ("pwaOfflineEnabled", "pushNotificationsEnabled")})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/offline-shell")
+    def offlineShell():
+        # A public empty shell contains no authenticated data; snapshots stay local.
+        if not configuration["pwaOfflineEnabled"]:
+            return Response("Offline access is disabled by the administrator.", status=404)
+        return Response((projectDirectory / "index.html").read_text().replace("__APPLICATION_VERSION__", applicationVersion), mimetype="text/html")
+
+    @app.get("/offline.js")
+    def offlineJavascript():
+        return send_from_directory(projectDirectory, "offline.js", mimetype="text/javascript")
+
+    @app.get("/service-worker.js")
+    def serviceWorker():
+        response = Response((projectDirectory / "service-worker.js").read_text().replace("__APPLICATION_VERSION__", applicationVersion).replace("__PWA_OFFLINE_ENABLED__", str(configuration["pwaOfflineEnabled"]).lower()).replace("__PUSH_NOTIFICATIONS_ENABLED__", str(configuration["pushNotificationsEnabled"]).lower()), mimetype="text/javascript")
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
     @app.route("/theme.js", methods=["GET", "HEAD"])
     def themeJavascript():
@@ -784,6 +808,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
             ORDER BY t.date DESC, t.id DESC
             """
         ).fetchall()
+        report["currentDate"] = date.today().isoformat()
         report["accounts"] = [dict(row) for row in accountRows]
         for account in report["accounts"]:
             account.update(accountEligibility(account))
@@ -1590,6 +1615,56 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
         setIntegrationState(getDatabase(), secretId, submitted["enabled"])
         return jsonify({"status": "ok"})
 
+    @app.route("/api/push", methods=["GET", "POST", "DELETE"])
+    def pushEnrollment():
+        from push import applicationKey, enroll
+        if not configuration["pushNotificationsEnabled"] and request.method != "DELETE":
+            if request.method == "POST":
+                return jsonify({"error": "Push notifications are disabled by the administrator."}), 403
+            return {"enabled": False, "publicKey": None, "endpoints": []}
+        connection = getDatabase()
+        if request.method == "GET":
+            return {"publicKey": applicationKey(connection)[1], "endpoints": [row[0] for row in connection.execute("SELECT endpoint FROM pushSubscriptions WHERE userId = ? AND ledgerId = ?", (g.user["id"], g.user["ledgerId"]))]}
+        submitted = request.get_json(silent=True)
+        if request.method == "POST":
+            enroll(connection, g.user["id"], g.user["ledgerId"], submitted, request.headers.get("Origin") or request.url_root)
+        else:
+            if not isinstance(submitted, dict) or set(submitted) != {"endpoint"} or not isinstance(submitted["endpoint"], str):
+                raise ValidationError("Submit the installation endpoint")
+            with connection:
+                connection.execute("DELETE FROM pushSubscriptions WHERE endpoint = ? AND userId = ? AND ledgerId = ?", (submitted["endpoint"], g.user["id"], g.user["ledgerId"]))
+        return {"status": "ok"}
+
+    @app.after_request
+    def sendPendingPush(response):
+        proposalId = g.get("pushProposalId")
+        if configuration["pushNotificationsEnabled"] and proposalId and response.status_code < 300:
+            try:
+                from push import deliverPending
+                deliverPending(getDatabase(), g.user["ledgerId"] if g.user else g.integration["ledgerId"], proposalId,
+                    request.url_root.rstrip("/") if request.is_secure else None)
+            except Exception:
+                app.logger.warning("Pending notification delivery failed; the item remains saved")
+        invitationId = g.get("pushInvitationId")
+        if configuration["pushNotificationsEnabled"] and invitationId and response.status_code < 300:
+            try:
+                from push import deliverInvitation
+                deliverInvitation(getDatabase(), invitationId, request.url_root.rstrip("/") if request.is_secure else None)
+            except Exception:
+                app.logger.warning("Invitation notification delivery failed; the invitation remains saved")
+        return response
+
+    @app.get("/api/pending/status")
+    def pendingStatus():
+        connection = getDatabase()
+        rows = connection.execute("SELECT id, kind FROM scopedpendingSubmissions WHERE status = 'Pending' ORDER BY id").fetchall()
+        latestId = connection.execute("SELECT COALESCE(MAX(id), 0) FROM scopedpendingSubmissions").fetchone()[0]
+        return jsonify({"count": len(rows), "ids": [row["id"] for row in rows], "latestId": latestId})
+
+    @app.get("/api/calendar")
+    def calendarStatus():
+        return {"currentDate": date.today().isoformat()}
+
     @app.get("/api/pending")
     def reviewPending():
         rows = pendingReviewRows(getDatabase())
@@ -1629,6 +1704,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
     @app.post("/api/pending/manual")
     def createManualPending():
         proposal, created = submitPendingEntry(getDatabase(), None, request.get_json(silent=True))
+        if created: g.pushProposalId = proposal["id"]
         return jsonify(statusResult(proposal)), 201 if created else 200
 
     @app.get("/api/transactions/<int:transactionId>/pending-snapshot")
@@ -1648,6 +1724,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
         if set(moveRequest) != {"requestId", "snapshot"}:
             raise ValidationError("Move requires requestId and snapshot")
         proposal, created = moveLedgerToPending(getDatabase(), moveRequest["requestId"], moveRequest["snapshot"], transactionId, transferId)
+        if created: g.pushProposalId = proposal["id"]
         return jsonify(statusResult(proposal)), 201 if created else 200
 
     @app.post("/api/transactions/<int:transactionId>/move-to-pending")
@@ -1702,6 +1779,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
             if request.args:
                 raise ValidationError("Submission does not accept query parameters")
             proposal, created = submitPendingTransaction(connection, g.integration["id"], request.get_json(silent=True))
+            if created: g.pushProposalId = proposal["id"]
             return jsonify(statusResult(proposal)), 201 if created else 200
         if set(request.args) - {"limit", "offset", "submissionId", "status"}:
             raise ValidationError("Unsupported submission status filter")

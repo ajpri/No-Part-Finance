@@ -19,7 +19,30 @@ Codes last 10 minutes. Resend requires 30 seconds; sends are limited per account
 
 Codes appear in the email body, not the subject. The single code field supports paste/manual entry and advertises one-time-code AutoFill. iPhone Mail/Safari AutoFill detection has not been verified; manual entry remains available.
 
-### Reverse proxy and logs
+### Dashboard refresh, notifications, and offline access
+
+Dashboard refreshes when you return to the app, retaining displayed values and form drafts while updating. A visible-page 60-second check refreshes Pending counts on all authorized pages and updates Dashboard periods/totals after a calendar date change. Review Pending stays in the top Dashboard/Transactions actions; new arrivals show a yellow toast until closed or reviewed.
+
+Offline storage and system push are administrator opt-ins in `platform.conf`, both defaulting to `false` when omitted:
+
+```ini
+pwaOfflineEnabled = false
+pushNotificationsEnabled = false
+```
+
+Set either value to `true` and restart the server to enable it. The manifest remains available and the app remains installable in every combination. Turning offline access off clears this application's saved snapshots and shell caches when each installation next connects, including from the sign-in page; disconnected devices cannot learn the change until reconnection. Turning push off blocks enrollment and delivery for Pending items and ledger invitations; native permission and saved subscriptions remain available for later re-enabling. In-app Pending toasts are unaffected. Both startup scripts and generated application packages include this configuration support; samples always use false defaults.
+
+On a supported HTTPS installation, open Settings → System → Notifications and select Enable notifications for this device and ledger. The browser permission request occurs only after that action. On iPhone/iPad, use the installed Home Screen app. Other devices and ledgers enroll independently. An enabled installation also receives invitations to your user account; the same device is notified once even when enrolled for multiple ledgers. Disable all ledger enrollments on that installation to stop invitation pushes. Disable notifications stops that enrollment; in-app toasts need no permission. System notifications use generic text and open Pending in a new window after normal sign-in/access checks. Browser rules can also show a system notification while the app is visible. After updating an existing installation, open Settings System inside the HTTPS installed app once to refresh its notification sender metadata; permissions need not be reset. Check logs/startup.log for safe provider HTTP failure status if delivery fails. Web Push uses browser-vendor push services and requires outbound internet access; it has no delivery retry queue and delivery failure does not affect saved Pending items.
+
+Offline Dashboard preparation is automatic in supported secure contexts after an online Dashboard visit. The reverse proxy supplies HTTPS; no separate offline permission prompt is needed. Snapshots include all Dashboard sections and the usual five recent rows, with disabled saved reporting selections. Only ledgers visited online are cached. While offline, the navigation area shows the saved timestamp, writes are disabled, and Settings provides cache status, Clear offline data, and View cached Dashboard. The Ledger selector can switch between saved snapshots; uncached ledgers are unavailable. Storage is best effort and may be cleared by the browser. Logout clears this User's snapshots. Local snapshots contain financial information and remain readable to the previously signed-in user offline; remote access revocation cannot be discovered until reconnection. No offline transaction entry or queued writes are implemented.
+
+### Trusted CLI deletion
+
+Run `./startLinux.sh manage-users`, `startWindows.bat manage-users`, or `python app.py manage-users` and choose Delete User or Delete Ledger. Select a target, review its ID and consequences, and type that exact ID to confirm. Cancellation changes nothing. Both operations require a verified full-installation SQLite backup in the application's `backups/` folder before deletion; failure aborts deletion. Backups contain credentials and financial history and must remain private.
+
+Deleting a Ledger permanently removes all its contents, including audit history, while preserving Users and other ledgers. Deleting a User is blocked while they own any ledger. Otherwise their memberships, credentials, and sessions are removed, retaining a minimal Deleted user identity for historical attribution. Their transactions and historical audit text in surviving ledgers remain unchanged. The old username can be reused only by a new independent identity. Ledger deletion does not automatically delete users left without memberships. Restore a pre-deletion full database backup using the existing stopped-server recovery procedure if recovery is needed.
+
+## Reverse proxy and logs
 
 For NGINX, set `trustedProxyAddresses` to its exact application-facing source IP (comma-separated IPv4/IPv6 addresses). This is the internal/source address the app sees, not your home's dynamic public IP or DDNS hostname. A different routable subnet is fine; if source NAT intervenes, the configured source must identify only trusted proxy traffic. Prefer a static address or DHCP reservation. Dynamic public-IP changes do not require application edits when the proxy source stays stable.
 
@@ -30,7 +53,7 @@ Plain-text logs are in `logs/startup.log`, `logs/email.log`, and `logs/userManag
 
 ## Development status
 
-Version 26.10.24 adds optional server configuration, profile names and email usernames, trusted reverse proxy support, plain-text operational logs, optional browser registration, and SMTP email verification. Existing ledgers and financial history are preserved. General browser-based account management remains deferred.
+Version 26.10.30 adds Dashboard refresh on return, visible-page Pending checks and persistent arrival toasts, opt-in Web Push, automatic read-only offline Dashboard snapshots, and trusted CLI deletion of Users and whole Ledgers with verified database backups. Existing financial calculations and ledger isolation are preserved. General browser-based account management remains deferred.
 
 ## License
 
@@ -178,7 +201,7 @@ python app.py manage-users
 
 To retry setup, run the appropriate command above from the application folder (Windows: Command Prompt; Linux: terminal). If the server is still running, use a second terminal in the same folder. Choose **Create Owner** if missing, or **Create Auditor** for optional access. Password mismatch or validation errors allow correction through the existing menu; interrupted or unavailable protected input closes it, and you can run the command again. General User account management remains command-line only; sharing and ledger creation are available in Settings → Ledger Sharing.
 
-The menu lists/searches Users in pages of 20, creates Owners with separate ledgers, and creates Auditors for an explicitly selected ledger. Select a User to rename them, reset their password with confirmation, or disable/re-enable Auditor ledger access. Users and memberships are retained; no deletion action is offered. Renaming a User leaves the ledger name unchanged. Details show the last successful sign-in in server-local time with timezone and UTC offset, or Not recorded. User details also controls administrative Login Enabled/Disabled status independently from Auditor ledger access. Disabling an Owner blocks that ledger's integration authentication while preserving each key's own state; Auditors remain independent. Re-enabling login or access requires fresh sign-in and never enables the other status automatically. Exiting the menu does not start the server. If it is stopped, run `startWindows.bat` or `./startLinux.sh` without `manage-users`. Once the server is running, open `http://127.0.0.1:5000` in your browser and sign in with your configured username and password; if the browser showed incomplete setup, reload it. Keep the server terminal open.
+The menu lists/searches Users in pages of 20, creates Owners with separate ledgers, and creates Auditors for an explicitly selected ledger. Select a User to rename them, reset their password with confirmation, or disable/re-enable Auditor ledger access. Users and memberships are retained during disablement; the separate trusted CLI deletion actions below require explicit ID confirmation and a verified backup. Renaming a User leaves the ledger name unchanged. Details show the last successful sign-in in server-local time with timezone and UTC offset, or Not recorded. User details also controls administrative Login Enabled/Disabled status independently from Auditor ledger access. Disabling an Owner blocks that ledger's integration authentication while preserving each key's own state; Auditors remain independent. Re-enabling login or access requires fresh sign-in and never enables the other status automatically. Exiting the menu does not start the server. If it is stopped, run `startWindows.bat` or `./startLinux.sh` without `manage-users`. Once the server is running, open `http://127.0.0.1:5000` in your browser and sign in with your configured username and password; if the browser showed incomplete setup, reload it. Keep the server terminal open.
 
 Owners and Auditors can open **Settings — Audit log** to view their ledger’s recorded changes. Choose 10, 50, 100, or 250 items per page and use Previous/Next; the URL preserves pagination. New transfer operations are combined. Older transfer rows without operation identity remain labeled legacy history; no historical grouping is guessed. The viewer cannot change or delete events.
 

@@ -200,3 +200,26 @@ body[data-role="auditor"] a[href^="/api/backup"], body[data-role="auditor"] a[hr
 #ledgerNameForm { max-width: 32rem; }
 #sharingInviteForm input, #sharingInviteForm select { max-width: 100%; }
 .ownerAccessRow { color: var(--muted, #666); }
+
+.dashboardSecondaryActions { align-items: center; display: flex; flex: 1 1 18rem; gap: .5rem; min-width: 0; }
+.dashboardSecondaryActions .secondaryControl { flex-shrink: 0; }
+.refreshStatus { display: inline-flex; align-items: center; justify-content: flex-end; gap: .4rem; flex: 1 1 0; min-width: 0; height: 2.1rem; font-size: .85rem; }
+#dashboardReviewPendingButton:disabled { background: var(--surface); color: var(--muted); border-color: var(--border); }
+#offlineNavigation { align-items: center; display: flex; flex-wrap: wrap; gap: .15rem; font-size: .85rem; min-height: 1.5rem; min-width: 0; }
+#offlineNavigation time { white-space: nowrap; }
+#offlineSettings { max-width: 45rem; }
+body[data-offline="true"] a:not(.settingsLink):not(#cachedDashboardLink):not(#dashboardNavigationLink) { color: var(--muted); }
+#dashboardNavigationLink[aria-disabled="true"] { color: var(--muted); }
+body[data-offline="true"] #mainNavigation { align-items: center; }
+
+/* Muted buttons identify unavailable actions without changing cached data colors. */
+body[data-offline="true"] #dashboardPage button:disabled { background: var(--surface); border-color: var(--border); color: var(--muted); cursor: default; }
+#dashboardPage > .pageActions { margin-bottom: .5rem; }
+.dashboardGrid h2 { margin-top: .5rem; }
+
+:root { --offline-background: #faf7ef; }
+:root[data-theme="dark"] { --offline-background: #282724; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme]) { --offline-background: #282724; } }
+body[data-offline="true"] { background: var(--offline-background); min-height: 100vh; }
+body[data-offline="true"] table { background: var(--offline-background); }
+body[data-offline="true"] .expenseDetailGroup :is(th, td) { background: var(--offline-background); }
