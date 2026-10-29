@@ -157,13 +157,13 @@ class ApplicationTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(200, response.status_code)
         self.assertEqual(
-            {"applicationVersion": "26.10.24", "schemaVersion": 28, "status": "ok"},
+            {"applicationVersion": "26.10.30", "schemaVersion": 30, "status": "ok"},
             response.get_json(),
         )
 
     def testApplicationIdentityIsExposedFromOneVersionValue(self):
         details = self.client.get("/api/application").get_json()
-        self.assertEqual({"name": "No Part Finance", "version": "26.10.24"}, details)
+        self.assertEqual({"name": "No Part Finance", "version": "26.10.30"}, details)
         response = self.client.get("/")
         html = response.get_data(as_text=True)
         response.close()
@@ -211,9 +211,9 @@ class ApplicationTests(unittest.TestCase):
         self.assertIn("Monthly Requirement", html)
         self.assertIn("Category</th><th class=\"amount\">Monthly Target</th><th class=\"amount\">Three-Month Suggestion", html)
         self.assertIn('id="suggestionRounding"', html)
-        self.assertIn('document.querySelector("#transactionDate").value = today', javascript)
+        self.assertIn('document.querySelector("#transactionDate").value = localCalendarDate()', javascript)
         self.assertIn('document.querySelector("#transferToAccount").value = String(item.accountId)', javascript)
-        self.assertIn('document.querySelector("#transferDate").value = today', javascript)
+        self.assertIn('document.querySelector("#transferDate").value = localCalendarDate()', javascript)
         self.assertIn('document.querySelector("#requirementIncome").textContent = dollars(budget.totalExpectedIncomeCents)', javascript)
 
     def testSmartSuggestionsAndBudgetOrganizationAreExposed(self):
@@ -430,7 +430,7 @@ class ApplicationTests(unittest.TestCase):
         modifiedAfter = self.databasePath.stat().st_mtime_ns
         self.assertEqual(3, status["transactionCount"])
         self.assertEqual(3, status["accountCount"])
-        self.assertEqual(28, status["schemaVersion"])
+        self.assertEqual(30, status["schemaVersion"])
         self.assertRegex(status["modifiedLocal"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
         self.assertEqual(modifiedBefore, modifiedAfter)
 

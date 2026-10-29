@@ -85,7 +85,7 @@ class HardeningTests(unittest.TestCase):
         secondResponse.close()
         connection = connectDatabase(self.databasePath)
         try:
-            self.assertEqual(28, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(30, connection.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
         finally:
             connection.close()

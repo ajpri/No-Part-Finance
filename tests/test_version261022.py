@@ -120,7 +120,7 @@ class UserProvisioningTests(unittest.TestCase):
         self.assertEqual(beforeDump, list(self.connection.iterdump()))
         with patch.object(ledger, "migrateToVersion27"), patch.object(ledger, "migrateToVersion28"):
             ledger.initializeDatabase(self.path)
-        self.assertEqual(28, self.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(30, self.connection.execute("PRAGMA user_version").fetchone()[0])
         for table, recordedRows in beforeRows.items():
             self.assertEqual(recordedRows, [tuple(row) for row in self.connection.execute(f"SELECT * FROM {table}")], table)
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'auditsimulator*'").fetchone()[0])

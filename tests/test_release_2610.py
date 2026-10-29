@@ -667,7 +667,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 copiedPath = Path(self.directory.name) / "package-database.db"
                 copiedPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
-                self.assertIn('applicationVersion = "26.10.24"', archive.read("No-Part-Finance/packageApplication.py").decode())
+                self.assertIn('applicationVersion = "26.10.30"', archive.read("No-Part-Finance/packageApplication.py").decode())
                 self.assertIn("No-Part-Finance/users.py", archive.namelist())
                 self.assertIn("No-Part-Finance/openapi.json", archive.namelist())
             connection = connectDatabase(copiedPath)
@@ -684,7 +684,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 self.assertNotIn("No-Part-Finance/finance.db", archive.namelist())
                 self.assertFalse(any(self.secret.encode() in archive.read(name) for name in archive.namelist()))
-        self.assertEqual("26.10.24", applicationVersion)
+        self.assertEqual("26.10.30", applicationVersion)
 
     def testAuditorAndIntegrationSimulatorReadsNeverWrite(self):
         planId = createSimulatorPlan(self.connection, "Example Plan", "2026-10-01")
@@ -881,7 +881,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v28-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v30-*.db"))
             self.assertEqual(1, len(backups))
 
     def testMigrationPreservesEveryExistingTableAndBackup(self):
@@ -915,7 +915,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v28-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v30-*.db"))
             self.assertEqual(1, len(backups))
             backup = sqlite3.connect(backups[0])
             try:

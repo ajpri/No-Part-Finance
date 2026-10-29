@@ -2,7 +2,7 @@
 
 ## 1. Mission
 
-Build the application defined in `SPEC.md` and the approved `Version Next` milestone in `ROADMAP.md`.
+Build the application defined in `SPEC.md` and the approved `Version Next` milestones in `ROADMAP.md`.
 
 `SPEC.md` is the source of truth for implemented behavior. `ROADMAP.md` is the source of truth for future work, and only its `Version Next` section is approved for implementation.
 
@@ -15,22 +15,18 @@ The objective is a small, understandable, reliable personal finance application 
 Before coding:
 
 1. Read all of `SPEC.md` and `ROADMAP.md`.
-2. Identify the currently requested milestone. When `Version Next` contains one milestone, `Implement Version Next` means its complete scope. When it contains multiple named milestones, implement only the explicitly requested milestone.
-3. Implement only that milestone.
+2. Identify the requested scope. Requests such as `Develop Version Next`, `Implement Version Next`, or `Develop V Next` authorize every milestone currently listed under Version Next, even when there are multiple named milestones. Do not ask the User to select just one. A request naming a specific milestone authorizes only that milestone unless the User explicitly includes others.
+3. Implement one authorized milestone at a time, choosing dependency order when the whole Version Next section is requested.
 4. Run the relevant tests.
 5. Verify its acceptance criteria.
-6. Report what changed and any unresolved issue.
-7. Stop.
+6. Merge its enduring behavior into the appropriate canonical sections of `SPEC.md` and remove only its completed entry from `ROADMAP.md`.
+7. Report what changed and any unresolved issue. Continue to the next milestone already authorized by the request; stop after the complete requested scope is implemented and verified.
 
-Do not automatically begin the next milestone.
+Do not begin milestones outside the requested scope. A request to develop all of Version Next does not authorize Version Soon, Version Later, Deferred Ideas, or new milestones added afterward without further User authorization. Do not promote Version Soon automatically or prebuild future features.
 
-Do not prebuild features from later milestones.
+This project is intentionally split into milestones to reduce wasted implementation effort and Codex usage. Whole-Version Next authorization permits completing the batch without asking for permission again between its milestones; it does not remove financial ambiguity, integrity, testing, or acceptance requirements.
 
-After the requested milestone is successfully implemented and verified, merge its enduring behavior into the appropriate canonical sections of `SPEC.md` and remove only its completed entry from `ROADMAP.md`. Preserve other Version Next milestones and do not begin them automatically. Do not promote Version Soon automatically.
-
-This project is intentionally split into milestones to reduce wasted implementation effort and Codex usage.
-
-Version Next may contain multiple independently scoped feature milestones. Complete and verify one requested milestone at a time, normally recording each feature and its corresponding SPEC.md and ROADMAP.md updates in one logical commit. Multiple completed feature commits may be batched and pushed upstream together. A batch push does not authorize starting another milestone. Move completed behavior into SPEC.md and remove its completed roadmap entry after verification, without waiting for the batch to be pushed.
+Complete and verify one authorized milestone at a time, normally recording each feature and its corresponding SPEC.md and ROADMAP.md updates in one logical commit. Multiple completed feature commits may be batched and pushed upstream together only when pushing is authorized. A batch push does not authorize starting another milestone. Move completed behavior into SPEC.md and remove its completed roadmap entry after verification, without waiting for the batch to be pushed. Preserve all uncompleted and out-of-scope roadmap entries.
 
 Keep one logical change per commit. If a small nit surfaces right after committing and it hasn't been pushed yet, fold it in with `git commit --amend` instead of a second commit. Before pushing to GitHub, squash unpublished progress, fixup, and discussion commits into coherent logical commits, normally one per completed feature or milestone; keep implementation and future specification work separate. Verify that squashing preserves the final tracked file contents. Do not amend or rewrite commits already on GitHub unless the User explicitly approves an override; when approved, use `--force-with-lease` and leave main unchanged unless a merge is separately authorized.
 
@@ -544,9 +540,7 @@ Any decision that needs user input
 
 Keep the report concise.
 
-Do not offer to continue automatically.
-
-Stop and wait for the next milestone instruction.
+Continue through any remaining milestones already authorized by the current request. After the full requested scope is complete, stop and wait for the next instruction; do not offer or begin out-of-scope work.
 
 ## 28. Final Rule
 

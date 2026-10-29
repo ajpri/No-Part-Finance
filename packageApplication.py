@@ -11,10 +11,15 @@ from pathlib import Path
 from platformConfiguration import configurationSample
 
 
-applicationVersion = "26.10.24"
+applicationVersion = "26.10.30"
 archiveRootName = "No-Part-Finance"
 includedFiles = (
     "app.py",
+    "push.py",
+    "cliDeletion.py",
+    "service-worker.js",
+    "offline.js",
+    "tests/test_version261030.py",
     "users.py",
     "platformConfiguration.py",
     "common-passwords.txt",

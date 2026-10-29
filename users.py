@@ -284,8 +284,8 @@ def selectRecord(connection, kind):
     search = ""
     while True:
         if kind == "users":
-            records = connection.execute("SELECT id, username AS label FROM users WHERE instr(usernameKey, ?) > 0 ORDER BY usernameKey, id LIMIT 20 OFFSET ?", (search.casefold(), (page - 1) * 20)).fetchall()
-            total = connection.execute("SELECT COUNT(*) FROM users WHERE instr(usernameKey, ?) > 0", (search.casefold(),)).fetchone()[0]
+            records = connection.execute("SELECT id, username AS label FROM users WHERE deleted = 0 AND instr(usernameKey, ?) > 0 ORDER BY usernameKey, id LIMIT 20 OFFSET ?", (search.casefold(), (page - 1) * 20)).fetchall()
+            total = connection.execute("SELECT COUNT(*) FROM users WHERE deleted = 0 AND instr(usernameKey, ?) > 0", (search.casefold(),)).fetchone()[0]
         else:
             records = connection.execute("SELECT l.id, l.name, u.username FROM ledgers l JOIN ledgerAccess a ON a.ledgerId = l.id AND a.role = 'owner' JOIN users u ON u.id = a.userId ORDER BY lower(l.name), l.id").fetchall()
             records = [dict(row, label=f"{row['name']} — Owner: {row['username']}") for row in records if search.casefold() in row["name"].casefold() or search.casefold() in row["username"].casefold()]
@@ -398,7 +398,7 @@ def manageUsers(databasePath, configuration=None, operationalLogs=None):
         print("Exactly one Owner per ledger; multiple read-only Auditors are supported. User management does not start the server.")
         print("After exiting, run startWindows.bat (Windows) or ./startLinux.sh (Linux) without manage-users if the server is not running.")
         while True:
-            print("\n1. List / manage users\n2. Create Owner and ledger\n3. Create Auditor for a ledger\n0. Exit")
+            print("\n1. List / manage users\n2. Create Owner and ledger\n3. Create Auditor for a ledger\n4. Delete User\n5. Delete Ledger\n0. Exit")
             try:
                 choice = input("Choose: ").strip()
                 if choice == "0":
@@ -419,9 +419,15 @@ def manageUsers(databasePath, configuration=None, operationalLogs=None):
                     if ledgerId is not None:
                         bindLedger(connection, ledgerId)
                         promptCreateUser(connection, "auditor")
+                elif choice in {"4", "5"}:
+                    from cliDeletion import confirmDeletion
+                    kind = "user" if choice == "4" else "ledger"
+                    targetId = selectRecord(connection, "users" if kind == "user" else "ledgers")
+                    if targetId is not None:
+                        confirmDeletion(connection, kind, targetId)
                 else:
                     print("Choose a listed option.")
-            except (ValidationError, sqlite3.Error) as error:
+            except (ValidationError, sqlite3.Error, OSError) as error:
                 if operationalLogs:
                     operationalLogs.write("userManagement", "A user-management change could not be saved. Review the terminal feedback and correct the input or database problem before trying again.")
                 print(str(error))

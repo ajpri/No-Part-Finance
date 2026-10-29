@@ -647,7 +647,7 @@ class PackageAndMigrationTests(unittest.TestCase):
         self.assertEqual("accepted", connection.execute("SELECT verificationStatus FROM users").fetchone()[0])
         self.assertEqual("", connection.execute("SELECT firstName FROM users").fetchone()[0])
         connection.close()
-        self.assertTrue(list((self.root / "backups").glob("pre-migration-v27-to-v28-*.db")))
+        self.assertTrue(list((self.root / "backups").glob("pre-migration-v27-to-v30-*.db")))
         ledger.initializeDatabase(path)
 
     def testExportAcceptanceUnchangedAndCredentialsExcluded(self):

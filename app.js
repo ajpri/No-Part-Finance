@@ -15,6 +15,16 @@ let notificationRemainingMilliseconds = 0;
 let notificationStartedAt = 0;
 let simulatorSavePending = false;
 let browserSession = null;
+let dashboardRequestId = 0;
+let dashboardCurrentDate = null;
+let dashboardRefreshPromise = null;
+let pendingCountPromise = null;
+let visibleCheckTimer = null;
+let lifecycleReady = false;
+let pendingLatestId = null;
+let pendingToastVisible = false;
+let lastDashboard = null;
+let lastDashboardQuery = null;
 let pendingDecisionBusy = false;
 const pendingSummaryState = {all: {requestId: 0, signature: null}, selected: {requestId: 0, signature: null}};
 const currentPath = window.location.pathname;
@@ -100,6 +110,9 @@ function sendNotification(message, options = {}) {
   if (typeof message !== "string" || !message) return;
   const notification = document.querySelector("#temporaryNotification");
   const closeButton = document.querySelector("#temporaryNotificationClose");
+  // A Pending arrival remains actionable; routine save messages wait until it closes.
+  if (pendingToastVisible && options.pending !== true) return;
+  document.querySelector("#pendingNotificationAction").hidden = options.pending !== true;
   const seconds = Number(options.time);
   const time = Number.isFinite(seconds) && seconds > 0 ? seconds : 5;
   const color = ["green", "yellow", "red"].includes(options.color) ? options.color : "green";
@@ -109,10 +122,12 @@ function sendNotification(message, options = {}) {
   notification.hidden = false;
   clearTimeout(notificationTimer);
   notificationRemainingMilliseconds = time * 1000;
-  resumeNotificationTimer();
+  notificationStartedAt = 0;
+  if (options.pending !== true) resumeNotificationTimer();
 }
 
 function closeNotification() {
+  pendingToastVisible = false;
   clearTimeout(notificationTimer);
   const closeButton = document.querySelector("#temporaryNotificationClose");
   if (document.activeElement === closeButton) closeButton.blur();
@@ -127,7 +142,7 @@ function pauseNotificationTimer() {
 }
 
 function resumeNotificationTimer() {
-  if (document.querySelector("#temporaryNotification").hidden) return;
+  if (pendingToastVisible || document.querySelector("#temporaryNotification").hidden) return;
   notificationStartedAt = Date.now();
   notificationTimer = setTimeout(closeNotification, Math.max(1, notificationRemainingMilliseconds));
 }
@@ -223,9 +238,25 @@ async function removeExecutedSimulatorRows(){const plan=simulator.plan,executedC
 function warnSimulatorUnsaved(event){if(activeSimulatorDirtyRows().length){event.preventDefault();event.returnValue="";}}
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {...options, headers: {"Content-Type": "application/json", ...(browserSession ? {"X-CSRF-Token": browserSession.csrfToken} : {}), ...((browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")) ? {"X-Ledger-ID": browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")} : {}), ...options.headers}});
+  const method = (options.method || "GET").toUpperCase();
+  if (offlineMode && (method !== "GET" || !offlineRecovery)) throw new Error("Offline: this action requires a connection");
+  let response;
+  try { response = await fetch(path, {...options, headers: {"Content-Type": "application/json", ...(browserSession ? {"X-CSRF-Token": browserSession.csrfToken} : {}), ...((browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")) ? {"X-Ledger-ID": browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")} : {}), ...options.headers}}); }
+  catch (error) {
+    if (lifecycleReady && !offlineRecovery) await enterOffline();
+    throw error;
+  }
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Request failed");
+  if (!response.ok) {
+    const error = new Error(result.error || "Request failed");
+    error.status = response.status;
+    if (response.status === 401 || response.status === 403) {
+      try { await OfflineFinance.clear(browserSession?.userId, response.status === 401 ? null : browserSession?.ledgerId); } catch {}
+      // Cached snapshots never bypass a real authentication/access denial.
+      if (offlineMode || path === "/api/session" || response.status === 401) location.assign("/sign-in");
+    }
+    throw error;
+  }
   return result;
 }
 
@@ -663,7 +694,7 @@ async function newTransaction(preferredTemplateId = null) {
   form.dataset.previousAccountId = "";
   form.dataset.simulatorLinked = "false";
   document.querySelector("#deleteTransactionButton").hidden = true;
-  document.querySelector("#transactionDate").value = today;
+  document.querySelector("#transactionDate").value = localCalendarDate();
   document.querySelector("#transactionDialogTitle").textContent = "New Transaction";
   setAccountOptions(document.querySelector("#transactionAccount"), activeAccountsWith(), "Select account");
   setMixedCategoryOptions(document.querySelector("#transactionCategory"), selectableCategoriesWith(), "Select category");
@@ -685,7 +716,7 @@ async function newTransaction(preferredTemplateId = null) {
 function addBulkEntryRow(hanging = true) {
   const row = document.querySelector("#bulkEntryRows").insertRow();
   if (hanging) row.classList.add("bulkHangingRow");
-  const dateInput = document.createElement("input"); dateInput.type = "date"; dateInput.value = today;
+  const dateInput = document.createElement("input"); dateInput.type = "date"; dateInput.value = localCalendarDate();
   const accountSelect = document.createElement("select"); setAccountOptions(accountSelect, activeAccountsWith(), "Select account");
   const descriptionInput = document.createElement("input");
   const categorySelect = document.createElement("select"); setMixedCategoryOptions(categorySelect, selectableCategoriesWith(), "Select category");
@@ -783,7 +814,7 @@ function newTransfer() {
   configurePendingEntry("Transfer", false);
   form.dataset.simulatorLinked = "false";
   document.querySelector("#deleteTransferButton").hidden = true;
-  document.querySelector("#transferDate").value = today;
+  document.querySelector("#transferDate").value = localCalendarDate();
   document.querySelector("#transferDescription").value = "Transfer";
   document.querySelector("#transferDialogTitle").textContent = "New Transfer";
   setAccountOptions(document.querySelector("#transferFromAccount"), transferAccountsWith(), "Select account");
@@ -1107,13 +1138,37 @@ function renderQuickUpdates(rows) {
   }
 }
 
-async function loadDashboard() {
+function dashboardQuery() {
   const query = new URLSearchParams({period: document.querySelector("#dashboardPeriod").value});
   if (query.get("period") === "custom") {
     query.set("startDate", document.querySelector("#dashboardStartDate").value);
     query.set("endDate", document.querySelector("#dashboardEndDate").value);
   }
-  const dashboard = await api(`/api/dashboard?${query}`);
+  return query.toString();
+}
+
+async function loadDashboard() {
+  const requestId = ++dashboardRequestId;
+  const selectedQuery = dashboardQuery(), ledgerId = browserSession?.ledgerId;
+  document.querySelector("#dashboardRefreshMessage").textContent = "Updating…";
+  document.querySelector("#dashboardRefreshRetry").hidden = true;
+  try {
+    const dashboard = await api(`/api/dashboard?${selectedQuery}`);
+    if (requestId !== dashboardRequestId || selectedQuery !== dashboardQuery() || ledgerId !== browserSession?.ledgerId) return;
+    renderDashboard(dashboard);
+    dashboardCurrentDate = dashboard.currentDate;
+    lastDashboard = dashboard;
+    lastDashboardQuery = selectedQuery;
+    await cacheDashboard();
+    document.querySelector("#dashboardRefreshMessage").textContent = "";
+  } catch (error) {
+    if (requestId !== dashboardRequestId) return;
+    document.querySelector("#dashboardRefreshMessage").textContent = error.status === 401 || error.status === 403 ? error.message : "Couldn't refresh";
+    document.querySelector("#dashboardRefreshRetry").hidden = false;
+  }
+}
+
+function renderDashboard(dashboard) {
   renderDashboardAccounts(dashboard);
   renderDashboardCategories(dashboard);
   renderDashboardExpenseAccounts(dashboard);
@@ -1134,6 +1189,8 @@ async function loadDashboard() {
 async function initializeDashboardPeriods() {
   const months = await api("/api/report-periods");
   for (const select of [document.querySelector("#dashboardPeriod"), document.querySelector("#periodFilter")]) {
+    const selectedValue = select.value;
+    for (const item of [...select.options]) if (item.value.startsWith("month:")) item.remove();
     const customOption = select.querySelector('option[value="custom"]');
     for (const month of months) {
       const monthDate = new Date(`${month}-01T00:00:00`);
@@ -1142,6 +1199,8 @@ async function initializeDashboardPeriods() {
       monthOption.textContent = monthDate.toLocaleDateString("en-US", {month: "long", year: "numeric"});
       select.insertBefore(monthOption, customOption);
     }
+    if (selectedValue.startsWith("month:") && ![...select.options].some((item) => item.value === selectedValue)) option(select, selectedValue, selectedValue.slice(6));
+    select.value = selectedValue;
   }
 }
 
@@ -1525,7 +1584,7 @@ function newPlannedPayment() { const form = document.querySelector("#plannedPaym
 function editPlannedPayment(item) { const form = document.querySelector("#plannedPaymentForm"); form.reset(); document.querySelector("#plannedPaymentId").value = item.id; document.querySelector("#plannedPaymentDate").value = item.expectedDate; setAccountOptions(document.querySelector("#plannedPaymentAccount"), creditPaymentAccounts(), "Select account", item.accountId); document.querySelector("#plannedPaymentDescription").value = item.description; document.querySelector("#plannedPaymentAmount").value = (item.amountCents / 100).toFixed(2); document.querySelector("#plannedPaymentActive").checked = Boolean(item.active); document.querySelector("#plannedPaymentActiveLabel").hidden = false; document.querySelector("#deletePlannedPaymentButton").hidden = false; document.querySelector("#plannedPaymentDialogTitle").textContent = "Edit Planned Monthly Debt Payment"; openDialog(document.querySelector("#plannedPaymentDialog"), form); }
 async function savePlannedPayment(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#plannedPaymentId").value; const payload = {expectedDate: document.querySelector("#plannedPaymentDate").value, accountId: document.querySelector("#plannedPaymentAccount").value, description: document.querySelector("#plannedPaymentDescription").value, amount: document.querySelector("#plannedPaymentAmount").value, active: document.querySelector("#plannedPaymentActive").checked}; try { await api(id ? `/api/planned-credit-payments/${id}` : "/api/planned-credit-payments", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#plannedPaymentDialog").close(); await loadBudget(); } catch (error) { showFormError(form, error); } }
 async function removePlannedPayment() { const item = budget.plannedCreditPayments.find((row) => row.id === Number(document.querySelector("#plannedPaymentId").value)); if (!item || !window.confirm(`Permanently delete planned payment "${item.description}"?`)) return; try { await api(`/api/planned-credit-payments/${item.id}`, {method: "DELETE"}); document.querySelector("#plannedPaymentDialog").close(); await loadBudget(); } catch (error) { window.alert(error.message); } }
-function makePlannedPayment(item) { newTransfer(); document.querySelector("#transferToAccount").value = String(item.accountId); updateTransferPresentation(false); document.querySelector("#transferDescription").value = item.description; setMoneyInputValue(document.querySelector("#transferAmount"), (item.amountCents / 100).toFixed(2)); document.querySelector("#transferDate").value = today; }
+function makePlannedPayment(item) { newTransfer(); document.querySelector("#transferToAccount").value = String(item.accountId); updateTransferPresentation(false); document.querySelector("#transferDescription").value = item.description; setMoneyInputValue(document.querySelector("#transferAmount"), (item.amountCents / 100).toFixed(2)); document.querySelector("#transferDate").value = localCalendarDate(); }
 
 async function saveBudgetSettings(event) { event.preventDefault(); const form = event.currentTarget; try { await api("/api/settings/paychecks-per-year", {method: "PUT", body: JSON.stringify({paychecksPerYear: document.querySelector("#paychecksPerYear").value})}); await api("/api/settings/suggestion-rounding", {method: "PUT", body: JSON.stringify({amount: document.querySelector("#suggestionRounding").value})}); await api("/api/settings/budget-suggestion-windows", {method: "PUT", body: JSON.stringify({monthlyDays: document.querySelector("#monthlySuggestionWindow").value, quarterlyMonths: document.querySelector("#quarterlySuggestionWindow").value, annualMonths: document.querySelector("#annualSuggestionWindow").value})}); await loadSettings(); } catch (error) { showFormError(form, error); } }
 
@@ -1647,7 +1706,12 @@ function useSettingsFragmentNavigation(event) {
 }
 
 async function start() {
+  await OfflineFinance.ready;
   browserSession = await api("/api/session");
+  try {
+    const {snapshots} = await OfflineFinance.available(browserSession.userId);
+    for (const snapshot of snapshots) if (!browserSession.ledgers.some((ledger) => ledger.id === snapshot.ledgerId)) await OfflineFinance.clear(browserSession.userId, snapshot.ledgerId);
+  } catch {}
   document.querySelector("#signedInAs").textContent = `Signed in as: ${[browserSession.firstName, browserSession.lastName].filter(Boolean).join(" ")}`;
   document.body.dataset.role = browserSession.role;
   document.querySelector("#auditorBanner").hidden = browserSession.role !== "auditor";
@@ -1692,9 +1756,13 @@ async function start() {
   if (path === "/pending" && browserSession.role !== "auditor") { await loadReferenceData(); await loadPendingReview(); }
   if (["owner", "member"].includes(browserSession.role)) {
     if (path === "/settings") await loadIntegrationSecrets();
-    if (["/", "/new", "/transactions"].includes(path)) await refreshPendingCount();
+    await refreshPendingCount();
   }
   if (path === "/" || path === "/new") { await loadReferenceData(); await initializeDashboardPeriods(); await loadDashboard(); }
+  applicationWorker();
+  if (path === "/settings") { await refreshPushSettings(); await refreshOnlineCacheStatus(); }
+  lifecycleReady = true;
+  scheduleVisibleCheck();
   if (path === "/new" && ["owner", "member"].includes(browserSession.role)) {
     const transactionDialog = document.querySelector("#transactionDialog");
     transactionDialog.addEventListener("close", () => { if (window.location.pathname === "/new") window.history.replaceState({}, "", ledgerUrl("/")); }, {once: true});
@@ -1750,7 +1818,7 @@ document.querySelector(".settingsNavigation").addEventListener("click", useSetti
 document.querySelector(".budgetNavigation").addEventListener("click", useBudgetFragmentNavigation);
 document.querySelector("#transactionCategory").addEventListener("change", updateReimbursementAvailability); document.querySelector("#alsoLogReimbursement").addEventListener("change", updateReimbursementFields);
 document.querySelector("#dashboardTransactionButton").addEventListener("click", () => newTransaction()); document.querySelector("#dashboardTransferButton").addEventListener("click", newTransfer); document.querySelector("#hideZeroBalances").addEventListener("change", loadDashboard); document.querySelector("#dashboardPeriod").addEventListener("change", (event) => { const custom = event.target.value === "custom"; document.querySelector("#dashboardCustomDates").hidden = !custom; document.querySelector("#dashboardStartDate").disabled = !custom; document.querySelector("#dashboardEndDate").disabled = !custom; if (!custom) loadDashboard(); }); document.querySelector("#dashboardStartDate").addEventListener("change", () => { if (document.querySelector("#dashboardEndDate").value) loadDashboard(); }); document.querySelector("#dashboardEndDate").addEventListener("change", () => { if (document.querySelector("#dashboardStartDate").value) loadDashboard(); });
-document.querySelector("#dashboardBreakdown").addEventListener("change", (event) => showDashboardBreakdown(event.target.value));
+document.querySelector("#dashboardBreakdown").addEventListener("change", (event) => { showDashboardBreakdown(event.target.value); cacheDashboard(); });
 document.querySelector("#newSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog(false));
 document.querySelector("#emptyNewSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog(false));
 document.querySelector("#duplicateSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog(true));
@@ -1853,14 +1921,87 @@ async function loadIntegrationSecrets() {
 
 async function refreshPendingCount() {
   if (!["owner", "member"].includes(browserSession?.role)) return;
-  const result = await api("/api/pending");
-  const reviewButton = document.querySelector("#reviewPendingButton");
-  reviewButton.textContent = `Review Pending (${result.count})`;
-  reviewButton.classList.toggle("statusYellow", result.count > 0);
-  reviewButton.disabled = result.count === 0;
-  document.querySelector("#pendingBannerDescription").textContent = `${result.count} pending items — ${result.transactionCount} transactions and ${result.transferCount} transfers. Review before adding them to the ledger.`;
-  document.querySelector("#pendingBanner").hidden = !result.count;
+  if (pendingCountPromise) return pendingCountPromise;
+  const ledgerId = browserSession.ledgerId;
+  pendingCountPromise = (async () => {
+    const result = await api("/api/pending/status");
+    if (ledgerId !== browserSession.ledgerId) return;
+    for (const reviewButton of document.querySelectorAll("#reviewPendingButton, #dashboardReviewPendingButton")) {
+      reviewButton.textContent = `Review Pending (${result.count})`;
+      reviewButton.classList.toggle("statusYellow", result.count > 0);
+      reviewButton.disabled = result.count === 0;
+    }
+    const storageKey = `npfPending:${browserSession.userId}:${ledgerId}`;
+    if (pendingLatestId === null) {
+      try { const saved = sessionStorage.getItem(storageKey); if (saved !== null) pendingLatestId = Number(saved); } catch {}
+    }
+    const hasNew = pendingLatestId !== null && result.ids.some((id) => id > pendingLatestId);
+    pendingLatestId = Math.max(pendingLatestId || 0, result.latestId);
+    try { sessionStorage.setItem(storageKey, String(pendingLatestId)); } catch {}
+    if (hasNew) {
+      pendingToastVisible = true;
+      sendNotification(currentPath === "/pending" ? "New Pending items received. Refresh to view." : "New Pending items received.", {color: "yellow", pending: true});
+      document.querySelector("#pendingNotificationAction").textContent = currentPath === "/pending" ? "Refresh to view" : "Review";
+    }
+  })();
+  try { return await pendingCountPromise; } finally { pendingCountPromise = null; }
 }
+
+async function refreshDashboardOnReturn() {
+  if (dashboardRefreshPromise) return dashboardRefreshPromise;
+  dashboardRefreshPromise = (async () => {
+    await initializeDashboardPeriods();
+    await loadDashboard();
+  })();
+  try { await dashboardRefreshPromise; }
+  catch (error) {
+    document.querySelector("#dashboardRefreshMessage").textContent = "Couldn't refresh";
+    document.querySelector("#dashboardRefreshRetry").hidden = false;
+  } finally { dashboardRefreshPromise = null; }
+}
+
+async function checkVisiblePage(returned = false) {
+  if (!lifecycleReady || document.visibilityState !== "visible") return;
+  const previousPolicy = OfflineFinance.policy;
+  await OfflineFinance.refreshPolicy();
+  if (offlineMode) {
+    await recoverOffline();
+    if (offlineMode && !OfflineFinance.policy.pwaOfflineEnabled) { offlineSnapshot = null; await showOfflineDashboard(null); }
+    return;
+  }
+  if (currentPath === "/settings" && (previousPolicy.pwaOfflineEnabled !== OfflineFinance.policy.pwaOfflineEnabled || previousPolicy.pushNotificationsEnabled !== OfflineFinance.policy.pushNotificationsEnabled)) {
+    await refreshPushSettings(); await refreshOnlineCacheStatus();
+  }
+  try { await refreshPendingCount(); } catch { /* Keep the last confirmed count until the next check. */ }
+  if (["/", "/new"].includes(currentPath)) {
+    try {
+      const calendar = await api("/api/calendar");
+      if (returned || calendar.currentDate !== dashboardCurrentDate) await refreshDashboardOnReturn();
+    } catch {
+      document.querySelector("#dashboardRefreshMessage").textContent = "Couldn't refresh";
+      document.querySelector("#dashboardRefreshRetry").hidden = false;
+    }
+  }
+}
+
+function scheduleVisibleCheck() {
+  clearInterval(visibleCheckTimer);
+  if (document.visibilityState === "visible") visibleCheckTimer = setInterval(() => checkVisiblePage(), 60000);
+}
+
+document.addEventListener("visibilitychange", () => {
+  scheduleVisibleCheck();
+  if (document.visibilityState === "visible") checkVisiblePage(true);
+});
+document.querySelector("#dashboardRefreshRetry").addEventListener("click", refreshDashboardOnReturn);
+document.querySelector("#dashboardReviewPendingButton").addEventListener("click", () => location.assign(ledgerUrl("/pending")));
+document.querySelector("#pendingNotificationAction").addEventListener("click", async () => {
+  if (currentPath !== "/pending") { closeNotification(); location.assign(ledgerUrl("/pending")); return; }
+  if (document.querySelector("#pendingForm .unsavedRow") && !confirm("Discard unsaved Pending edits and refresh?")) return;
+  if (pendingDecisionBusy || pendingReviewElements().some((row) => row.saving)) return;
+  try { await loadReferenceData(); await loadPendingReview(); closeNotification(); }
+  catch (error) { sendNotification(error.message, {pending: true, color: "yellow"}); }
+});
 
 function pendingDraft(row) {
   const fields = row.dataset.kind === "transfer" ? ["date", "fromAccountId", "toAccountId", "description", "amount"] : ["date", "accountId", "description", "categoryId", "amount"];
@@ -2107,7 +2248,7 @@ async function decidePendingSelection(decision, approveAll = false) {
 }
 
 document.querySelector("#reviewPendingButton").addEventListener("click", () => window.location.assign(ledgerUrl("/pending")));
-document.querySelector("#logOutButton").addEventListener("click", async () => { await api("/api/logout", {method: "POST"}); location.assign("/sign-in"); });
+document.querySelector("#logOutButton").addEventListener("click", async () => { await api("/api/logout", {method: "POST"}); try { await OfflineFinance.clear(browserSession?.userId); } catch {} location.assign("/sign-in"); });
 document.querySelector("#integrationTransferSettingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -2126,8 +2267,6 @@ document.querySelector("#integrationSecretForm").addEventListener("submit", asyn
 document.querySelector("#pendingForm").addEventListener("submit", (event) => { event.preventDefault(); decidePendingSelection("approve"); });
 document.querySelector("#approveAllPendingButton").addEventListener("click", () => decidePendingSelection("approve", true));
 document.querySelector("#rejectPendingButton").addEventListener("click", () => decidePendingSelection("reject"));
-start().catch((error) => { document.querySelector("main").textContent = error.message; });
-
 function entryRequestId() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
@@ -2418,3 +2557,317 @@ function preserveLedgerLinks(root = document) {
     if (!link.getAttribute("href").startsWith("#") && target.origin === location.origin && ["/", "/new", "/transactions", "/budget", "/simulator", "/settings", "/pending", "/api/backup", "/api/package", "/api/package-no-db"].includes(target.pathname)) link.href = ledgerUrl(target);
   }
 }
+
+let appWorkerPromise = null;
+function applicationWorker() {
+  if (!window.isSecureContext || !("serviceWorker" in navigator)) return Promise.resolve(null);
+  if (!appWorkerPromise) appWorkerPromise = navigator.serviceWorker.register("/service-worker.js").then(() => navigator.serviceWorker.ready).catch(() => null);
+  return appWorkerPromise;
+}
+
+async function refreshPushSettings() {
+  if (!["owner", "member"].includes(browserSession?.role)) return;
+  const status = document.querySelector("#pushPermissionStatus"), enable = document.querySelector("#enablePushButton"), disable = document.querySelector("#disablePushButton");
+  if (!OfflineFinance.policy.pushNotificationsEnabled) {
+    status.textContent = "Push notifications are disabled by the administrator.";
+    enable.hidden = true; disable.hidden = true;
+    return;
+  }
+  const supported = window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  enable.disabled = !supported || Notification.permission === "denied";
+  disable.hidden = true;
+  if (!supported) { status.textContent = "Notifications are unsupported here. Use HTTPS and a supported browser; on iPhone or iPad open the installed Home Screen app."; return; }
+  if (Notification.permission === "denied") { status.textContent = "Blocked. Allow notifications in your browser or device settings, then try again."; return; }
+  const registration = await applicationWorker();
+  if (!registration) { status.textContent = "Notifications unavailable. Check the connection and retry."; return; }
+  const subscription = await registration.pushManager.getSubscription();
+  const settings = await api("/api/push");
+  const enrolled = subscription && settings.endpoints.includes(subscription.endpoint);
+  // Refresh the public sender origin for existing enrollments after a server update.
+  if (enrolled) await api("/api/push", {method: "POST", body: JSON.stringify({endpoint: subscription.endpoint, keys: subscription.toJSON().keys})});
+  status.textContent = enrolled ? "Enabled for this installation and ledger." : "Not enabled for this installation and ledger.";
+  enable.hidden = Boolean(enrolled);
+  disable.hidden = !enrolled;
+}
+
+document.querySelector("#enablePushButton").addEventListener("click", async () => {
+  const button = document.querySelector("#enablePushButton");
+  button.disabled = true;
+  try {
+    if (!OfflineFinance.policy.pushNotificationsEnabled) throw new Error("Push notifications are disabled by the administrator.");
+    // Request directly from the gesture, before any network awaits (iOS requirement).
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") { await refreshPushSettings(); return; }
+    const registration = await applicationWorker();
+    if (!registration) throw new Error("Notifications unavailable. Check the connection and retry.");
+    const settings = await api("/api/push");
+    const encoded = settings.publicKey.replace(/-/g, "+").replace(/_/g, "/");
+    const key = Uint8Array.from(atob(encoded + "=".repeat((4 - encoded.length % 4) % 4)), (character) => character.charCodeAt(0));
+    const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: key});
+    await api("/api/push", {method: "POST", body: JSON.stringify({endpoint: subscription.endpoint, keys: subscription.toJSON().keys})});
+    await refreshPushSettings();
+  } catch (error) { document.querySelector("#pushPermissionStatus").textContent = error.message; }
+  finally { button.disabled = false; }
+});
+document.querySelector("#disablePushButton").addEventListener("click", async () => {
+  try {
+    const registration = await applicationWorker();
+    const subscription = await registration?.pushManager.getSubscription();
+    if (subscription) await api("/api/push", {method: "DELETE", body: JSON.stringify({endpoint: subscription.endpoint})});
+    await refreshPushSettings();
+  } catch (error) { document.querySelector("#pushPermissionStatus").textContent = error.message; }
+});
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (event) => {
+  if (event.data?.type === "pending-arrival" && event.data.ledgerId === browserSession?.ledgerId) refreshPendingCount().catch(() => {});
+  if (event.data?.type === "invitation-arrival" && browserSession && !offlineMode) loadRecipientInvitations().catch(() => {});
+});
+
+let offlineMode = false;
+let offlineRecovery = false;
+let offlineColdStart = false;
+let offlineSnapshot = null;
+let offlineRecoveryPromise = null;
+const offlineDisabledControls = new Map();
+
+function savedDashboardControls() {
+  const result = {};
+  for (const id of ["dashboardPeriod", "dashboardBreakdown", "dashboardStartDate", "dashboardEndDate", "hideZeroBalances"]) {
+    const control = document.getElementById(id);
+    result[id] = {value: control.value, checked: control.checked, options: control.options ? [...control.options].map((item) => ({value: item.value, label: item.textContent})) : null};
+  }
+  return result;
+}
+async function cacheDashboard() {
+  if (!lastDashboard || offlineMode || dashboardQuery() !== lastDashboardQuery) return;
+  try { await OfflineFinance.save(browserSession, lastDashboard, savedDashboardControls()); }
+  catch { /* Storage refusal or eviction does not prevent online operation. */ }
+}
+function restoreDashboardControls(snapshot) {
+  for (const [id, saved] of Object.entries(snapshot.controls)) {
+    const control = document.getElementById(id);
+    if (saved.options) { control.replaceChildren(); for (const item of saved.options) option(control, item.value, item.label); }
+    control.value = saved.value;
+    if (typeof saved.checked === "boolean") control.checked = saved.checked;
+  }
+  document.querySelector("#dashboardCustomDates").hidden = document.querySelector("#dashboardPeriod").value !== "custom";
+  showDashboardBreakdown(document.querySelector("#dashboardBreakdown").value);
+}
+function disableOfflineControls() {
+  for (const link of document.querySelectorAll("a:not(.settingsLink):not(#cachedDashboardLink):not(#dashboardNavigationLink)")) {
+    if (!link.hasAttribute("data-offline-disabled")) {
+      link.dataset.offlineDisabled = link.getAttribute("aria-disabled") || "";
+      link.setAttribute("aria-disabled", "true");
+    }
+  }
+  for (const control of document.querySelectorAll("input, select, textarea, button")) {
+    if (["ledgerSelect", "clearOfflineButton"].includes(control.id) || control.hasAttribute("data-close")) continue;
+    if (!offlineDisabledControls.has(control)) offlineDisabledControls.set(control, control.disabled);
+    control.disabled = true;
+  }
+}
+function offlineUpdatedLabel(savedAt, currentDate = new Date()) {
+  const savedDate = new Date(savedAt);
+  if (Number.isNaN(savedDate.getTime())) return "Updated time unavailable";
+  const time = savedDate.toLocaleTimeString("en-US", {hour: "numeric", minute: "2-digit"});
+  if (localCalendarDate(savedDate) === localCalendarDate(currentDate)) return `Updated ${time}`;
+  const dateOptions = {month: "short", day: "numeric"};
+  if (savedDate.getFullYear() !== currentDate.getFullYear()) dateOptions.year = "numeric";
+  return `Updated ${savedDate.toLocaleDateString("en-US", dateOptions)}, ${time}`;
+}
+function offlineStatus(snapshot) {
+  const navigation = document.querySelector("#offlineNavigation");
+  navigation.replaceChildren(document.createTextNode("Offline"));
+  if (snapshot) {
+    const timestamp = document.createElement("time");
+    timestamp.dateTime = snapshot.savedAt;
+    timestamp.textContent = offlineUpdatedLabel(snapshot.savedAt);
+    timestamp.title = new Date(snapshot.savedAt).toLocaleString();
+    navigation.append(document.createTextNode(" · "), timestamp);
+  } else navigation.append(document.createTextNode(" · Dashboard unavailable"));
+  navigation.hidden = false;
+  document.querySelector("#mainNavigation").hidden = false;
+  for (const link of document.querySelectorAll(".onlineNavigationLink")) link.hidden = true;
+  const dashboardLink = document.querySelector("#dashboardNavigationLink");
+  dashboardLink.setAttribute("aria-disabled", snapshot ? "false" : "true");
+  if (snapshot) dashboardLink.href = ledgerUrl("/", snapshot.ledgerId);
+  if (!document.querySelector("#dashboardPage").hidden) dashboardLink.setAttribute("aria-current", "page");
+  else dashboardLink.removeAttribute("aria-current");
+  const settingsLink = document.querySelector("header .settingsLink");
+  if (!document.querySelector("#offlineSettings").hidden) settingsLink.setAttribute("aria-current", "page");
+  else settingsLink.removeAttribute("aria-current");
+  document.querySelector("#offlineCacheStatus").textContent = snapshot ? `Offline · Last updated ${new Date(snapshot.savedAt).toLocaleString()}` : "Offline · No saved Dashboard available";
+}
+async function openCachedDashboard() {
+  if (!offlineSnapshot) return;
+  if (hasLedgerDrafts() && !confirm("Discard unsaved changes and view the cached Dashboard?")) return;
+  for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+  simulatorDirtyRows.clear();
+  history.replaceState({}, "", ledgerUrl("/", offlineSnapshot.ledgerId));
+  offlineColdStart = true;
+  await showOfflineDashboard(offlineSnapshot);
+}
+async function showOfflineDashboard(snapshot) {
+  offlineSnapshot = snapshot;
+  if (snapshot) {
+    browserSession = snapshot.session;
+    document.body.dataset.role = snapshot.session.role;
+    document.querySelector("#auditorBanner").hidden = snapshot.session.role !== "auditor";
+    restoreDashboardControls(snapshot);
+    renderDashboard(snapshot.dashboard);
+    lastDashboard = snapshot.dashboard;
+  }
+  for (const page of document.querySelectorAll("main > section")) page.hidden = page.id !== "dashboardPage";
+  document.querySelector("#offlineSettings").hidden = true;
+  offlineStatus(snapshot);
+  if (!snapshot) {
+    document.querySelector("#dashboardPage").hidden = true;
+    document.querySelector("#offlineSettings").hidden = false;
+    document.querySelector("#offlineCacheStatus").textContent = "Offline Dashboard unavailable. Reconnect to save a fresh snapshot.";
+  }
+  disableOfflineControls();
+  await configureOfflineLedgers();
+}
+async function configureOfflineLedgers() {
+  const {snapshots} = await OfflineFinance.available(browserSession?.userId);
+  const selector = document.querySelector("#ledgerSelect"); selector.replaceChildren();
+  const known = [...(browserSession?.ledgers || [])];
+  for (const snapshot of snapshots) if (!known.some((item) => item.id === snapshot.ledgerId)) {
+    known.push(snapshot.session.ledgers.find((item) => item.id === snapshot.ledgerId) || {id: snapshot.ledgerId, label: snapshot.ledgerId});
+  }
+  for (const ledger of known) {
+    const cached = snapshots.some((item) => item.ledgerId === ledger.id);
+    const item = option(selector, ledger.id, `${ledger.label}${cached ? "" : " — Unavailable offline"}`);
+    item.disabled = !cached;
+  }
+  selector.value = browserSession?.ledgerId || "";
+  selector.disabled = snapshots.length <= 1;
+  document.querySelector("#ledgerSelectLabel").hidden = known.length === 0;
+}
+async function enterOffline() {
+  if (offlineMode) return;
+  offlineMode = true;
+  document.body.dataset.offline = "true";
+  offlineColdStart = !lifecycleReady;
+  document.querySelector("#invitationBanner").hidden = true;
+  document.querySelector("#dashboardRefreshMessage").textContent = "";
+  document.querySelector("#dashboardRefreshRetry").hidden = true;
+  closeNotification();
+  let cached;
+  try { cached = await OfflineFinance.available(browserSession?.userId); } catch { cached = {snapshots: []}; }
+  const requested = browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger") || cached.active?.ledgerId;
+  const snapshot = cached.snapshots.find((item) => item.ledgerId === requested) || cached.snapshots[0];
+  offlineSnapshot = snapshot || null;
+  if (offlineColdStart || ["/", "/new"].includes(currentPath)) {
+    await showOfflineDashboard(snapshot);
+    if (!["/", "/new", "/settings"].includes(currentPath)) document.querySelector("#ledgerSwitchError").textContent = "This page needs a connection. Showing the cached Dashboard.";
+  } else {
+    offlineStatus(snapshot);
+    disableOfflineControls();
+    await configureOfflineLedgers();
+  }
+  if (currentPath === "/settings") {
+    for (const page of document.querySelectorAll("main > section")) page.hidden = page.id !== "offlineSettings";
+    offlineStatus(offlineSnapshot);
+  }
+  lifecycleReady = true;
+  scheduleVisibleCheck();
+}
+async function recoverOffline() {
+  if (!offlineMode || offlineRecoveryPromise || document.visibilityState !== "visible") return offlineRecoveryPromise;
+  offlineRecoveryPromise = (async () => {
+    offlineRecovery = true;
+    try {
+      const selectedLedger = browserSession?.ledgerId;
+      const session = await api("/api/session");
+      if (!session.ledgerId || selectedLedger && session.ledgerId !== selectedLedger) {
+        await OfflineFinance.clear(browserSession?.userId, selectedLedger);
+        location.assign("/sign-in"); return;
+      }
+      const dashboard = await api(`/api/dashboard?${dashboardQuery()}`);
+      browserSession = session;
+      await initializeDashboardPeriods();
+      offlineMode = false;
+      document.body.dataset.offline = "false";
+      for (const [control, disabled] of offlineDisabledControls) if (control.isConnected) control.disabled = disabled;
+      offlineDisabledControls.clear();
+      for (const link of document.querySelectorAll("a[data-offline-disabled]")) {
+        if (link.dataset.offlineDisabled) link.setAttribute("aria-disabled", link.dataset.offlineDisabled);
+        else link.removeAttribute("aria-disabled");
+        delete link.dataset.offlineDisabled;
+      }
+      document.querySelector("#offlineNavigation").hidden = true;
+      document.querySelector("#mainNavigation").hidden = false;
+      for (const link of document.querySelectorAll(".onlineNavigationLink")) link.hidden = false;
+      document.querySelector("#dashboardNavigationLink").removeAttribute("aria-disabled");
+      document.querySelector("#offlineSettings").hidden = true;
+      document.querySelector("#ledgerSelect").disabled = false;
+      document.body.dataset.role = session.role;
+      if (session.role === "auditor") applyAuditorControls();
+      lastDashboard = dashboard; lastDashboardQuery = dashboardQuery(); dashboardCurrentDate = dashboard.currentDate;
+      renderDashboard(dashboard);
+      await cacheDashboard();
+      if (offlineColdStart) { location.replace(ledgerUrl(location.pathname === "/settings" ? "/settings#system" : "/")); return; }
+      if (currentPath === "/settings") { document.querySelector("#settingsPage").hidden = false; showSettingsSection(); }
+    } catch { /* Remain read-only until an authenticated server refresh succeeds. */ }
+    finally { offlineRecovery = false; offlineRecoveryPromise = null; }
+  })();
+  return offlineRecoveryPromise;
+}
+window.addEventListener("offline", () => { if (lifecycleReady) enterOffline(); });
+window.addEventListener("online", () => { if (offlineMode) recoverOffline(); else checkVisiblePage(true); });
+document.addEventListener("submit", (event) => {
+  if (offlineMode) { event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);
+document.addEventListener("click", (event) => {
+  if (!offlineMode) return;
+  const link = event.target.closest("a");
+  if (!link) return;
+  event.preventDefault(); event.stopImmediatePropagation();
+  if (link.classList.contains("settingsLink")) {
+    for (const page of document.querySelectorAll("main > section")) page.hidden = page.id !== "offlineSettings";
+    offlineStatus(offlineSnapshot);
+  } else if (["cachedDashboardLink", "dashboardNavigationLink"].includes(link.id)) openCachedDashboard();
+}, true);
+document.querySelector("#ledgerSelect").addEventListener("change", async (event) => {
+  if (!offlineMode) return;
+  event.stopImmediatePropagation();
+  const ledgerId = event.target.value;
+  if (hasLedgerDrafts() && !confirm("Discard unsaved changes and switch ledgers?")) { event.target.value = browserSession.ledgerId; return; }
+  const {snapshots} = await OfflineFinance.available(browserSession.userId);
+  const snapshot = snapshots.find((item) => item.ledgerId === ledgerId);
+  if (snapshot) {
+    for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+    simulatorDirtyRows.clear();
+    history.replaceState({}, "", ledgerUrl("/", ledgerId));
+    await showOfflineDashboard(snapshot);
+    offlineColdStart = true;
+  }
+}, true);
+document.querySelector("#clearOfflineButton").addEventListener("click", async () => {
+  await OfflineFinance.clear(browserSession?.userId);
+  offlineSnapshot = null; lastDashboard = null;
+  await showOfflineDashboard(null);
+});
+
+async function refreshOnlineCacheStatus() {
+  const status = document.querySelector("#onlineCacheStatus");
+  if (!OfflineFinance.policy.pwaOfflineEnabled) {
+    status.textContent = "Offline Dashboard is disabled by the administrator.";
+    document.querySelector("#onlineClearOfflineButton").hidden = true;
+    return;
+  }
+  document.querySelector("#onlineClearOfflineButton").hidden = false;
+  try {
+    const {snapshots} = await OfflineFinance.available(browserSession?.userId);
+    status.textContent = snapshots.length ? `${snapshots.length} saved Dashboard snapshot(s) on this installation.` : "No saved Dashboard. Open Dashboard online to prepare offline access.";
+  } catch { status.textContent = "Offline storage unavailable in this browser."; }
+}
+document.querySelector("#onlineClearOfflineButton").addEventListener("click", async () => {
+  try { await OfflineFinance.clear(browserSession?.userId); await refreshOnlineCacheStatus(); }
+  catch { document.querySelector("#onlineCacheStatus").textContent = "Could not clear offline data. Check browser storage settings."; }
+});
+
+start().catch(async (error) => {
+  if (error instanceof TypeError) await enterOffline();
+  else document.querySelector("main").textContent = error.message;
+});
