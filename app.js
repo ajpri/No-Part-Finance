@@ -25,6 +25,7 @@ let pendingLatestId = null;
 let pendingToastVisible = false;
 let lastDashboard = null;
 let lastDashboardQuery = null;
+let cachedBalanceSnapshot = null;
 let pendingDecisionBusy = false;
 const pendingSummaryState = {all: {requestId: 0, signature: null}, selected: {requestId: 0, signature: null}};
 const currentPath = window.location.pathname;
@@ -241,7 +242,8 @@ async function api(path, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   if (offlineMode && (method !== "GET" || !offlineRecovery)) throw new Error("Offline: this action requires a connection");
   let response;
-  try { response = await fetch(path, {...options, headers: {"Content-Type": "application/json", ...(browserSession ? {"X-CSRF-Token": browserSession.csrfToken} : {}), ...((browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")) ? {"X-Ledger-ID": browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")} : {}), ...options.headers}}); }
+  const {background, ...requestOptions} = options;
+  try { response = await fetch(path, {...requestOptions, headers: {"Content-Type": "application/json", ...(background === true ? {"X-Background-Request": "true"} : {}), ...(browserSession ? {"X-CSRF-Token": browserSession.csrfToken} : {}), ...((browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")) ? {"X-Ledger-ID": browserSession?.ledgerId || new URL(location.href).searchParams.get("ledger")} : {}), ...options.headers}}); }
   catch (error) {
     if (lifecycleReady && !offlineRecovery) await enterOffline();
     throw error;
@@ -252,6 +254,7 @@ async function api(path, options = {}) {
     error.status = response.status;
     if (response.status === 401 || response.status === 403) {
       try { await OfflineFinance.clear(browserSession?.userId, response.status === 401 ? null : browserSession?.ledgerId); } catch {}
+      clearCachedDashboardBalances();
       // Cached snapshots never bypass a real authentication/access denial.
       if (offlineMode || path === "/api/session" || response.status === 401) location.assign("/sign-in");
     }
@@ -1147,23 +1150,55 @@ function dashboardQuery() {
   return query.toString();
 }
 
-async function loadDashboard() {
+function dashboardRefreshLabel(message) {
+  const status = document.querySelector("#dashboardRefreshMessage");
+  const saved = cachedBalanceSnapshot ? offlineUpdatedLabel(cachedBalanceSnapshot.savedAt).replace(/^Updated/, "Last updated") : "";
+  status.textContent = saved ? `${message} \u00b7 ${saved}` : message;
+}
+
+function clearCachedDashboardBalances() {
+  if (!cachedBalanceSnapshot) return;
+  cachedBalanceSnapshot = null;
+  document.body.dataset.cachedBalances = "false";
+  dashboardRefreshLabel("");
+  for (const id of ["cashAccountRows", "creditAccountRows", "cashTotal", "totalCreditBalance", "minimumBalanceAlertLines", "creditUtilizationAlertLines", "totalCreditUtilization"]) document.getElementById(id).replaceChildren();
+  for (const id of ["minimumBalanceBanner", "creditUtilizationBanner", "totalCreditUtilizationRow"]) document.getElementById(id).hidden = true;
+}
+
+async function showCachedDashboardBalances() {
+  if (!browserSession?.userId || !browserSession.ledgerId || !["/", "/new"].includes(currentPath)) return;
+  const {userId, ledgerId} = browserSession;
+  try {
+    const {snapshots} = await OfflineFinance.available(userId);
+    if (offlineMode || lastDashboard || browserSession?.userId !== userId || browserSession?.ledgerId !== ledgerId) return;
+    const snapshot = snapshots.find((item) => item.userId === userId && item.ledgerId === ledgerId);
+    if (!snapshot) return;
+    renderDashboardAccounts(snapshot.dashboard);
+    cachedBalanceSnapshot = snapshot;
+    document.body.dataset.cachedBalances = "true";
+    dashboardRefreshLabel("Updating\u2026");
+  } catch { /* An unavailable cache never prevents the normal online load. */ }
+}
+
+async function loadDashboard(background = false) {
   const requestId = ++dashboardRequestId;
   const selectedQuery = dashboardQuery(), ledgerId = browserSession?.ledgerId;
-  document.querySelector("#dashboardRefreshMessage").textContent = "Updating…";
+  dashboardRefreshLabel("Updating…");
   document.querySelector("#dashboardRefreshRetry").hidden = true;
   try {
-    const dashboard = await api(`/api/dashboard?${selectedQuery}`);
+    const dashboard = await api(`/api/dashboard?${selectedQuery}`, {background: background === true});
     if (requestId !== dashboardRequestId || selectedQuery !== dashboardQuery() || ledgerId !== browserSession?.ledgerId) return;
     renderDashboard(dashboard);
+    cachedBalanceSnapshot = null;
+    document.body.dataset.cachedBalances = "false";
     dashboardCurrentDate = dashboard.currentDate;
     lastDashboard = dashboard;
     lastDashboardQuery = selectedQuery;
     await cacheDashboard();
     document.querySelector("#dashboardRefreshMessage").textContent = "";
   } catch (error) {
-    if (requestId !== dashboardRequestId) return;
-    document.querySelector("#dashboardRefreshMessage").textContent = error.status === 401 || error.status === 403 ? error.message : "Couldn't refresh";
+    if (requestId !== dashboardRequestId || offlineMode) return;
+    dashboardRefreshLabel(error.status === 401 || error.status === 403 ? error.message : "Couldn't refresh");
     document.querySelector("#dashboardRefreshRetry").hidden = false;
   }
 }
@@ -1186,8 +1221,8 @@ function renderDashboard(dashboard) {
   document.querySelector("#dashboardPerDay").textContent = dollars(dashboard.perDayCents);
 }
 
-async function initializeDashboardPeriods() {
-  const months = await api("/api/report-periods");
+async function initializeDashboardPeriods(background = false) {
+  const months = await api("/api/report-periods", {background: background === true});
   for (const select of [document.querySelector("#dashboardPeriod"), document.querySelector("#periodFilter")]) {
     const selectedValue = select.value;
     for (const item of [...select.options]) if (item.value.startsWith("month:")) item.remove();
@@ -1256,7 +1291,7 @@ function newTemplate() { const form = document.querySelector("#templateForm"); f
 function editTemplate(template) { const form = document.querySelector("#templateForm"); form.reset(); document.querySelector("#templateId").value = template.id; document.querySelector("#templateName").value = template.name; document.querySelector("#templateDescription").value = template.description || ""; document.querySelector("#templateAmount").value = template.enteredAmountCents === null ? "" : (template.enteredAmountCents / 100).toFixed(2); document.querySelector("#templatePrefillAmount").checked = Boolean(template.prefillAmount); document.querySelector("#templateDisplayOrder").value = template.displayOrder; document.querySelector("#templateActive").checked = Boolean(template.active); document.querySelector("#templateDialogTitle").textContent = "Edit Template"; document.querySelector("#templateActiveLabel").hidden = false; document.querySelector("#deleteTemplateButton").hidden = false; setAccountOptions(document.querySelector("#templateAccount"), activeAccountsWith(template.accountId), "None", template.accountId); setMixedCategoryOptions(document.querySelector("#templateCategory"), selectableCategoriesWith(template.categoryId), "None", template.categoryId); openDialog(document.querySelector("#templateDialog"), form); }
 async function saveTemplate(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#templateId").value; const payload = {name: document.querySelector("#templateName").value, accountId: document.querySelector("#templateAccount").value, description: document.querySelector("#templateDescription").value, categoryId: document.querySelector("#templateCategory").value, amount: document.querySelector("#templateAmount").value, prefillAmount: document.querySelector("#templatePrefillAmount").checked, displayOrder: document.querySelector("#templateDisplayOrder").value, active: document.querySelector("#templateActive").checked}; try { await api(id ? `/api/templates/${id}` : "/api/templates", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#templateDialog").close(); await loadSettings(); } catch (error) { showFormError(form, error); } }
 async function removeEditedTemplate() { const template = templates.find((item) => item.id === Number(document.querySelector("#templateId").value)); if (!template || !window.confirm(`Permanently delete template "${template.name}"? Existing transactions are unaffected.`)) return; try { await api(`/api/templates/${template.id}`, {method: "DELETE"}); document.querySelector("#templateDialog").close(); await loadSettings(); } catch (error) { window.alert(error.message); } }
-async function loadSettings() { await loadLedgerName(); await loadSharing(); await loadReferenceData(); renderAccounts(); renderCategories(); renderTemplates(); const [settings, databaseStatus] = await Promise.all([api("/api/settings"), api("/api/system/database-status")]); const selected = categories.find((category) => category.id === Number(settings.reimbursementCategoryId)); document.querySelector("#reimbursementCategoryName").textContent = selected?.name || "Not selected"; setOptions(document.querySelector("#reimbursementCategorySetting"), categories.filter((category) => category.active && category.reportingRole === "income" && !category.parentCategoryId && !category.hasChildren), "Select category", settings.reimbursementCategoryId); document.querySelector("#paychecksPerYear").value = settings.paychecksPerYear || ""; setMoneyInputValue(document.querySelector("#suggestionRounding"), settings.suggestionRoundingCents ? (Number(settings.suggestionRoundingCents) / 100).toFixed(2) : ""); document.querySelector("#monthlySuggestionWindow").value = settings.monthlySuggestionWindowDays; document.querySelector("#quarterlySuggestionWindow").value = settings.quarterlySuggestionWindowMonths; document.querySelector("#annualSuggestionWindow").value = settings.annualSuggestionWindowMonths; document.querySelector("#integrationTransferDefaultDescription").checked = settings.integrationTransferDefaultDescription === "1"; document.querySelector("#themeSetting").value = window.readThemePreference(); document.querySelector("#databaseTransactionCount").textContent = databaseStatus.transactionCount.toLocaleString("en-US"); document.querySelector("#databaseAccountCount").textContent = databaseStatus.accountCount.toLocaleString("en-US"); document.querySelector("#databaseSchemaVersion").textContent = databaseStatus.schemaVersion; document.querySelector("#databaseModifiedLocal").textContent = databaseStatus.modifiedLocal; rememberLedgerForms(); }
+async function loadSettings() { await loadLedgerName(); await loadSharing(); await loadReferenceData(); renderAccounts(); renderCategories(); renderTemplates(); const [settings, databaseStatus] = await Promise.all([api("/api/settings"), api("/api/system/database-status")]); const selected = categories.find((category) => category.id === Number(settings.reimbursementCategoryId)); document.querySelector("#reimbursementCategoryName").textContent = selected?.name || "Not selected"; setOptions(document.querySelector("#reimbursementCategorySetting"), categories.filter((category) => category.active && category.reportingRole === "income" && !category.parentCategoryId && !category.hasChildren), "Select category", settings.reimbursementCategoryId); document.querySelector("#paychecksPerYear").value = settings.paychecksPerYear || ""; setMoneyInputValue(document.querySelector("#suggestionRounding"), settings.suggestionRoundingCents ? (Number(settings.suggestionRoundingCents) / 100).toFixed(2) : ""); document.querySelector("#monthlySuggestionWindow").value = settings.monthlySuggestionWindowDays; document.querySelector("#quarterlySuggestionWindow").value = settings.quarterlySuggestionWindowMonths; document.querySelector("#annualSuggestionWindow").value = settings.annualSuggestionWindowMonths; document.querySelector("#integrationTransferDefaultDescription").checked = settings.integrationTransferDefaultDescription === "1"; document.querySelector("#themeSetting").value = window.readThemePreference(); document.querySelector("#databaseTransactionCount").textContent = databaseStatus.transactionCount.toLocaleString("en-US"); document.querySelector("#databaseAccountCount").textContent = databaseStatus.accountCount.toLocaleString("en-US"); document.querySelector("#databaseModifiedLocal").textContent = databaseStatus.modifiedLocal; rememberLedgerForms(); }
 
 function completeExpenseTemplates() {
   return templates.filter((template) => template.active && template.description
@@ -1677,12 +1712,218 @@ function navigateAuditPage(page) {
   loadAuditLog();
 }
 
+function renderMyAccount(account, preserveNameDraft = false) {
+  const fullName = [account.firstName, account.lastName].filter(Boolean).join(" ");
+  document.querySelector("#accountFullName").textContent = fullName;
+  document.querySelector("#accountUsername").textContent = account.username;
+  document.querySelector("#signedInAs").textContent = `Signed in as: ${fullName}`;
+  if (!preserveNameDraft) {
+    document.querySelector("#accountFirstName").value = account.firstName;
+    document.querySelector("#accountLastName").value = account.lastName;
+  }
+  document.querySelector("#accountEditing").hidden = !account.allowAccountSelfService;
+  document.querySelector("#changeAccountNameButton").hidden = !account.allowAccountSelfService;
+  browserSession.allowAccountSelfService = account.allowAccountSelfService;
+  Object.assign(browserSession, {firstName: account.firstName, lastName: account.lastName});
+  if (account.csrfToken) browserSession.csrfToken = account.csrfToken;
+}
+
+let accountSessionsRequestSequence = 0;
+
+function accountSessionTime(timestamp) {
+  if (!timestamp) return "Not recorded";
+  const date = new Date(timestamp * 1000);
+  return Number.isNaN(date.getTime()) ? "Not recorded" : date.toLocaleString();
+}
+
+async function loadAccountSessions() {
+  const requestSequence = ++accountSessionsRequestSequence;
+  const errorMessage = document.querySelector("#accountSessionsError");
+  errorMessage.textContent = "";
+  try {
+    const sessions = await api("/api/account/sessions");
+    if (requestSequence !== accountSessionsRequestSequence) return;
+    const body = document.querySelector("#accountSessionRows");
+    body.replaceChildren();
+    for (const session of sessions) {
+      const row = body.insertRow();
+      if (session.current) row.className = "currentAccountRow";
+      row.insertCell().textContent = session.client + (session.current ? " — This session" : "");
+      row.insertCell().textContent = session.lastIp || "Unknown";
+      row.insertCell().textContent = accountSessionTime(session.signedInAt);
+      row.insertCell().textContent = accountSessionTime(session.lastActiveAt);
+      const button = document.createElement("button");
+      button.type = "button"; button.dataset.viewControl = "true"; button.textContent = "Log out"; button.className = "destructiveButton";
+      button.addEventListener("click", () => logoutAccountSessions({id: session.id}, button, session));
+      row.insertCell().append(button);
+    }
+    document.querySelector("#logoutOtherSessions").disabled = !sessions.some((session) => !session.current);
+  } catch (error) { if (requestSequence === accountSessionsRequestSequence) errorMessage.textContent = error.message; }
+}
+
+async function logoutAccountSessions(selection, button, session) {
+  const target = selection.others ? "all your other sessions" : session?.current ? "this session" : `the session for "${session?.client || "Unknown client"}"`;
+  if (!confirm(`Log out ${target}? Associated notification enrollments will also be removed. You will need to sign in again on the affected sessions.`)) return;
+  accountSessionsRequestSequence += 1;
+  button.disabled = true;
+  let refreshed = false;
+  document.querySelector("#accountSessionsError").textContent = "";
+  document.querySelector("#accountSessionsStatus").textContent = "";
+  try {
+    const result = await api("/api/account/sessions/logout", {method: "POST", body: JSON.stringify(selection)});
+    if (result.loggedOut) {
+      try { await OfflineFinance.clear(browserSession?.userId); } catch {}
+      location.assign("/sign-in"); return;
+    }
+    await Promise.all([loadAccountSessions(), loadAccountNotifications()]);
+    refreshed = true;
+    document.querySelector("#accountSessionsStatus").textContent = selection.others ? "Other sessions logged out." : "Session logged out.";
+  } catch (error) { document.querySelector("#accountSessionsError").textContent = error.message; }
+  finally { if (button.isConnected && (!selection.others || !refreshed)) button.disabled = false; }
+}
+
+let accountNotificationsRequestSequence = 0;
+let notificationLabelStatusTimer = null;
+
+async function loadAccountNotifications(background = false) {
+  const requestSequence = ++accountNotificationsRequestSequence;
+  const errorMessage = document.querySelector("#accountNotificationsError");
+  errorMessage.textContent = "";
+  try {
+    const enrollments = await api("/api/account/notifications", {background: background === true});
+    if (requestSequence !== accountNotificationsRequestSequence) return;
+    const body = document.querySelector("#accountNotificationRows");
+    body.replaceChildren();
+    for (const enrollment of enrollments) {
+      const row = body.insertRow();
+      if (enrollment.current) row.className = "currentAccountRow";
+      const client = row.insertCell();
+      client.textContent = (enrollment.label || enrollment.client) + (enrollment.current ? " — This device" : "");
+      if (enrollment.label) {
+        const browser = document.createElement("div"); browser.className = "secondaryText"; browser.textContent = enrollment.client; client.append(browser);
+      }
+      row.insertCell().textContent = enrollment.ledgerName;
+      row.insertCell().textContent = {"signed-in": "Signed in", "no-active-session": "No active session"}[enrollment.sessionStatus] || "Unknown";
+      const button = document.createElement("button");
+      button.type = "button"; button.dataset.viewControl = "true"; button.textContent = "Disable notifications"; button.className = "destructiveButton";
+      button.addEventListener("click", () => disableAccountNotifications({id: enrollment.id}, button, enrollment));
+      const actions = row.insertCell();
+      actions.append(button);
+      const edit = document.createElement("button"); edit.type = "button"; edit.dataset.viewControl = "true"; edit.textContent = "Edit Label";
+      edit.addEventListener("click", () => openNotificationLabelDialog(enrollment));
+      actions.append(" ", edit);
+    }
+    document.querySelector("#disableAllAccountNotifications").disabled = enrollments.length === 0;
+  } catch (error) { if (requestSequence === accountNotificationsRequestSequence) errorMessage.textContent = error.message; }
+}
+
+function openNotificationLabelDialog(enrollment) {
+  const form = document.querySelector("#notificationLabelForm");
+  form.reset();
+  form.enrollmentId = enrollment.id;
+  document.querySelector("#notificationDeviceLabel").value = enrollment.label || "";
+  openDialog(document.querySelector("#notificationLabelDialog"), form);
+}
+
+async function saveNotificationLabel(event) {
+  event.preventDefault();
+  clearTimeout(notificationLabelStatusTimer);
+  document.querySelector("#accountNotificationsStatus").textContent = "";
+  const form = event.currentTarget, button = form.querySelector("button[type='submit']");
+  button.disabled = true;
+  try {
+    await api("/api/account/notifications/label", {method: "POST", body: JSON.stringify({id: form.enrollmentId, label: document.querySelector("#notificationDeviceLabel").value})});
+    document.querySelector("#notificationLabelDialog").close();
+    await loadAccountNotifications();
+    const status = document.querySelector("#accountNotificationsStatus");
+    status.textContent = "Device label saved.";
+    notificationLabelStatusTimer = setTimeout(() => {
+      if (status.textContent === "Device label saved.") status.textContent = "";
+    }, 5000);
+  } catch (error) { showFormError(form, error); }
+  finally { button.disabled = false; }
+}
+
+async function disableAccountNotifications(selection, button, enrollment) {
+  const target = selection.all ? "all your devices across all ledgers" : `"${enrollment?.label || enrollment?.client || "this device"}" in "${enrollment?.ledgerName || "this ledger"}"`;
+  if (!confirm(`Disable notifications for ${target}? Re-enabling requires explicit action on each affected device. Already delivered notifications and browser permission will remain.`)) return;
+  accountNotificationsRequestSequence += 1;
+  clearTimeout(notificationLabelStatusTimer);
+  button.disabled = true;
+  let refreshed = false;
+  document.querySelector("#accountNotificationsError").textContent = "";
+  document.querySelector("#accountNotificationsStatus").textContent = "";
+  try {
+    await api("/api/account/notifications/disable", {method: "POST", body: JSON.stringify(selection)});
+    await loadAccountNotifications();
+    refreshed = true;
+    if (browserSession?.ledgerId) await refreshPushSettings();
+    document.querySelector("#accountNotificationsStatus").textContent = selection.all ? "All notifications disabled." : "Notifications disabled.";
+  } catch (error) { document.querySelector("#accountNotificationsError").textContent = error.message; }
+  finally { if (button.isConnected && (!selection.all || !refreshed)) button.disabled = false; }
+}
+
+async function loadMyAccount() {
+  renderMyAccount(await api("/api/account"));
+  await Promise.all([loadAccountSessions(), loadAccountNotifications()]);
+}
+
+function openAccountNameDialog() {
+  if (!browserSession?.allowAccountSelfService) return;
+  const form = document.querySelector("#accountNameForm");
+  form.reset();
+  document.querySelector("#accountFirstName").value = browserSession.firstName;
+  document.querySelector("#accountLastName").value = browserSession.lastName;
+  document.querySelector("#accountNameStatus").textContent = "";
+  openDialog(document.querySelector("#accountNameDialog"), form);
+}
+
+function openAccountPasswordDialog() {
+  if (!browserSession?.allowAccountSelfService) return;
+  const form = document.querySelector("#accountPasswordForm");
+  form.reset();
+  document.querySelector("#accountPasswordStatus").textContent = "";
+  openDialog(document.querySelector("#accountPasswordDialog"), form);
+}
+
+async function saveAccountName(event) {
+  event.preventDefault();
+  const form = event.currentTarget, button = form.querySelector("button[type='submit']");
+  button.disabled = true;
+  form.querySelector(".formError").textContent = "";
+  document.querySelector("#accountNameStatus").textContent = "";
+  try {
+    renderMyAccount(await api("/api/account/name", {method: "PUT", body: JSON.stringify({firstName: document.querySelector("#accountFirstName").value, lastName: document.querySelector("#accountLastName").value})}));
+    document.querySelector("#accountNameDialog").close();
+    document.querySelector("#accountNameStatus").textContent = "Name saved.";
+    await Promise.all([loadAccountSessions(), loadAccountNotifications()]);
+  } catch (error) { showFormError(form, error); }
+  finally { button.disabled = false; }
+}
+
+async function changeAccountPassword(event) {
+  event.preventDefault();
+  const form = event.currentTarget, button = form.querySelector("button[type='submit']");
+  button.disabled = true;
+  form.querySelector(".formError").textContent = "";
+  document.querySelector("#accountPasswordStatus").textContent = "";
+  try {
+    const account = await api("/api/account/password", {method: "POST", body: JSON.stringify({currentPassword: document.querySelector("#accountCurrentPassword").value, newPassword: document.querySelector("#accountNewPassword").value, confirmation: document.querySelector("#accountPasswordConfirmation").value})});
+    renderMyAccount(account, true);
+    document.querySelector("#accountPasswordDialog").close();
+    form.reset();
+    document.querySelector("#accountPasswordStatus").textContent = "Password changed. Your other sessions have been logged out.";
+    await Promise.all([loadAccountSessions(), loadAccountNotifications()]);
+  } catch (error) { showFormError(form, error); }
+  finally { button.disabled = false; }
+}
+
 function showSettingsSection() {
-  const sections = ["accounts", "categories", "templates", "budget", "integrations", "ledger-sharing", "audit-log", "system"];
+  const sections = ["my-account", "accounts", "categories", "templates", "budget", "integrations", "ledger-sharing", "audit-log", "system"];
   const requested = location.hash.slice(1);
-  const section = sections.includes(requested) && (requested !== "integrations" || ["owner", "member"].includes(browserSession?.role)) ? requested : "accounts";
+  const section = sections.includes(requested) && (browserSession?.ledgerId || requested === "my-account") && (requested !== "integrations" || ["owner", "member"].includes(browserSession?.role)) ? requested : "my-account";
   for (const name of sections) {
-    const sectionId = name === "audit-log" ? "AuditLog" : name === "ledger-sharing" ? "LedgerSharing" : `${name[0].toUpperCase()}${name.slice(1)}`;
+    const sectionId = name === "my-account" ? "MyAccount" : name === "audit-log" ? "AuditLog" : name === "ledger-sharing" ? "LedgerSharing" : `${name[0].toUpperCase()}${name.slice(1)}`;
     document.querySelector(`#settings${sectionId}`).hidden = name !== section;
     const link = document.querySelector(`.settingsNavigation a[href="#${name}"]`);
     if (name === section) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
@@ -1708,6 +1949,7 @@ function useSettingsFragmentNavigation(event) {
 async function start() {
   await OfflineFinance.ready;
   browserSession = await api("/api/session");
+  await reconcileNotificationPermission();
   try {
     const {snapshots} = await OfflineFinance.available(browserSession.userId);
     for (const snapshot of snapshots) if (!browserSession.ledgers.some((ledger) => ledger.id === snapshot.ledgerId)) await OfflineFinance.clear(browserSession.userId, snapshot.ledgerId);
@@ -1731,17 +1973,25 @@ async function start() {
     dialog.addEventListener("pointerdown", (event) => { pointerStartedOnBackdrop = event.target === dialog; });
     dialog.addEventListener("pointerup", (event) => { if (pointerStartedOnBackdrop && event.target === dialog) dialog.close(); pointerStartedOnBackdrop = false; });
   }
+  await showCachedDashboardBalances();
   await initializeLedgerNavigation();
   await loadRecipientInvitations();
   if (new URLSearchParams(location.search).get("createLedger") === "1") {
     document.querySelector("[data-create-ledger]").click();
     const cleanUrl = new URL(location.href); cleanUrl.searchParams.delete("createLedger"); history.replaceState({}, "", cleanUrl);
   }
+  if (path === "/settings") await loadMyAccount();
   if (!browserSession.ledgerId) {
     for (const section of document.querySelectorAll("main > section")) section.hidden = !["noLedgerPage", "recipientInvitations"].includes(section.id);
     document.querySelector("#invitationBanner").hidden = true;
     document.querySelector("#mainNavigation").hidden = true;
-    document.querySelector("header .settingsLink").hidden = true;
+    document.querySelector("header .settingsLink").hidden = false;
+    if (path === "/settings") {
+      document.querySelector("#noLedgerPage").hidden = true;
+      document.querySelector("#settingsPage").hidden = false;
+      for (const link of document.querySelectorAll(".settingsNavigation a")) link.hidden = link.hash !== "#my-account";
+      showSettingsSection();
+    }
     return;
   }
   document.querySelector("#pendingForm").hidden = browserSession.role === "auditor";
@@ -1814,6 +2064,16 @@ document.querySelector("#minimumBalance").addEventListener("input",updateMinimum
 document.querySelector("#minimumCautionPercent").addEventListener("input",updateMinimumHelper);document.querySelector("#creditLimit").addEventListener("input",updateUtilizationWarningHelper);document.querySelector("#utilizationWarning").addEventListener("input",updateUtilizationWarningHelper);document.querySelector("#deleteTransactionButton").addEventListener("click",removeEditedTransaction);document.querySelector("#deleteTransferButton").addEventListener("click",removeEditedTransfer);const temporaryNotification=document.querySelector("#temporaryNotification");temporaryNotification.addEventListener("mouseenter",pauseNotificationTimer);temporaryNotification.addEventListener("mouseleave",resumeNotificationTimer);temporaryNotification.addEventListener("focusin",pauseNotificationTimer);temporaryNotification.addEventListener("focusout",resumeNotificationTimer);document.querySelector("#temporaryNotificationClose").addEventListener("click",closeNotification);
 document.querySelector("#themeSetting").addEventListener("change", (event) => applyTheme(event.target.value));
 document.querySelector("#mainNavigation").addEventListener("click", useSameTabNavigation);
+document.querySelector("#refreshAccountNotifications").addEventListener("click", loadAccountNotifications);
+document.querySelector("#disableAllAccountNotifications").addEventListener("click", (event) => disableAccountNotifications({all: true}, event.currentTarget));
+document.querySelector("#refreshAccountSessions").addEventListener("click", loadAccountSessions);
+document.querySelector("#logoutOtherSessions").addEventListener("click", (event) => logoutAccountSessions({others: true}, event.currentTarget));
+document.querySelector("#notificationLabelForm").addEventListener("submit", saveNotificationLabel);
+document.querySelector("#changeAccountNameButton").addEventListener("click", openAccountNameDialog);
+document.querySelector("#changeAccountPasswordButton").addEventListener("click", openAccountPasswordDialog);
+document.querySelector("#accountPasswordDialog").addEventListener("close", () => document.querySelector("#accountPasswordForm").reset());
+document.querySelector("#accountNameForm").addEventListener("submit", saveAccountName);
+document.querySelector("#accountPasswordForm").addEventListener("submit", changeAccountPassword);
 document.querySelector(".settingsNavigation").addEventListener("click", useSettingsFragmentNavigation);
 document.querySelector(".budgetNavigation").addEventListener("click", useBudgetFragmentNavigation);
 document.querySelector("#transactionCategory").addEventListener("change", updateReimbursementAvailability); document.querySelector("#alsoLogReimbursement").addEventListener("change", updateReimbursementFields);
@@ -1839,7 +2099,7 @@ function applyAuditorControls() {
   document.querySelector("#releaseHistoryButton").dataset.viewControl = "true";
   document.querySelector("#filterForm button[type='submit']").dataset.viewControl = "true";
   for (const control of document.querySelectorAll("#settingsPage input, #settingsPage select, dialog input, dialog select")) {
-    if (!["themeSetting", "auditPerPage"].includes(control.id)) control.disabled = true;
+    if (!control.closest("#settingsMyAccount, [data-account-dialog]") && !["themeSetting", "auditPerPage"].includes(control.id)) control.disabled = true;
   }
   for (const button of document.querySelectorAll("#releaseHistoryDialog [data-close]")) button.dataset.viewControl = "true";
 }
@@ -1924,7 +2184,7 @@ async function refreshPendingCount() {
   if (pendingCountPromise) return pendingCountPromise;
   const ledgerId = browserSession.ledgerId;
   pendingCountPromise = (async () => {
-    const result = await api("/api/pending/status");
+    const result = await api("/api/pending/status", {background: true});
     if (ledgerId !== browserSession.ledgerId) return;
     for (const reviewButton of document.querySelectorAll("#reviewPendingButton, #dashboardReviewPendingButton")) {
       reviewButton.textContent = `Review Pending (${result.count})`;
@@ -1947,15 +2207,15 @@ async function refreshPendingCount() {
   try { return await pendingCountPromise; } finally { pendingCountPromise = null; }
 }
 
-async function refreshDashboardOnReturn() {
+async function refreshDashboardOnReturn(background = false) {
   if (dashboardRefreshPromise) return dashboardRefreshPromise;
   dashboardRefreshPromise = (async () => {
-    await initializeDashboardPeriods();
-    await loadDashboard();
+    await initializeDashboardPeriods(background === true);
+    await loadDashboard(background === true);
   })();
   try { await dashboardRefreshPromise; }
   catch (error) {
-    document.querySelector("#dashboardRefreshMessage").textContent = "Couldn't refresh";
+    dashboardRefreshLabel("Couldn't refresh");
     document.querySelector("#dashboardRefreshRetry").hidden = false;
   } finally { dashboardRefreshPromise = null; }
 }
@@ -1964,6 +2224,7 @@ async function checkVisiblePage(returned = false) {
   if (!lifecycleReady || document.visibilityState !== "visible") return;
   const previousPolicy = OfflineFinance.policy;
   await OfflineFinance.refreshPolicy();
+  if (!OfflineFinance.policy.pwaOfflineEnabled) clearCachedDashboardBalances();
   if (offlineMode) {
     await recoverOffline();
     if (offlineMode && !OfflineFinance.policy.pwaOfflineEnabled) { offlineSnapshot = null; await showOfflineDashboard(null); }
@@ -1975,10 +2236,10 @@ async function checkVisiblePage(returned = false) {
   try { await refreshPendingCount(); } catch { /* Keep the last confirmed count until the next check. */ }
   if (["/", "/new"].includes(currentPath)) {
     try {
-      const calendar = await api("/api/calendar");
-      if (returned || calendar.currentDate !== dashboardCurrentDate) await refreshDashboardOnReturn();
+      const calendar = await api("/api/calendar", {background: true});
+      if (returned || calendar.currentDate !== dashboardCurrentDate) await refreshDashboardOnReturn(true);
     } catch {
-      document.querySelector("#dashboardRefreshMessage").textContent = "Couldn't refresh";
+      dashboardRefreshLabel("Couldn't refresh");
       document.querySelector("#dashboardRefreshRetry").hidden = false;
     }
   }
@@ -1991,7 +2252,10 @@ function scheduleVisibleCheck() {
 
 document.addEventListener("visibilitychange", () => {
   scheduleVisibleCheck();
-  if (document.visibilityState === "visible") checkVisiblePage(true);
+  if (document.visibilityState === "visible") {
+    reconcileNotificationPermission();
+    checkVisiblePage(true);
+  }
 });
 document.querySelector("#dashboardRefreshRetry").addEventListener("click", refreshDashboardOnReturn);
 document.querySelector("#dashboardReviewPendingButton").addEventListener("click", () => location.assign(ledgerUrl("/pending")));
@@ -2510,8 +2774,8 @@ document.querySelector("#sharingInviteForm").addEventListener("submit", async (e
   } catch (error) { showFormError(document.querySelector("#sharingInviteForm"), error); }
 });
 
-async function loadRecipientInvitations() {
-  const invitations = await api("/api/invitations");
+async function loadRecipientInvitations(background = false) {
+  const invitations = await api("/api/invitations", {background: background === true});
   document.querySelector("#invitationBanner").hidden = !invitations.length || currentPath === "/pending" || !browserSession.ledgerId;
   document.querySelector("#invitationBannerText").textContent = `${invitations.length} invitation(s): ` + invitations.map((invitation) => `${invitation.ledgerName} (${invitation.role})`).join(", ");
   document.querySelector("#recipientInvitations").hidden = Boolean(browserSession.ledgerId) && currentPath !== "/pending";
@@ -2565,29 +2829,52 @@ function applicationWorker() {
   return appWorkerPromise;
 }
 
+let notificationPermissionCheckPromise = null;
+
+async function reconcileNotificationPermission() {
+  if (notificationPermissionCheckPromise) return notificationPermissionCheckPromise;
+  if (!browserSession || offlineMode || navigator.onLine === false || document.visibilityState !== "visible" || !window.isSecureContext || !("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
+  if (!["denied", "default"].includes(Notification.permission)) return;
+  notificationPermissionCheckPromise = (async () => {
+    try {
+      // Permission covers this browser origin, so remove only this installation across ledgers.
+      await api("/api/account/notifications/disable", {background: true, method: "POST", body: JSON.stringify({currentDevice: true})});
+      if (currentPath === "/settings") {
+        await loadAccountNotifications(true);
+        await refreshPushSettings();
+      }
+    } catch (error) {
+      if (currentPath === "/settings") document.querySelector("#accountNotificationsError").textContent = "Couldn't update notification permission. Reconnect or return to the app to retry.";
+    }
+  })();
+  try { await notificationPermissionCheckPromise; }
+  finally { notificationPermissionCheckPromise = null; }
+}
+
 async function refreshPushSettings() {
   if (!["owner", "member"].includes(browserSession?.role)) return;
-  const status = document.querySelector("#pushPermissionStatus"), enable = document.querySelector("#enablePushButton"), disable = document.querySelector("#disablePushButton");
+  const status = document.querySelector("#pushPermissionStatus"), enable = document.querySelector("#enablePushButton");
+  const ledger = browserSession.ledgers.find((ledger) => ledger.id === browserSession.ledgerId);
+  document.querySelector("#pushLedgerName").textContent = ledger?.label || "Current ledger";
+  enable.hidden = false;
   if (!OfflineFinance.policy.pushNotificationsEnabled) {
     status.textContent = "Push notifications are disabled by the administrator.";
-    enable.hidden = true; disable.hidden = true;
+    enable.hidden = true;
     return;
   }
   const supported = window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
   enable.disabled = !supported || Notification.permission === "denied";
-  disable.hidden = true;
   if (!supported) { status.textContent = "Notifications are unsupported here. Use HTTPS and a supported browser; on iPhone or iPad open the installed Home Screen app."; return; }
   if (Notification.permission === "denied") { status.textContent = "Blocked. Allow notifications in your browser or device settings, then try again."; return; }
   const registration = await applicationWorker();
   if (!registration) { status.textContent = "Notifications unavailable. Check the connection and retry."; return; }
   const subscription = await registration.pushManager.getSubscription();
-  const settings = await api("/api/push");
+  const settings = await api("/api/push", {background: true});
   const enrolled = subscription && settings.endpoints.includes(subscription.endpoint);
   // Refresh the public sender origin for existing enrollments after a server update.
-  if (enrolled) await api("/api/push", {method: "POST", body: JSON.stringify({endpoint: subscription.endpoint, keys: subscription.toJSON().keys})});
-  status.textContent = enrolled ? "Enabled for this installation and ledger." : "Not enabled for this installation and ledger.";
+  if (enrolled) await api("/api/push", {background: true, method: "POST", body: JSON.stringify({endpoint: subscription.endpoint, keys: subscription.toJSON().keys})});
+  status.textContent = enrolled ? "Enabled for this ledger." : "Not enabled for this ledger.";
   enable.hidden = Boolean(enrolled);
-  disable.hidden = !enrolled;
 }
 
 document.querySelector("#enablePushButton").addEventListener("click", async () => {
@@ -2597,7 +2884,8 @@ document.querySelector("#enablePushButton").addEventListener("click", async () =
     if (!OfflineFinance.policy.pushNotificationsEnabled) throw new Error("Push notifications are disabled by the administrator.");
     // Request directly from the gesture, before any network awaits (iOS requirement).
     const permission = await Notification.requestPermission();
-    if (permission !== "granted") { await refreshPushSettings(); return; }
+    if (permission !== "granted") { await reconcileNotificationPermission(); await refreshPushSettings(); return; }
+    await notificationPermissionCheckPromise;
     const registration = await applicationWorker();
     if (!registration) throw new Error("Notifications unavailable. Check the connection and retry.");
     const settings = await api("/api/push");
@@ -2606,20 +2894,13 @@ document.querySelector("#enablePushButton").addEventListener("click", async () =
     const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: key});
     await api("/api/push", {method: "POST", body: JSON.stringify({endpoint: subscription.endpoint, keys: subscription.toJSON().keys})});
     await refreshPushSettings();
+    await loadAccountNotifications();
   } catch (error) { document.querySelector("#pushPermissionStatus").textContent = error.message; }
   finally { button.disabled = false; }
 });
-document.querySelector("#disablePushButton").addEventListener("click", async () => {
-  try {
-    const registration = await applicationWorker();
-    const subscription = await registration?.pushManager.getSubscription();
-    if (subscription) await api("/api/push", {method: "DELETE", body: JSON.stringify({endpoint: subscription.endpoint})});
-    await refreshPushSettings();
-  } catch (error) { document.querySelector("#pushPermissionStatus").textContent = error.message; }
-});
 if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (event) => {
   if (event.data?.type === "pending-arrival" && event.data.ledgerId === browserSession?.ledgerId) refreshPendingCount().catch(() => {});
-  if (event.data?.type === "invitation-arrival" && browserSession && !offlineMode) loadRecipientInvitations().catch(() => {});
+  if (event.data?.type === "invitation-arrival" && browserSession && !offlineMode) loadRecipientInvitations(true).catch(() => {});
 });
 
 let offlineMode = false;
@@ -2746,6 +3027,8 @@ async function configureOfflineLedgers() {
 async function enterOffline() {
   if (offlineMode) return;
   offlineMode = true;
+  cachedBalanceSnapshot = null;
+  document.body.dataset.cachedBalances = "false";
   document.body.dataset.offline = "true";
   offlineColdStart = !lifecycleReady;
   document.querySelector("#invitationBanner").hidden = true;
@@ -2778,15 +3061,16 @@ async function recoverOffline() {
     offlineRecovery = true;
     try {
       const selectedLedger = browserSession?.ledgerId;
-      const session = await api("/api/session");
+      const session = await api("/api/session", {background: true});
       if (!session.ledgerId || selectedLedger && session.ledgerId !== selectedLedger) {
         await OfflineFinance.clear(browserSession?.userId, selectedLedger);
         location.assign("/sign-in"); return;
       }
-      const dashboard = await api(`/api/dashboard?${dashboardQuery()}`);
+      const dashboard = await api(`/api/dashboard?${dashboardQuery()}`, {background: true});
       browserSession = session;
-      await initializeDashboardPeriods();
+      await initializeDashboardPeriods(true);
       offlineMode = false;
+      await reconcileNotificationPermission();
       document.body.dataset.offline = "false";
       for (const [control, disabled] of offlineDisabledControls) if (control.isConnected) control.disabled = disabled;
       offlineDisabledControls.clear();
@@ -2814,7 +3098,11 @@ async function recoverOffline() {
   return offlineRecoveryPromise;
 }
 window.addEventListener("offline", () => { if (lifecycleReady) enterOffline(); });
-window.addEventListener("online", () => { if (offlineMode) recoverOffline(); else checkVisiblePage(true); });
+window.addEventListener("focus", () => { reconcileNotificationPermission(); });
+window.addEventListener("online", () => {
+  if (offlineMode) recoverOffline();
+  else { reconcileNotificationPermission(); checkVisiblePage(true); }
+});
 document.addEventListener("submit", (event) => {
   if (offlineMode) { event.preventDefault(); event.stopImmediatePropagation(); }
 }, true);

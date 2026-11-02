@@ -15,6 +15,15 @@
 # handle those ZIP files as private installation copies. Browser ZIPs omit both.
 
 
+# --- Server listening address ---
+# Choose the HTTP port and IPv4 listening address. Restart after changes.
+
+# Use a whole number from 1 through 65535. The port must be available.
+serverPort = 5000
+# 0.0.0.0 listens on all IPv4 interfaces; 127.0.0.1 or localhost is local only.
+# A specific local IPv4 address listens only on that address.
+listenAddress = 0.0.0.0
+
 # --- Account usernames ---
 # Choose whether usernames must use an email address format.
 
@@ -35,6 +44,22 @@ trustedProxyAddresses =
 # Choose whether visitors can create their own user accounts.
 
 allowWebRegistration = false
+
+# --- Account self-service ---
+# Allow signed-in users to change their own names and passwords in My Account.
+
+allowAccountSelfService = true
+
+# --- Login sessions ---
+# Keep valid logins across server restarts. Default false; restart after changes. Disabling clears saved sessions.
+
+persistLoginOnRestart = false
+
+# --- Password recovery ---
+# Optional emailed password-reset links. Requires SMTP and an explicit public HTTPS application origin.
+
+allowWebPasswordRecovery = false
+publicApplicationUrl =
 
 # --- PWA features ---
 # Opt in to offline Dashboard storage and system push notifications independently. Restart after changes; the manifest remains available.

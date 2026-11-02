@@ -177,3 +177,65 @@ assert.equal(friendlyAuditTimestamp("Not recorded"), "Not recorded");
         for timezone in ("America/Chicago", "Pacific/Kiritimati", "Pacific/Honolulu"):
             result = subprocess.run([nodePath, "-e", friendlyDate + auditDate + harness], capture_output=True, text=True, env={**os.environ, "TZ": timezone})
             self.assertEqual(0, result.returncode, result.stderr)
+
+    def testCachedDashboardBalancesStayScopedAndRefreshWithoutOfflineNavigation(self):
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("Node.js unavailable")
+        source = (Path(__file__).resolve().parents[1] / "app.js").read_text()
+        functions = source[source.index("function dashboardRefreshLabel("):source.index("function renderDashboard(dashboard)")]
+        harness = r'''
+const assert = require("node:assert/strict");
+let browserSession={userId:7,ledgerId:"one"},currentPath="/",offlineMode=false,lastDashboard=null,lastDashboardQuery=null,cachedBalanceSnapshot=null,dashboardRequestId=0,dashboardCurrentDate=null;
+const controls=new Map();
+const document={body:{dataset:{}},querySelector(selector){return this.getElementById(selector.slice(1));},getElementById(id){if(!controls.has(id))controls.set(id,{textContent:"",hidden:false,replaceChildren(){this.textContent="";}});return controls.get(id);}};
+let snapshots=[],readError=false,renderedBalances=null,renderedDashboard=null,saved=0,resolveRead;
+const OfflineFinance={async available(userId){assert.equal(userId,7);if(readError)throw Error("storage denied");return {snapshots};}};
+function offlineUpdatedLabel(){return "Updated 2:35 PM";}
+function renderDashboardAccounts(value){renderedBalances=value;document.getElementById("cashTotal").textContent="cached";}
+function renderDashboard(value){renderedDashboard=value;document.getElementById("cashTotal").textContent="fresh";}
+function dashboardQuery(){return "period=thisMonth";}
+async function cacheDashboard(){saved++;}
+let requests=[];
+function api(){return new Promise((resolve,reject)=>requests.push({resolve,reject}));}
+const own={userId:7,ledgerId:"one",savedAt:"2026-11-02T14:35:00Z",dashboard:{accounts:[{balanceCents:12345}]},controls:{dashboardPeriod:{value:"lastMonth"}}};
+async function check(){
+ snapshots=[{...own,userId:8},{...own,ledgerId:"other"}];await showCachedDashboardBalances();assert.equal(renderedBalances,null);
+ readError=true;await showCachedDashboardBalances();assert.equal(renderedBalances,null);readError=false;
+ snapshots=[own];await showCachedDashboardBalances();assert.equal(renderedBalances,own.dashboard);assert.equal(renderedDashboard,null,"Do not render saved reporting totals or restore reporting controls");
+ assert.equal(document.body.dataset.cachedBalances,"true");assert.equal(document.body.dataset.offline,undefined);
+ assert.equal(document.querySelector("#dashboardRefreshMessage").textContent,"Updating… · Last updated 2:35 PM");assert.equal(controls.has("mainNavigation"),false);
+ let loading=loadDashboard();assert.match(document.querySelector("#dashboardRefreshMessage").textContent,/Last updated/);
+ requests.at(-1).reject(Error("server error"));await loading;assert.equal(document.body.dataset.cachedBalances,"true");assert.match(document.querySelector("#dashboardRefreshMessage").textContent,/Couldn't refresh.*Last updated/);assert.equal(document.querySelector("#dashboardRefreshRetry").hidden,false);
+ loading=loadDashboard();const fresh={accounts:[{balanceCents:999}],currentDate:"2026-11-02"};requests.at(-1).resolve(fresh);await loading;
+ assert.equal(renderedDashboard,fresh);assert.equal(lastDashboard,fresh);assert.equal(cachedBalanceSnapshot,null);assert.equal(document.body.dataset.cachedBalances,"false");assert.equal(document.querySelector("#dashboardRefreshMessage").textContent,"");assert.equal(saved,1);
+ // A slow cache read may not overwrite a completed fresh request or a different ledger.
+ lastDashboard=null;OfflineFinance.available=()=>new Promise(resolve=>{resolveRead=resolve;});const delayed=showCachedDashboardBalances();browserSession={userId:7,ledgerId:"other"};resolveRead({snapshots:[own]});await delayed;assert.equal(document.getElementById("cashTotal").textContent,"fresh");
+ browserSession.ledgerId="one";const delayedFresh=showCachedDashboardBalances();lastDashboard=fresh;resolveRead({snapshots:[own]});await delayedFresh;assert.equal(cachedBalanceSnapshot,null);
+ // Clearing only the provisional balances never erases fresh results.
+ clearCachedDashboardBalances();assert.equal(document.getElementById("cashTotal").textContent,"fresh");
+ lastDashboard=null;OfflineFinance.available=async()=>({snapshots:[own]});await showCachedDashboardBalances();clearCachedDashboardBalances();assert.equal(document.getElementById("cashTotal").textContent,"");assert.equal(document.body.dataset.cachedBalances,"false");assert.equal(document.getElementById("minimumBalanceBanner").hidden,true);
+ currentPath="/settings";await showCachedDashboardBalances();assert.equal(cachedBalanceSnapshot,null);
+ browserSession.ledgerId=null;currentPath="/";await showCachedDashboardBalances();assert.equal(cachedBalanceSnapshot,null);
+}
+'''
+        result = subprocess.run([nodePath, "-e", harness + functions + "check().catch(error=>{console.error(error);process.exitCode=1;});"], capture_output=True, text=True, timeout=15)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def testDeniedDashboardRequestClearsProvisionalBalances(self):
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("Node.js unavailable")
+        source = (Path(__file__).resolve().parents[1] / "app.js").read_text()
+        apiFunction = source[source.index("async function api("):source.index("function option(")]
+        harness = r'''
+const assert=require("node:assert/strict");
+let browserSession={userId:7,ledgerId:"one"},offlineMode=false,offlineRecovery=false,lifecycleReady=true,cleared=0,redirected=0,status=403;
+const location={href:"http://localhost/?ledger=one",assign(){redirected++;}};
+const OfflineFinance={async clear(userId,ledgerId){assert.equal(userId,7);assert.equal(ledgerId,status===401?null:"one");}};
+function clearCachedDashboardBalances(){cleared++;}
+async function fetch(){return {ok:false,status,async json(){return {error:"Access denied"};}};}
+async function check(){for(const code of [403,401]){status=code;await assert.rejects(api("/api/dashboard"),/Access denied/);}assert.equal(cleared,2);assert.equal(redirected,1);}
+'''
+        result = subprocess.run([nodePath, "-e", harness + apiFunction + "check().catch(error=>{console.error(error);process.exitCode=1;});"], capture_output=True, text=True, timeout=15)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)

@@ -157,13 +157,13 @@ class ApplicationTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(200, response.status_code)
         self.assertEqual(
-            {"applicationVersion": "26.10.30", "schemaVersion": 30, "status": "ok"},
+            {"applicationVersion": "26.11", "schemaVersion": 31, "status": "ok"},
             response.get_json(),
         )
 
     def testApplicationIdentityIsExposedFromOneVersionValue(self):
         details = self.client.get("/api/application").get_json()
-        self.assertEqual({"name": "No Part Finance", "version": "26.10.30"}, details)
+        self.assertEqual({"name": "No Part Finance", "version": "26.11"}, details)
         response = self.client.get("/")
         html = response.get_data(as_text=True)
         response.close()
@@ -430,7 +430,7 @@ class ApplicationTests(unittest.TestCase):
         modifiedAfter = self.databasePath.stat().st_mtime_ns
         self.assertEqual(3, status["transactionCount"])
         self.assertEqual(3, status["accountCount"])
-        self.assertEqual(30, status["schemaVersion"])
+        self.assertEqual(31, status["schemaVersion"])
         self.assertRegex(status["modifiedLocal"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
         self.assertEqual(modifiedBefore, modifiedAfter)
 
@@ -439,7 +439,7 @@ class ApplicationTests(unittest.TestCase):
         html = (repositoryPath / "index.html").read_text(encoding="utf-8")
         styles = (repositoryPath / "styles.css").read_text(encoding="utf-8")
         self.assertIn("Release History", html)
-        self.assertIn("<h3>26.10</h3>", html)
+        self.assertNotIn("<h3>26.10</h3>", html)
         self.assertIn("<h3>Earlier versions</h3>", html)
         self.assertNotIn("<h3>26.09</h3>", html)
         self.assertNotIn("<h3>26.08 — Initial Release</h3>", html)
@@ -452,7 +452,8 @@ class ApplicationTests(unittest.TestCase):
         packageSection = html[html.index("<h3>Application Package</h3>"):html.index("</section>", html.index("<h3>Application Package</h3>"))]
         self.assertLess(packageSection.index("credential-free user records"), packageSection.index(">Download with database<"))
         self.assertNotIn("26.08.24 —", html)
-        self.assertIn("The inspiration behind No Part Finance.", html)
+        self.assertNotIn("The inspiration behind No Part Finance.", html)
+        self.assertIn("Waitress serving on Windows and Linux", html)
         windowsLauncher = (repositoryPath / "startWindows.bat").read_text(encoding="utf-8")
         linuxLauncher = (repositoryPath / "startLinux.sh").read_text(encoding="utf-8")
         for launcher in (windowsLauncher, linuxLauncher):
@@ -477,9 +478,9 @@ class ApplicationTests(unittest.TestCase):
         self.assertIn(".settingsNavigation a { flex: none; white-space: nowrap; }", styles)
 
     def testDevelopmentServerBindsToAllInterfacesByDefault(self):
-        with patch("app.make_server") as createServer, patch("users.input") as setupInput:
+        with patch("app.createHttpServer") as createServer, patch("users.input") as setupInput:
             runApplication(self.app)
-        createServer.assert_called_once_with("0.0.0.0", 5000, self.app, threaded=True)
+        createServer.assert_called_once_with(self.app, "0.0.0.0", 5000)
         setupInput.assert_not_called()
         applicationSource = (Path(__file__).resolve().parents[1] / "app.py").read_text()
         self.assertNotIn("FINANCE_HOST", applicationSource)

@@ -11,7 +11,7 @@ from pathlib import Path
 from platformConfiguration import configurationSample
 
 
-applicationVersion = "26.10.30"
+applicationVersion = "26.11"
 archiveRootName = "No-Part-Finance"
 includedFiles = (
     "app.py",
@@ -34,6 +34,9 @@ includedFiles = (
     "tests/test_release_2610.py",
     "tests/test_pending_next.py",
     "tests/test_startup_serving.py",
+    "tests/test_persistent_sessions.py",
+    "tests/test_sessions.py",
+    "tests/test_recovery_routes.py",
     "app.js",
     "theme.js",
     "pwa.webmanifest",
@@ -111,6 +114,8 @@ def createVerifiedDatabaseCopy(sourceDatabasePath, destinationDatabasePath):
             destinationConnection = sqlite3.connect(destinationDatabasePath)
             try:
                 sourceConnection.backup(destinationConnection)
+                from database import clearBrowserSessionsFromBackup
+                clearBrowserSessionsFromBackup(destinationConnection)
             finally:
                 destinationConnection.close()
         finally:

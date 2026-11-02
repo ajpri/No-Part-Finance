@@ -203,7 +203,7 @@ body[data-role="auditor"] a[href^="/api/backup"], body[data-role="auditor"] a[hr
 
 .dashboardSecondaryActions { align-items: center; display: flex; flex: 1 1 18rem; gap: .5rem; min-width: 0; }
 .dashboardSecondaryActions .secondaryControl { flex-shrink: 0; }
-.refreshStatus { display: inline-flex; align-items: center; justify-content: flex-end; gap: .4rem; flex: 1 1 0; min-width: 0; height: 2.1rem; font-size: .85rem; }
+.refreshStatus { display: inline-flex; align-items: center; justify-content: flex-end; gap: .4rem; flex: 1 1 0; min-width: 0; min-height: 2.1rem; flex-wrap: wrap; font-size: .85rem; }
 #dashboardReviewPendingButton:disabled { background: var(--surface); color: var(--muted); border-color: var(--border); }
 #offlineNavigation { align-items: center; display: flex; flex-wrap: wrap; gap: .15rem; font-size: .85rem; min-height: 1.5rem; min-width: 0; }
 #offlineNavigation time { white-space: nowrap; }
@@ -220,6 +220,21 @@ body[data-offline="true"] #dashboardPage button:disabled { background: var(--sur
 :root { --offline-background: #faf7ef; }
 :root[data-theme="dark"] { --offline-background: #282724; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme]) { --offline-background: #282724; } }
-body[data-offline="true"] { background: var(--offline-background); min-height: 100vh; }
-body[data-offline="true"] table { background: var(--offline-background); }
-body[data-offline="true"] .expenseDetailGroup :is(th, td) { background: var(--offline-background); }
+body:is([data-offline="true"], [data-cached-balances="true"]) { background: var(--offline-background); min-height: 100vh; }
+body:is([data-offline="true"], [data-cached-balances="true"]) table { background: var(--offline-background); }
+body:is([data-offline="true"], [data-cached-balances="true"]) .expenseDetailGroup :is(th, td) { background: var(--offline-background); }
+
+.accountForm { display: grid; gap: .75rem; max-width: 28rem; margin: 0; }
+.accountForm h3, .accountForm p { margin: 0; }
+.accountForm button { justify-self: start; }
+.accountIdentity { display: grid; gap: .75rem; }
+.accountIdentity dt { color: var(--muted); font-size: .9rem; }
+.accountIdentity dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
+
+.accountNameValue { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+
+:root { --current-account-row: #e2e5e9; }
+:root[data-theme="dark"] { --current-account-row: #141516; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme]) { --current-account-row: #141516; } }
+.accountClientColumn { width: 40%; min-width: 15rem; }
+.currentAccountRow > td { background: var(--current-account-row); }

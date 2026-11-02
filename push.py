@@ -2,6 +2,7 @@
 import base64
 import json
 import time
+import unicodedata
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import serialization
@@ -81,19 +82,37 @@ def publicPushSubject(origin):
         return None
 
 
-def enroll(connection, userId, ledgerId, submitted, subject=None):
+def enroll(connection, userId, ledgerId, submitted, subject=None, installationId=None, client="Unknown client", expectedVersion=None, refreshOnly=False):
     subscription = validateSubscription(submitted)
     if publicPushSubject(subject):
         subscription["vapidSubject"] = publicPushSubject(subject)
     with connection:
         connection.execute("BEGIN IMMEDIATE")
+        if expectedVersion is not None and not connection.execute("""SELECT 1 FROM users u JOIN ledgerAccess a ON a.userId = u.id
+            WHERE u.id = ? AND u.authVersion = ? AND u.enabled = 1 AND u.passwordSetupRequired = 0
+                AND a.ledgerId = ? AND a.enabled = 1 AND a.role IN ('owner', 'member')""", (userId, expectedVersion, ledgerId)).fetchone():
+            raise ValidationError("Your access changed. Sign in again.")
         if connection.execute("SELECT 1 FROM pushSubscriptions WHERE endpoint = ? AND userId != ?", (subscription["endpoint"], userId)).fetchone():
             raise ValidationError("This installation belongs to another login. Disable its subscription and enable notifications again.")
+        # A background metadata refresh must never recreate a remotely disabled
+        # enrollment, even when removal races its preceding GET.
+        if refreshOnly and not connection.execute("SELECT 1 FROM pushSubscriptions WHERE endpoint = ? AND ledgerId = ? AND userId = ?", (subscription["endpoint"], ledgerId, userId)).fetchone():
+            return
         existing = connection.execute("SELECT subscription FROM pushSubscriptions WHERE endpoint = ? AND userId = ?", (subscription["endpoint"], userId)).fetchall()
         subscription["lastInvitationId"] = max((json.loads(row[0]).get("lastInvitationId", 0) for row in existing), default=0)
+        labelRows = connection.execute("SELECT subscription FROM pushSubscriptions WHERE userId = ? AND (installationId = ? OR endpoint = ?) ORDER BY id", (userId, installationId, subscription["endpoint"])).fetchall()
+        deviceLabel = ""
+        for row in labelRows:
+            savedLabel = json.loads(row[0]).get("deviceLabel")
+            if isinstance(savedLabel, str) and savedLabel:
+                deviceLabel = savedLabel
+                break
+        if deviceLabel:
+            subscription["deviceLabel"] = deviceLabel
         baseline = connection.execute("SELECT COALESCE(MAX(id), 0) FROM pendingSubmissions WHERE ledgerId = ?", (ledgerId,)).fetchone()[0]
-        connection.execute("""INSERT INTO pushSubscriptions (userId, ledgerId, endpoint, subscription, lastProposalId) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(endpoint, ledgerId) DO UPDATE SET subscription = excluded.subscription""", (userId, ledgerId, subscription["endpoint"], json.dumps(subscription), baseline))
+        connection.execute("""INSERT INTO pushSubscriptions (userId, ledgerId, endpoint, subscription, lastProposalId, installationId, client) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(endpoint, ledgerId) DO UPDATE SET subscription = excluded.subscription,
+                installationId = COALESCE(excluded.installationId, pushSubscriptions.installationId), client = excluded.client""", (userId, ledgerId, subscription["endpoint"], json.dumps(subscription), baseline, installationId, client))
 
 
 class NoRedirectSession(Session):
@@ -193,3 +212,43 @@ def logPushFailure(connection, detail):
     logs = getattr(connection, "operationalLogs", None)
     if logs:
         logs.write("startup", f"Notification not delivered. {detail} The saved item is unaffected.")
+
+
+def migrateNotificationDevices(connection):
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(pushSubscriptions)")}
+    if "installationId" not in columns:
+        connection.execute("ALTER TABLE pushSubscriptions ADD COLUMN installationId TEXT")
+    if "client" not in columns:
+        connection.execute("ALTER TABLE pushSubscriptions ADD COLUMN client TEXT NOT NULL DEFAULT 'Unknown client'")
+    connection.execute("CREATE INDEX IF NOT EXISTS pushSubscriptionsInstallation ON pushSubscriptions(userId, installationId)")
+
+
+def removeInstallations(connection, userId, installationIds):
+    """Caller owns the transaction; expiry/restart deliberately never call this."""
+    installationIds = sorted(set(value for value in installationIds if value))
+    if installationIds:
+        placeholders = ",".join("?" for value in installationIds)
+        connection.execute(f"DELETE FROM pushSubscriptions WHERE userId = ? AND installationId IN ({placeholders})", (userId, *installationIds))
+
+
+def renameNotificationDevice(connection, userId, enrollmentId, label):
+    if not isinstance(label, str):
+        raise ValidationError("Device label must be text")
+    label = label.strip()
+    if len(label) > 60 or any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in label):
+        raise ValidationError("Device label allows up to 60 characters without control characters")
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        selected = connection.execute("SELECT id, installationId FROM pushSubscriptions WHERE id = ? AND userId = ?", (enrollmentId, userId)).fetchone()
+        if not selected:
+            raise ValidationError("Notification enrollment is no longer available")
+        # A device label follows this User's explicit browser installation across
+        # ledgers. Legacy unassociated rows are edited individually, never guessed.
+        rows = connection.execute("SELECT id, subscription FROM pushSubscriptions WHERE userId = ? AND installationId = ?" if selected["installationId"] else "SELECT id, subscription FROM pushSubscriptions WHERE userId = ? AND id = ?", (userId, selected["installationId"] or enrollmentId)).fetchall()
+        for row in rows:
+            subscription = json.loads(row["subscription"])
+            if label:
+                subscription["deviceLabel"] = label
+            else:
+                subscription.pop("deviceLabel", None)
+            connection.execute("UPDATE pushSubscriptions SET subscription = ? WHERE userId = ? AND id = ?", (json.dumps(subscription), userId, row["id"]))

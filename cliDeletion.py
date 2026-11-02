@@ -27,6 +27,8 @@ def databaseBackup(databasePath, backupsDirectory):
         with sqlite3.connect(Path(databasePath).resolve().as_uri() + "?mode=ro", uri=True) as source:
             with sqlite3.connect(backupPath) as destination:
                 source.backup(destination)
+                from database import clearBrowserSessionsFromBackup
+                clearBrowserSessionsFromBackup(destination)
                 if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or destination.execute("PRAGMA foreign_key_check").fetchone():
                     raise ValidationError("Pre-deletion backup verification failed")
         return backupPath
@@ -81,6 +83,8 @@ def deleteUser(connection, userId):
     recordUserChange(connection, userId, "delete", before, {"id": userId, "username": "Deleted user", "loginEnabled": False})
     connection.execute("DELETE FROM ledgerAccess WHERE userId = ?", (userId,))
     connection.execute("DELETE FROM pushSubscriptions WHERE userId = ?", (userId,))
+    connection.execute("DELETE FROM recoveryEligibility WHERE userId = ?", (userId,))
+    connection.execute("DELETE FROM passwordRecoveryLinks WHERE userId = ?", (userId,))
     for table in ("verificationChallenges", "verificationState", "verificationSendAttempts"):
         connection.execute(f"DELETE FROM {table} WHERE userId = ?", (userId,))
     connection.execute("UPDATE sharingInvitations SET status = 'Cancelled' WHERE recipientUserId = ? AND status = 'Pending'", (userId,))

@@ -1,6 +1,7 @@
 """Trusted local user management. Passwords never appear in output or audit values."""
 
 import getpass
+import hashlib
 import json
 import sqlite3
 import secrets
@@ -180,6 +181,7 @@ def resetPassword(connection, userId, password):
         connection.execute("BEGIN IMMEDIATE")
         before = userSnapshot(connection, userId)
         connection.execute("UPDATE users SET passwordHash = ?, passwordSetupRequired = 0, authVersion = authVersion + 1 WHERE id = ?", (hashedPassword, before["id"]))
+        connection.execute("DELETE FROM passwordRecoveryLinks WHERE userId = ?", (userId,))
         recordUserChange(connection, userId, "password-reset", before, userSnapshot(connection, userId))
 
 
@@ -197,6 +199,8 @@ def renameUser(connection, userId, username):
             return
         connection.execute("UPDATE users SET username = ?, usernameKey = ?, authVersion = authVersion + 1 WHERE id = ?", (username, username.casefold(), userId))
         connection.execute("DELETE FROM verificationChallenges WHERE userId = ?", (userId,))
+        connection.execute("DELETE FROM recoveryEligibility WHERE userId = ?", (userId,))
+        connection.execute("DELETE FROM passwordRecoveryLinks WHERE userId = ?", (userId,))
         recordUserChange(connection, userId, "rename", before, userSnapshot(connection, userId))
 
 
@@ -357,7 +361,7 @@ def manageSelectedUser(connection, userId):
         print(f"4. {'Disable' if user['loginEnabled'] else 'Enable'} login")
         print(f"Profile: {user['firstName']} {user['lastName']}")
         print(f"Verification: {user['verificationStatus']} ({user['acceptanceMethod']})")
-        print("5. Set first/last name\n6. Manually accept verification")
+        print("5. Set first/last name\n6. Manually accept verification\n7. Trust current email for password recovery (not mailbox verification)")
         print("0. Back")
         choice = input("Choose: ").strip()
         if choice == "0":
@@ -383,6 +387,10 @@ def manageSelectedUser(connection, userId):
             if input("Accept without proving mailbox ownership? [y/N] ").strip().lower() == "y":
                 acceptUserManually(connection, userId)
                 print("Accepted through trusted CLI. Fresh sign-in required.")
+        elif choice == "7":
+            if input("Trust this current email for password recovery without proving mailbox ownership? [y/N] ").strip().lower() == "y":
+                trustRecoveryEmail(connection, userId)
+                print("Current email trusted for recovery; mailbox ownership was not verified.")
         else:
             print("Choose a listed option.")
 
@@ -548,17 +556,27 @@ def saveIdentity(connection, userId, username, firstName, lastName):
     if connection.execute("SELECT 1 FROM users WHERE usernameKey = ? AND id != ?", (username.casefold(), userId)).fetchone():
         raise ValidationError("That username is already configured")
     before = userSnapshot(connection, userId)
+    if user["username"] != username:
+        connection.execute("DELETE FROM recoveryEligibility WHERE userId = ?", (userId,))
+        connection.execute("DELETE FROM passwordRecoveryLinks WHERE userId = ?", (userId,))
     connection.execute("UPDATE users SET username = ?, usernameKey = ?, firstName = ?, lastName = ?, authVersion = authVersion + 1 WHERE id = ?", (username, username.casefold(), firstName, lastName, userId))
     auditIdentity(connection, userId, "profile-update", before)
 
 
-def updateProfile(connection, userId, firstName, lastName):
+def updateProfile(connection, userId, firstName, lastName, expectedVersion=None, retainedSession=None):
     firstName, lastName = validateProfile(firstName, lastName)
     with connection:
         connection.execute("BEGIN IMMEDIATE")
+        if expectedVersion is not None:
+            current = requireUsableIdentity(connection, userId)
+            if current["authVersion"] != expectedVersion:
+                raise ValidationError("Your account changed. Sign in again.")
         before = userSnapshot(connection, userId)
         if before["registrationExpired"]:
             raise ValidationError("Expired registrations cannot be changed")
+        if retainedSession:
+            from database import retainBrowserSession
+            retainBrowserSession(connection, retainedSession, userId, expectedVersion)
         connection.execute("UPDATE users SET firstName = ?, lastName = ?, authVersion = authVersion + 1 WHERE id = ?", (firstName, lastName, userId))
         connection.execute("DELETE FROM verificationChallenges WHERE userId = ? AND purpose = 'migration'", (userId,))
         auditIdentity(connection, userId, "profile-update", before)
@@ -667,6 +685,8 @@ def verifyIdentityCode(connection, userId, code, now=None, expectedVersion=None)
                 connection.execute("UPDATE users SET verificationStatus = 'accepted', acceptanceMethod = 'email-code', authVersion = authVersion + 1 WHERE id = ?", (userId,))
             if purpose == "migration":
                 connection.execute("UPDATE users SET acceptanceMethod = 'email-code' WHERE id = ?", (userId,))
+            connection.execute("""INSERT INTO recoveryEligibility(userId,address,method) VALUES (?, ?, 'email-code')
+                ON CONFLICT(userId) DO UPDATE SET address = excluded.address, method = excluded.method""", (userId, challenge["address"]))
             connection.execute("UPDATE verificationChallenges SET consumedAt = ? WHERE userId = ?", (now, userId))
             connection.execute("DELETE FROM verificationState WHERE userId = ?", (userId,))
             auditIdentity(connection, userId, "email-verified", before)
@@ -675,7 +695,7 @@ def verifyIdentityCode(connection, userId, code, now=None, expectedVersion=None)
     return purpose
 
 
-def sendVerificationEmail(configuration, recipient, code, purpose, logs):
+def sendVerificationEmail(configuration, recipient, code, purpose, logs, recoveryLink=None):
     import smtplib
     import ssl
     from email.message import EmailMessage
@@ -684,11 +704,11 @@ def sendVerificationEmail(configuration, recipient, code, purpose, logs):
     if not configuration["smtpEnabled"]:
         raise ValidationError("SMTP is disabled")
     message = EmailMessage()
-    message["Subject"] = "No Part Finance verification code"
+    message["Subject"] = "No Part Finance password recovery" if recoveryLink else "No Part Finance verification code"
     message["From"] = formataddr((configuration["smtpFromName"], configuration["smtpFromAddress"]))
     message["To"] = recipient
     contextText = "verification" if purpose == "registration" else "email address change verification"
-    message.set_content(f"Your No Part Finance {contextText} code is {code}. It expires in 10 minutes.")
+    message.set_content(f"Reset your No Part Finance password using this single-use link. It expires in 15 minutes.\n\n{recoveryLink}\n\nIf you did not request this, ignore this email." if recoveryLink else f"Your No Part Finance {contextText} code is {code}. It expires in 10 minutes.")
     mailClient = None
     try:
         context = ssl.create_default_context()
@@ -705,7 +725,7 @@ def sendVerificationEmail(configuration, recipient, code, purpose, logs):
             mailClient.login(configuration["smtpUsername"], configuration["smtpPassword"])
         mailClient.send_message(message)
         if logs:
-            logs.write("email", "Verification email accepted by the mail server. Inbox delivery is not guaranteed.")
+            logs.write("email", ("Password recovery" if recoveryLink else "Verification") + " email accepted by the mail server. Inbox delivery is not guaranteed.")
         return "Verification email sent. Check your inbox."
     except (OSError, smtplib.SMTPException, ValueError) as error:
         # SMTP exceptions can echo credentials, message text, or provider responses.
@@ -719,7 +739,7 @@ def sendVerificationEmail(configuration, recipient, code, purpose, logs):
                 explanation = "The mail server certificate could not be verified. Check its hostname and certificate; do not disable certificate validation."
             else:
                 explanation = "The mail server may be unavailable or rejected the request. Check SMTP connection and security settings before trying Resend."
-            logs.write("email", "Verification email delivery could not be confirmed. " + explanation)
+            logs.write("email", ("Password recovery" if recoveryLink else "Verification") + " email delivery could not be confirmed. " + explanation)
         return "We couldn’t confirm that your verification email was sent. Check your inbox, or try Resend when available."
     finally:
         if mailClient is not None:
@@ -736,7 +756,7 @@ def manageIdentityWithoutLedger(connection, userId):
         print(f"Profile: {user['firstName']} {user['lastName']}")
         print(f"Verification: {user['verificationStatus']} ({user['acceptanceMethod']})")
         print(f"Login: {'Enabled' if user['loginEnabled'] else 'Disabled'}")
-        print("1. Change username\n2. Reset password\n4. Enable/disable login\n5. Set first/last name\n6. Manually accept verification\n0. Back")
+        print("1. Change username\n2. Reset password\n4. Enable/disable login\n5. Set first/last name\n6. Manually accept verification\n7. Trust current email for password recovery (not mailbox verification)\n0. Back")
         choice = input("Choose: ").strip()
         if choice == "0":
             return
@@ -752,3 +772,118 @@ def manageIdentityWithoutLedger(connection, userId):
         elif choice == "6":
             if input("Accept without proving mailbox ownership? [y/N] ").strip().lower() == "y":
                 acceptUserManually(connection, userId)
+        elif choice == "7":
+            if input("Trust this current email for password recovery without proving mailbox ownership? [y/N] ").strip().lower() == "y":
+                trustRecoveryEmail(connection, userId)
+                print("Current email trusted for recovery; mailbox ownership was not verified.")
+
+
+def changeOwnPassword(connection, userId, currentPassword, newPassword, confirmation, expectedVersion, removedInstallations=(), retainedSession=None):
+    if not isinstance(currentPassword, str) or len(currentPassword) > 128:
+        raise ValidationError("Current password is incorrect")
+    if newPassword != confirmation:
+        raise ValidationError("New passwords do not match")
+    hashedPassword = passwordHash(newPassword)
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        user = requireUsableIdentity(connection, userId)
+        if user["authVersion"] != expectedVersion:
+            raise ValidationError("Your account changed. Sign in again.")
+        if not check_password_hash(user["passwordHash"], currentPassword):
+            raise ValidationError("Current password is incorrect")
+        before = userSnapshot(connection, userId)
+        from database import retainBrowserSession
+        retainBrowserSession(connection, retainedSession, userId, expectedVersion)
+        connection.execute("UPDATE users SET passwordHash = ?, authVersion = authVersion + 1 WHERE id = ?", (hashedPassword, userId))
+        connection.execute("DELETE FROM passwordRecoveryLinks WHERE userId = ?", (userId,))
+        from push import removeInstallations
+        removeInstallations(connection, userId, removedInstallations)
+        auditIdentity(connection, userId, "password-change", before)
+
+
+passwordRecoveryResponse = "If this account is eligible, a password reset email will be sent. Check your inbox."
+
+
+def trustRecoveryEmail(connection, userId):
+    """Administrator trust is distinct from proving current mailbox ownership."""
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        user = requireUsableIdentity(connection, userId)
+        if not emailLikeUsername(user["username"]):
+            raise ValidationError("Password recovery requires a current email username")
+        before = userSnapshot(connection, userId)
+        connection.execute("""INSERT INTO recoveryEligibility(userId,address,method) VALUES (?, ?, 'cli-trust')
+            ON CONFLICT(userId) DO UPDATE SET address = excluded.address, method = excluded.method""", (userId, user["username"]))
+        auditIdentity(connection, userId, "recovery-cli-trust", before)
+
+
+def issuePasswordRecovery(connection, username, clientAddress, now=None):
+    configuration = connection.configuration
+    if not configuration["allowWebPasswordRecovery"]:
+        raise ValidationError("Web password recovery is disabled")
+    now = int(time.time()) if now is None else now
+    # Hash normalized submitted addresses, including nonexistent accounts. The
+    # persistent rate limiter admits independently of private account eligibility.
+    usernameKey = username.strip().casefold() if isinstance(username, str) else ""
+    accountKey = hashlib.sha256(usernameKey.encode()).hexdigest()
+    token = None
+    recipient = None
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        accountAttempts = [row[0] for row in connection.execute("SELECT attemptedAt FROM passwordRecoveryAttempts WHERE accountKey = ? AND attemptedAt > ?", (accountKey, now - 86400))]
+        addressAttempts = [row[0] for row in connection.execute("SELECT attemptedAt FROM passwordRecoveryAttempts WHERE clientAddress = ? AND attemptedAt > ?", (clientAddress, now - 86400))]
+        for attempts in (accountAttempts, addressAttempts):
+            if attempts and now - max(attempts) < 30:
+                return passwordRecoveryResponse
+            if len(attempts) >= 20 or sum(attempt > now - 600 for attempt in attempts) >= 5:
+                return passwordRecoveryResponse
+        connection.execute("DELETE FROM passwordRecoveryAttempts WHERE attemptedAt <= ?", (now - 86400,))
+        connection.execute("INSERT INTO passwordRecoveryAttempts VALUES (?, ?, ?)", (accountKey, clientAddress, now))
+        user = connection.execute("""SELECT u.* FROM users u JOIN recoveryEligibility e ON e.userId = u.id AND e.address = u.username
+            WHERE u.usernameKey = ? AND u.enabled = 1 AND u.passwordSetupRequired = 0 AND u.verificationStatus = 'accepted'""", (usernameKey,)).fetchone()
+        if user and not registrationIsExpired(user, now) and emailLikeUsername(user["username"]):
+            token = secrets.token_urlsafe(32)
+            recipient = user["username"]
+            digest = hashlib.sha256(token.encode()).hexdigest()
+            connection.execute("""INSERT INTO passwordRecoveryLinks(userId,tokenDigest,address,authVersion,issuedAt,expiresAt,consumedAt)
+                VALUES (?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(userId) DO UPDATE SET tokenDigest=excluded.tokenDigest,
+                address=excluded.address, authVersion=excluded.authVersion, issuedAt=excluded.issuedAt,
+                expiresAt=excluded.expiresAt, consumedAt=NULL""", (user["id"], digest, recipient, user["authVersion"], now, now + 900))
+    if token:
+        # The configured origin and fragment keep reset credentials out of request
+        # paths, HTTP access logs, and arbitrary Host-derived links.
+        recoveryLink = configuration["publicApplicationUrl"].rstrip("/") + "/reset-password#" + token
+        sendRecoveryEmail(configuration, recipient, recoveryLink, getattr(connection, "operationalLogs", None))
+    return passwordRecoveryResponse
+
+
+def sendRecoveryEmail(configuration, recipient, recoveryLink, logs):
+    return sendVerificationEmail(configuration, recipient, "", "recovery", logs, recoveryLink=recoveryLink)
+
+
+def resetRecoveredPassword(connection, token, newPassword, confirmation, now=None):
+    if not connection.configuration["allowWebPasswordRecovery"]:
+        raise ValidationError("Web password recovery is disabled")
+    if not isinstance(token, str) or len(token) != 43 or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in token):
+        raise ValidationError("The reset link has expired or is unavailable. Request a new link.")
+    if newPassword != confirmation:
+        raise ValidationError("New passwords do not match")
+    hashedPassword = passwordHash(newPassword)
+    now = int(time.time()) if now is None else now
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        link = connection.execute("SELECT * FROM passwordRecoveryLinks WHERE tokenDigest = ?", (digest,)).fetchone()
+        if not link or link["consumedAt"] is not None or now >= link["expiresAt"]:
+            raise ValidationError("The reset link has expired or is unavailable. Request a new link.")
+        user = requireUsableIdentity(connection, link["userId"], now)
+        eligibility = connection.execute("SELECT address FROM recoveryEligibility WHERE userId = ?", (user["id"],)).fetchone()
+        if user["verificationStatus"] != "accepted" or user["authVersion"] != link["authVersion"] or not eligibility or eligibility["address"] != user["username"] or link["address"] != user["username"] or not emailLikeUsername(user["username"]):
+            raise ValidationError("The reset link has expired or is unavailable. Request a new link.")
+        before = userSnapshot(connection, user["id"])
+        connection.execute("UPDATE users SET passwordHash = ?, authVersion = authVersion + 1 WHERE id = ?", (hashedPassword, user["id"]))
+        connection.execute("UPDATE passwordRecoveryLinks SET consumedAt = ? WHERE userId = ? AND consumedAt IS NULL", (now, user["id"]))
+        connection.execute("DELETE FROM pushSubscriptions WHERE userId = ?", (user["id"],))
+        connection.actorKind, connection.actorId, connection.actorLabel = "user", str(user["id"]), user["username"]
+        auditIdentity(connection, user["id"], "password-recovery", before)
+    return user["id"]

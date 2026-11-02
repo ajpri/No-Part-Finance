@@ -31,3 +31,26 @@ document.querySelector("[data-cancel-registration]")?.addEventListener("click", 
 OfflineFinance.ready.then(() => {
   if (window.isSecureContext && "serviceWorker" in navigator) return navigator.serviceWorker.register("/service-worker.js");
 }).catch(() => {});
+
+function preparePasswordReset() {
+  const form = document.querySelector("[data-reset-password-form]");
+  if (!form) return;
+  const tokenInput = form.querySelector("[data-reset-token]");
+  const tokenMessage = form.querySelector("[data-reset-token-message]");
+  const submit = form.querySelector("[data-reset-submit]");
+  const fragment = location.hash.slice(1);
+  // Keep the emailed secret out of later URL sharing and navigation history.
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  if (/^[A-Za-z0-9_-]{43}$/.test(fragment)) tokenInput.value = fragment;
+  const validToken = () => /^[A-Za-z0-9_-]{43}$/.test(tokenInput.value);
+  const showMissingToken = () => {
+    tokenMessage.textContent = "Open the reset link from your email, or request a new reset link.";
+    tokenMessage.hidden = false;
+    submit.disabled = true;
+  };
+  if (!validToken()) showMissingToken();
+  form.addEventListener("submit", (event) => {
+    if (!validToken()) { event.preventDefault(); showMissingToken(); }
+  });
+}
+preparePasswordReset();

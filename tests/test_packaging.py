@@ -281,7 +281,8 @@ class ActualDistributionTests(unittest.TestCase):
                 "tests.test_release_2610.UserManagementAndMigrationTests.testStartupExplainsBrowserAccessAfterSkippedOrCompletedSetup",
             ], cwd=extractedPath, capture_output=True, text=True, timeout=120)
             self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
-            self.assertIn("Ran 9 tests", completed.stderr)
+            startupTestCount = unittest.defaultTestLoader.loadTestsFromName("tests.test_startup_serving").countTestCases()
+            self.assertIn(f"Ran {startupTestCount + 4} tests", completed.stderr)
             self.assertFalse((extractedPath / "finance.db").exists())
 
 

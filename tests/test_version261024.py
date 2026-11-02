@@ -42,6 +42,50 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(self.write("# settings\n enforceEmailUsernames = TrUe \n")["enforceEmailUsernames"])
         self.assertEqual(465, self.write("smtpSecurity = tls\n")["smtpPort"])
 
+    def testServerListeningDefaultsValidationAndLocalhostAlias(self):
+        defaults = loadConfiguration(self.root)
+        self.assertEqual(5000, defaults["serverPort"])
+        self.assertEqual("0.0.0.0", defaults["listenAddress"])
+        commented = self.write("# serverPort = 8080\n# listenAddress = localhost\n")
+        self.assertEqual(defaults, commented)
+        for port in (1, 5000, 8080, 65535):
+            for address, expected in (("0.0.0.0", "0.0.0.0"), ("127.0.0.1", "127.0.0.1"), ("LOCALhost", "127.0.0.1"), ("192.168.50.20", "192.168.50.20")):
+                with self.subTest(port=port,address=address):
+                    configured = self.write(f" serverPort = {port} \n listenAddress = {address} \n")
+                    self.assertEqual(port, configured["serverPort"])
+                    self.assertEqual(expected, configured["listenAddress"])
+        for port in ("", "0", "65536", "-1", "+5000", "5.0", "５０００", "9" * 100, "SECRET"):
+            with self.subTest(port=port), self.assertRaises(ConfigurationError) as raised:
+                self.write(f"serverPort = {port}\n")
+            self.assertIn("serverPort", str(raised.exception))
+            self.assertNotIn("SECRET", str(raised.exception))
+        for address in ("", "SECRET", "example.org", "::1", "127.0.0.1/8", "http://127.0.0.1", "127.0.0.1:8080", "999.0.0.1", "127.1", "127.000.0.1", "localhost SECRET"):
+            with self.subTest(address=address), self.assertRaises(ConfigurationError) as raised:
+                self.write(f"listenAddress = {address}\n")
+            self.assertIn("listenAddress", str(raised.exception))
+            self.assertNotIn("SECRET", str(raised.exception))
+
+    def testListeningSettingsPreservedAndAppliedOnlyToNewApp(self):
+        runtime = self.root / "platform.conf"
+        runtime.write_text("# Preserve these listening choices\nserverPort = invalid-earlier-value\nserverPort = 8080\nlistenAddress = LOCALHOST\n")
+        application = createApp(self.root / "synthetic.db")
+        self.assertEqual(8080, application.config["PLATFORM_CONFIGURATION"]["serverPort"])
+        self.assertEqual("127.0.0.1", application.config["PLATFORM_CONFIGURATION"]["listenAddress"])
+        self.assertIn("listenAddress = LOCALHOST", runtime.read_text())
+        self.assertIn("# Preserve these listening choices", runtime.read_text())
+        sample = (self.root / "platform.conf.sample").read_text()
+        self.assertIn("serverPort = 5000", sample)
+        self.assertIn("listenAddress = 0.0.0.0", sample)
+        self.assertNotIn("8080", sample)
+        runtime.write_text("serverPort = 8081\nlistenAddress = 192.168.50.20\n")
+        self.assertEqual(8080, application.config["PLATFORM_CONFIGURATION"]["serverPort"])
+        restarted = createApp(self.root / "synthetic.db")
+        self.assertEqual(8081, restarted.config["PLATFORM_CONFIGURATION"]["serverPort"])
+        self.assertEqual("192.168.50.20", restarted.config["PLATFORM_CONFIGURATION"]["listenAddress"])
+        runtime.write_text("serverPort = 8082\n# --- Extra data (ignored) ---\nserverPort = 1234\nlistenAddress = localhost\n")
+        self.assertEqual(8082, loadConfiguration(self.root)["serverPort"])
+        self.assertEqual("0.0.0.0", loadConfiguration(self.root)["listenAddress"])
+
     def testInvalidSettingsAreSanitized(self):
         for content in ("enforceEmailUsernames = SECRET", "enforceEmailUsernames = false\nenforceEmailUsernames = SECRET", "smtpPort SECRET", "smtpPort = 0", "smtpPort = 65536", "smtpTimeoutSeconds = 0", "smtpTimeoutSeconds = 1.5", "trustedProxyAddresses = localhost", "trustedProxyAddresses = 10.0.0.0/8", "smtpSecurity = SECRET", "smtpUsername = SECRET", "smtpPassword = SECRET", "smtpFromName = a\x00SECRET"):
             with self.subTest(content=content), self.assertRaises(ConfigurationError) as raised:
@@ -82,7 +126,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(before, path.stat().st_mtime_ns)
 
     def testInvalidConfigurationIsNotRewrittenAtStartup(self):
-        for original in ("smtpPort = SECRET", "allowWebRegistration = true\nallowWebRegistration = SECRET", "smtpPort SECRET"):
+        for original in ("smtpPort = SECRET", "allowWebRegistration = true\nallowWebRegistration = SECRET", "smtpPort SECRET", "serverPort = 0", "listenAddress = SECRET"):
             path = self.root / "platform.conf"
             path.write_text(original)
             with self.assertRaises(ConfigurationError):
@@ -647,7 +691,7 @@ class PackageAndMigrationTests(unittest.TestCase):
         self.assertEqual("accepted", connection.execute("SELECT verificationStatus FROM users").fetchone()[0])
         self.assertEqual("", connection.execute("SELECT firstName FROM users").fetchone()[0])
         connection.close()
-        self.assertTrue(list((self.root / "backups").glob("pre-migration-v27-to-v30-*.db")))
+        self.assertTrue(list((self.root / "backups").glob("pre-migration-v27-to-v31-*.db")))
         ledger.initializeDatabase(path)
 
     def testExportAcceptanceUnchangedAndCredentialsExcluded(self):

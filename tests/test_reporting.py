@@ -638,7 +638,7 @@ class DashboardUiTests(unittest.TestCase):
         self.assertLess(html.index('id="dashboardPeriod"'), html.index('id="dashboardStartDate"'))
         self.assertLess(html.index('id="dashboardStartDate"'), html.index('id="dashboardEndDate"'))
         self.assertNotIn('data-breakdown-view=', html)
-        self.assertIn("<h3>26.10</h3>", html)
+        self.assertNotIn("<h3>26.10</h3>", html)
         self.assertIn("<h3>Earlier versions</h3>", html)
         self.assertIn('data-breakdown-panel="expenseCategory"', html)
         self.assertIn('data-breakdown-panel="expenseAccount" hidden', html)

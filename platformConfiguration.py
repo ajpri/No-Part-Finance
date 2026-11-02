@@ -7,13 +7,20 @@ import shutil
 import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from urllib.parse import urlsplit
 import threading
 
 
 configurationDefaults = {
+    "serverPort": 5000,
+    "listenAddress": "0.0.0.0",
     "enforceEmailUsernames": False,
     "trustedProxyAddresses": "",
     "allowWebRegistration": False,
+    "allowAccountSelfService": True,
+    "persistLoginOnRestart": False,
+    "allowWebPasswordRecovery": False,
+    "publicApplicationUrl": "",
     "pwaOfflineEnabled": False,
     "pushNotificationsEnabled": False,
     "smtpEnabled": False,
@@ -56,8 +63,12 @@ def configurationSample():
         "",
     ]
     sections = {
+        "serverPort": ("Server listening address", "Choose the HTTP port and IPv4 listening address. Restart after changes."),
         "enforceEmailUsernames": ("Account usernames", "Choose whether usernames must use an email address format."),
         "trustedProxyAddresses": ("Reverse proxy", "Identify trusted proxies that forward the visitor's IP and HTTPS status."),
+        "persistLoginOnRestart": ("Login sessions", "Keep valid logins across server restarts. Default false; restart after changes. Disabling clears saved sessions."),
+        "allowWebPasswordRecovery": ("Password recovery", "Optional emailed password-reset links. Requires SMTP and an explicit public HTTPS application origin."),
+        "allowAccountSelfService": ("Account self-service", "Allow signed-in users to change their own names and passwords in My Account."),
         "allowWebRegistration": ("Web registration", "Choose whether visitors can create their own user accounts."),
         "pwaOfflineEnabled": ("PWA features", "Opt in to offline Dashboard storage and system push notifications independently. Restart after changes; the manifest remains available."),
         "smtpEnabled": ("Email delivery (SMTP)", "Configure the mail server used to send verification codes."),
@@ -67,6 +78,13 @@ def configurationSample():
         if key in sections:
             title, description = sections[key]
             lines.extend(["", f"# --- {title} ---", f"# {description}", ""])
+        if key == "serverPort":
+            lines.append("# Use a whole number from 1 through 65535. The port must be available.")
+        if key == "listenAddress":
+            lines.extend([
+                "# 0.0.0.0 listens on all IPv4 interfaces; 127.0.0.1 or localhost is local only.",
+                "# A specific local IPv4 address listens only on that address.",
+            ])
         if key == "trustedProxyAddresses":
             lines.extend([
                 "# Enter NGINX's internal/source IP as seen by the finance application.",
@@ -120,13 +138,18 @@ def loadConfiguration(directory):
             if value.lower() not in {"true", "false"}:
                 raise ConfigurationError(f"Invalid setting: {key}. Use true or false.")
             value = value.lower() == "true"
-        elif key in {"smtpPort", "smtpTimeoutSeconds"}:
+        elif key in {"serverPort", "smtpPort", "smtpTimeoutSeconds"}:
             if not value.isascii() or not value.isdecimal() or len(value) > 9:
                 raise ConfigurationError(f"Invalid setting: {key}. Use a positive whole number.")
             value = int(value)
-            if value < 1 or (key == "smtpPort" and value > 65535):
+            if value < 1 or (key in {"serverPort", "smtpPort"} and value > 65535):
                 raise ConfigurationError(f"Invalid setting: {key}. Check its allowed range.")
         configuration[key] = value
+    listenAddress = configuration["listenAddress"]
+    try:
+        configuration["listenAddress"] = "127.0.0.1" if listenAddress.lower() == "localhost" else str(ipaddress.IPv4Address(listenAddress))
+    except ValueError:
+        raise ConfigurationError("Invalid setting: listenAddress. Use an IPv4 address or localhost.") from None
     if configuration["smtpSecurity"] not in {"starttls", "tls"}:
         raise ConfigurationError("Invalid setting: smtpSecurity. Use starttls or tls.")
     addresses = configuration["trustedProxyAddresses"]
@@ -145,6 +168,23 @@ def loadConfiguration(directory):
             raise ConfigurationError("Enabled SMTP requires a valid smtpFromAddress.")
     if configuration["requireRegistrationVerification"] and not (configuration["smtpEnabled"] and configuration["enforceEmailUsernames"]):
         raise ConfigurationError("Required verification needs enforceEmailUsernames and smtpEnabled. Enable both with valid SMTP settings, or explicitly disable requireRegistrationVerification.")
+    publicUrl = configuration["publicApplicationUrl"]
+    if publicUrl:
+        try:
+            address = urlsplit(publicUrl)
+            host = address.hostname or ""
+            try:
+                publicHost = ipaddress.ip_address(host).is_global
+            except ValueError:
+                publicHost = "." in host and not host.endswith((".localhost", ".local", ".invalid")) and all(host.split("."))
+            if address.scheme != "https" or not publicHost or address.username or address.password or address.path not in {"", "/"} or address.query or address.fragment or any(character.isspace() for character in publicUrl):
+                raise ValueError()
+            address.port
+        except ValueError:
+            raise ConfigurationError("Invalid setting: publicApplicationUrl. Use the externally reachable HTTPS application origin without a path, query, or fragment.") from None
+        configuration["publicApplicationUrl"] = publicUrl.rstrip("/")
+    if configuration["allowWebPasswordRecovery"] and not (configuration["smtpEnabled"] and configuration["publicApplicationUrl"]):
+        raise ConfigurationError("Password recovery requires smtpEnabled with valid SMTP settings and publicApplicationUrl. Configure both or disable allowWebPasswordRecovery.")
     return configuration
 
 

@@ -106,6 +106,8 @@ class UserProvisioningTests(unittest.TestCase):
         ledger.createTransaction(self.connection, account, "2026-10-21", "Existing purchase", category, "10")
         plan = ledger.createSimulatorPlan(self.connection, "Existing plan", "2026-10-21")
         row = ledger.saveSimulatorRow(self.connection, plan, None, "spend", fromAccountId=account, categoryId=category, label="Existing row", amount="20")
+        self.connection.execute("DROP TRIGGER invalidateBrowserSessions")
+        self.connection.execute("DROP TABLE browserSessions")
         self.connection.execute("PRAGMA user_version = 25")
         self.connection.commit()
         beforeDump = list(self.connection.iterdump())
@@ -120,7 +122,7 @@ class UserProvisioningTests(unittest.TestCase):
         self.assertEqual(beforeDump, list(self.connection.iterdump()))
         with patch.object(ledger, "migrateToVersion27"), patch.object(ledger, "migrateToVersion28"):
             ledger.initializeDatabase(self.path)
-        self.assertEqual(30, self.connection.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(31, self.connection.execute("PRAGMA user_version").fetchone()[0])
         for table, recordedRows in beforeRows.items():
             self.assertEqual(recordedRows, [tuple(row) for row in self.connection.execute(f"SELECT * FROM {table}")], table)
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'auditsimulator*'").fetchone()[0])
@@ -275,6 +277,8 @@ class UserProvisioningTests(unittest.TestCase):
         self.connection.execute("DROP INDEX auditOperationIndex")
         self.connection.execute("ALTER TABLE auditEvents DROP COLUMN operationId")
         ledger.installAuditTriggers(self.connection)
+        self.connection.execute("DROP TRIGGER invalidateBrowserSessions")
+        self.connection.execute("DROP TABLE browserSessions")
         self.connection.execute("ALTER TABLE users DROP COLUMN enabled")
         self.connection.execute("ALTER TABLE ledgerAccess DROP COLUMN enabled")
         self.connection.execute("PRAGMA user_version = 22")

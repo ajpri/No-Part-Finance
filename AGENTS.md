@@ -10,25 +10,24 @@ Do not redesign the product while implementing it.
 
 The objective is a small, understandable, reliable personal finance application rather than an impressive software architecture.
 
-## 2. Work One Milestone at a Time
+## 2. Complete the Requested Scope as One Batch
 
 Before coding:
 
 1. Read all of `SPEC.md` and `ROADMAP.md`.
-2. Identify the requested scope. Requests such as `Develop Version Next`, `Implement Version Next`, or `Develop V Next` authorize every milestone currently listed under Version Next, even when there are multiple named milestones. Do not ask the User to select just one. A request naming a specific milestone authorizes only that milestone unless the User explicitly includes others.
-3. Implement one authorized milestone at a time, choosing dependency order when the whole Version Next section is requested.
-4. Run the relevant tests.
-5. Verify its acceptance criteria.
-6. Merge its enduring behavior into the appropriate canonical sections of `SPEC.md` and remove only its completed entry from `ROADMAP.md`.
-7. Report what changed and any unresolved issue. Continue to the next milestone already authorized by the request; stop after the complete requested scope is implemented and verified.
+2. Identify the requested scope. Requests such as `Develop Version Next`, `Implement Version Next`, or `Develop V Next` authorize every milestone currently listed under Version Next as one coordinated implementation batch. Do not ask the User to select just one. A request naming a specific milestone authorizes only that milestone unless the User explicitly includes others.
+3. Plan the complete authorized batch up front, including dependencies and all required schema changes. Milestones organize the work and acceptance checks; they are not separate releases, schema versions, or deployment steps.
+4. Implement the complete authorized batch in dependency order. Run focused checks during development as useful, then run the relevant combined regression checks and verify every authorized milestone's acceptance criteria.
+5. Merge the batch's verified enduring behavior into the appropriate canonical sections of `SPEC.md` and remove only its completed entries from `ROADMAP.md`. Preserve all uncompleted and out-of-scope entries.
+6. Report the completed requested scope and any unresolved issue. Perform an authorized server restart or deployment once after the complete batch is ready. Do not stop for approval between already authorized milestones.
 
 Do not begin milestones outside the requested scope. A request to develop all of Version Next does not authorize Version Soon, Version Later, Deferred Ideas, or new milestones added afterward without further User authorization. Do not promote Version Soon automatically or prebuild future features.
 
-This project is intentionally split into milestones to reduce wasted implementation effort and Codex usage. Whole-Version Next authorization permits completing the batch without asking for permission again between its milestones; it does not remove financial ambiguity, integrity, testing, or acceptance requirements.
+Whole-Version Next authorization means completing the whole approved batch. It does not remove financial ambiguity, integrity, testing, or acceptance requirements. If one part requires clarification, continue independent authorized work while surfacing the ambiguity; do not guess financial or integrity behavior.
 
-Complete and verify one authorized milestone at a time, normally recording each feature and its corresponding SPEC.md and ROADMAP.md updates in one logical commit. Multiple completed feature commits may be batched and pushed upstream together only when pushing is authorized. A batch push does not authorize starting another milestone. Move completed behavior into SPEC.md and remove its completed roadmap entry after verification, without waiting for the batch to be pushed. Preserve all uncompleted and out-of-scope roadmap entries.
+Normally record a complete Version Next implementation batch, including its SPEC.md and ROADMAP.md updates, in one coherent local release commit. A request for a single milestone normally produces one logical feature commit. Keep future specification/planning changes separate from implementation. Pushing remains a separate authorization; local completion does not authorize a push.
 
-Keep one logical change per commit. If a small nit surfaces right after committing and it hasn't been pushed yet, fold it in with `git commit --amend` instead of a second commit. Before pushing to GitHub, squash unpublished progress, fixup, and discussion commits into coherent logical commits, normally one per completed feature or milestone; keep implementation and future specification work separate. Verify that squashing preserves the final tracked file contents. Do not amend or rewrite commits already on GitHub unless the User explicitly approves an override; when approved, use `--force-with-lease` and leave main unchanged unless a merge is separately authorized.
+Squash unpublished progress, fixup, and discussion commits into the appropriate coherent batch or feature commit before pushing. Verify that squashing preserves final tracked file contents. If a small nit surfaces immediately after an unpublished commit, fold it in with `git commit --amend`. Do not amend or rewrite commits already on GitHub unless the User explicitly approves an override; when approved, use `--force-with-lease` and leave main unchanged unless a merge is separately authorized.
 
 ## 3. Handling Ambiguity
 
@@ -167,6 +166,10 @@ YYYY-MM-DD
 ```
 
 Keep one shared schema initialization path.
+
+Plan schema changes for the complete authorized Version Next batch before assigning a new schema version. Use at most one new `PRAGMA user_version` value for that batch, regardless of how many milestones, tables, or implementation commits it contains. If no schema change is required, do not increment it. Combine the batch's changes into one coordinated upgrade step; small helper functions are acceptable, but they must not introduce intermediate schema versions merely to match milestones. Preserve the existing verified-backup, rollback, migration-preservation, and integrity-verification requirements.
+
+This rule applies prospectively. Never lower a database's schema version, renumber an already applied migration, or rewrite deployed migration history to make an existing release fit the rule. Preserve compatibility with all supported existing schema versions.
 
 If schema versioning becomes necessary, prefer SQLite `PRAGMA user_version` and small explicit migration functions.
 
@@ -389,7 +392,7 @@ Supported ledgers have exactly one required Owner, Members with ordinary Owner c
 
 Preserve the implemented authentication, command-line user management, backend role authorization, and CSRF protection. Do not expose additional-ledger provisioning, roles, memberships, switching, or new authentication workflows without approved roadmap scope. Preserve per-ledger audit recording and atomic financial/audit writes.
 
-Authentication does not make the built-in development server suitable for direct public internet exposure. Preserve the trusted self-hosted deployment boundary in `SPEC.md`; public access requires an external access-control and production-serving arrangement.
+Authentication and the Waitress WSGI server do not authorize direct public internet exposure. Preserve the trusted self-hosted deployment boundary in `SPEC.md`; public access requires an external access-control and production-serving arrangement.
 
 ## 19. Testing Philosophy
 
@@ -527,7 +530,7 @@ Prefer deleting unnecessary code over abstracting it.
 
 ## 27. Completion Report
 
-At the end of each milestone, report:
+At the end of the requested implementation batch (or a specifically requested single milestone), report:
 
 ```text
 Files changed
@@ -540,7 +543,7 @@ Any decision that needs user input
 
 Keep the report concise.
 
-Continue through any remaining milestones already authorized by the current request. After the full requested scope is complete, stop and wait for the next instruction; do not offer or begin out-of-scope work.
+Complete every milestone already authorized in the current batch before the final completion report. After the full requested scope is complete, stop and wait for the next instruction; do not offer or begin out-of-scope work.
 
 ## 28. Final Rule
 

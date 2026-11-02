@@ -88,19 +88,19 @@ class OctoberTests(unittest.TestCase):
                 url = re.sub(r"<[^>]+>", "1", str(rule))
                 for method in rule.methods & {"POST", "PATCH", "PUT", "DELETE"}:
                     with self.subTest(route=url, method=method):
-                        self.assertEqual(403 if rule.endpoint == "register" else 302 if rule.endpoint in {"completeProfile", "verifyCode", "resendCode", "registrationWelcome"} else 401, visitor.open(url, method=method, json={}).status_code)
+                        self.assertEqual(403 if rule.endpoint in {"register", "forgotPassword", "resetPassword"} else 302 if rule.endpoint in {"completeProfile", "verifyCode", "resendCode", "registrationWelcome"} else 401, visitor.open(url, method=method, json={}).status_code)
                         for token in (None, "incorrect-token", otherToken):
                             headers = {} if token is None else {"X-CSRF-Token": token}
                             response = self.owner.open(url, method=method, json={}, headers=headers)
                             self.assertEqual(403, response.status_code)
-                            if rule.endpoint == "register":
+                            if rule.endpoint in {"register", "forgotPassword", "resetPassword"}:
                                 self.assertIn("disabled", response.get_data(as_text=True))
                             else:
                                 self.assertIn("CSRF", response.get_json()["error"])
                             self.assertTrue(before == self.taskFourSnapshot(), "Rejected CSRF changed database state")
                         self.assertEqual(403, self.agent.open(url, method=method, json={}, headers=self.headers).status_code)
                         if rule.endpoint not in {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut", "ledgers", "invitationDecision"}:
-                            self.assertEqual(302 if rule.endpoint in {"completeProfile", "verifyCode", "registrationWelcome"} else 400 if rule.endpoint in {"ledgers", "invitationDecision", "resendCode"} else 403, auditor.open(url, method=method, json={}).status_code)
+                            self.assertEqual(302 if rule.endpoint in {"completeProfile", "verifyCode", "registrationWelcome"} else 400 if rule.endpoint in {"ledgers", "invitationDecision", "resendCode", "saveOwnName", "saveOwnPassword", "revokeOwnSessions", "disableOwnNotifications", "renameOwnNotificationDevice"} else 403, auditor.open(url, method=method, json={}).status_code)
                         self.assertTrue(before == self.taskFourSnapshot(), "Unauthorized write changed database state")
         finally:
             self.owner.environ_base["HTTP_X_CSRF_TOKEN"] = validToken
@@ -328,7 +328,7 @@ class OctoberTests(unittest.TestCase):
             url = re.sub(r"<[^>]+>", "1", str(rule))
             for method in rule.methods & {"POST", "PATCH", "PUT", "DELETE"}:
                 with self.subTest(route=url, method=method):
-                    self.assertEqual(302 if rule.endpoint in {"completeProfile", "verifyCode", "registrationWelcome"} else 400 if rule.endpoint in {"ledgers", "invitationDecision", "resendCode"} else 403, auditor.open(url, method=method, json={}).status_code)
+                    self.assertEqual(302 if rule.endpoint in {"completeProfile", "verifyCode", "registrationWelcome"} else 400 if rule.endpoint in {"ledgers", "invitationDecision", "resendCode", "saveOwnName", "saveOwnPassword", "revokeOwnSessions", "disableOwnNotifications", "renameOwnNotificationDevice"} else 403, auditor.open(url, method=method, json={}).status_code)
                     self.assertEqual(403, self.agent.open(url, method=method, json={}, headers=self.headers).status_code)
         for url in ["/api/backup", "/api/package", "/api/integration-secrets", "/api/pending"]:
             self.assertEqual(403, auditor.get(url).status_code)
@@ -663,11 +663,11 @@ class OctoberTests(unittest.TestCase):
         response = self.owner.get("/api/package")
         try:
             self.assertEqual(200, response.status_code)
-            self.assertIn("26.10", response.headers["Content-Disposition"])
+            self.assertIn("26.11", response.headers["Content-Disposition"])
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 copiedPath = Path(self.directory.name) / "package-database.db"
                 copiedPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
-                self.assertIn('applicationVersion = "26.10.30"', archive.read("No-Part-Finance/packageApplication.py").decode())
+                self.assertIn('applicationVersion = "26.11"', archive.read("No-Part-Finance/packageApplication.py").decode())
                 self.assertIn("No-Part-Finance/users.py", archive.namelist())
                 self.assertIn("No-Part-Finance/openapi.json", archive.namelist())
             connection = connectDatabase(copiedPath)
@@ -684,7 +684,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 self.assertNotIn("No-Part-Finance/finance.db", archive.namelist())
                 self.assertFalse(any(self.secret.encode() in archive.read(name) for name in archive.namelist()))
-        self.assertEqual("26.10.30", applicationVersion)
+        self.assertEqual("26.11", applicationVersion)
 
     def testAuditorAndIntegrationSimulatorReadsNeverWrite(self):
         planId = createSimulatorPlan(self.connection, "Example Plan", "2026-10-01")
@@ -822,14 +822,16 @@ class UserManagementAndMigrationTests(unittest.TestCase):
         for responses, expectedRoles in scenarios:
             with self.subTest(expectedRoles=expectedRoles, interrupted=isinstance(responses[-1], KeyboardInterrupt)), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "explicit-startup.db"
-                with patch.dict("os.environ", {"FINANCE_DATABASE_PATH": str(path)}), patch("sys.argv", ["app.py"]), patch("users.input", side_effect=responses), patch("users.getpass.getpass", return_value="startup password"), patch("werkzeug.serving.make_server") as runServer, patch("builtins.print") as output, self.assertLogs(level="INFO") as startupLogs:
+                with patch.dict("os.environ", {"FINANCE_DATABASE_PATH": str(path)}), patch("sys.argv", ["app.py"]), patch("users.input", side_effect=responses), patch("users.getpass.getpass", return_value="startup password"), patch("waitress.create_server") as runServer, patch("waitress.task.ThreadedTaskDispatcher") as dispatcher, patch("builtins.print") as output, self.assertLogs(level="INFO") as startupLogs:
+                    runServer.return_value.adj.threads = 4
+                    runServer.return_value.task_dispatcher = dispatcher.return_value
                     runpy.run_path(str(Path(__file__).resolve().parents[1] / "app.py"), run_name="__main__")
                 runServer.assert_called_once()
-                self.assertEqual(("0.0.0.0", 5000), runServer.call_args.args[:2])
-                self.assertEqual({"threaded": True}, runServer.call_args.kwargs)
-                runServer.return_value.serve_forever.assert_called_once()
-                runServer.return_value.shutdown.assert_called_once()
-                runServer.return_value.server_close.assert_called_once()
+                self.assertEqual("0.0.0.0", runServer.call_args.kwargs["host"])
+                self.assertEqual(5000, runServer.call_args.kwargs["port"])
+                self.assertFalse(runServer.call_args.kwargs["clear_untrusted_proxy_headers"])
+                runServer.return_value.run.assert_called_once()
+                dispatcher.return_value.shutdown.assert_called_once()
                 logText = "\n".join(startupLogs.output)
                 self.assertIn("open http://127.0.0.1:5000", logText)
                 self.assertIn("Keep this terminal open", logText)
@@ -881,7 +883,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v30-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v31-*.db"))
             self.assertEqual(1, len(backups))
 
     def testMigrationPreservesEveryExistingTableAndBackup(self):
@@ -915,7 +917,7 @@ class UserManagementAndMigrationTests(unittest.TestCase):
                 self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
                 connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v30-*.db"))
+            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v31-*.db"))
             self.assertEqual(1, len(backups))
             backup = sqlite3.connect(backups[0])
             try:

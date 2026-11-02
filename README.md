@@ -1,15 +1,29 @@
 # No Part Finance
 
-A small Flask and SQLite personal finance application with independently provisioned personal ledgers, each with one Owner, Members, and read-only Auditors.
+A small Flask and SQLite personal finance application served by Waitress on Windows and Linux with independently provisioned personal ledgers, each with one Owner, Members, and read-only Auditors.
 
 
 ## Optional server configuration and registration
+
+Set `persistLoginOnRestart = true` in private `platform.conf` and restart to keep valid signed-in sessions across server restarts. Missing/commented settings, no configuration file, and the generated sample default to false. The first transition from memory-only sessions needs fresh sign-in; subsequent restarts retain the original seven-day deadline without renewal. Setting false and restarting clears saved sessions; re-enabling cannot restore them. Logout, password changes/recovery, disabled accounts, and current ledger-access checks still apply immediately. Anonymous sign-in/recovery forms are not persisted. Session tokens are stored only as hashes; all supported exports, CLI installation packages, and recovery backups omit saved sessions and require fresh sign-in after restoration. Keep the database private as before.
 
 The runtime configuration is `platform.conf` beside `app.py`. To configure an installation, rename `platform.conf.sample` to `platform.conf`, edit the needed settings, and restart. The generated sample contains supported defaults and explanations. With no runtime file, registration, email-username enforcement, SMTP, and required verification are off. Startup recreates or refreshes the default-only sample and upgrades an existing runtime file to the current grouped layout, preserving configured values and comments; it never creates a missing runtime file. Missing/commented settings use defaults. If a setting is repeated, the bottom-most active assignment wins; an invalid winning value still stops startup with a clear message. Unknown entries are kept at the bottom under `# --- Extra data (ignored) ---`. Everything below that marker is ignored, including recognized names, so put active settings above it. Older duplicate values are retained as inactive comments. If a file update cannot be written, startup logs a warning and continues with the validated settings. Boolean values accept `true`/`false` case-insensitively. Use `key = value`, surrounding whitespace, and full-line `#` comments. Do not add inline comments to values. The sample is never read as runtime configuration.
 
 Keep the real file private: it may contain your SMTP password. Restrict Windows file permissions or Linux read/write permissions to the administrator and application account. For a single Linux application account, `chmod 600 platform.conf` is one option. Use a dedicated revocable SMTP/app credential where supported, rather than a main mailbox password. The real configuration and `logs/` are ignored by Git. Browser packages exclude them and regenerate a safe default-only sample even if the source sample was deleted. Trusted command-line packages may include real configuration and operational logs, **including with `--no-db`**; keep those installation copies private. Use the browser application-only ZIP when distributing the app publicly.
 
 `enforceEmailUsernames = true` requires email-like usernames of 6–64 characters. Existing Users sign in with their old credentials and complete the required username/name form before ordinary access. First name is required (1–40 characters); last name is optional (0–40). Names provide new-ledger name defaults; existing ledger names remain unchanged. Browser completion preserves the current login and ends other sessions. CLI identity/profile updates require a fresh login. Existing integrations keep their normal authorization rules during required profile completion.
+
+Settings opens My Account by default. Every signed-in User, including Auditors and Users without ledger access, can view their name and username/email. `allowAccountSelfService` defaults to true and permits separate Save name and Change password actions. Password changes require the current password and confirmation; successful name/password changes preserve the current session's fixed expiry and end other sessions. Username changes remain CLI-only. Set `allowAccountSelfService = false` and restart to hide and block optional name/password editing; required profile completion remains available.
+
+My Account also lists your active sessions with browser/operating system, latest IP, sign-in time, and last user activity. Log out one session or all other sessions; the current one is marked. Background refreshes update the latest IP without advancing Last active. Sessions expire 168 hours after sign-in. By default they end on server restart; `persistLoginOnRestart = true` preserves valid sessions for their remaining lifetime. These controls remain available when account self-service editing is disabled.
+
+My Account lists Notification devices separately, including their ledger. Disable one enrollment or all your enrollments even when push sending or account editing is disabled. Explicit logout removes that browser installation's enrollments across your ledgers; password change removes enrollments associated with the other active sessions. Natural expiry and server restart preserve enrollments. Re-enable notifications explicitly on the device; disabling server sends does not revoke native browser permission or erase delivered notifications.
+
+Optional password recovery is independent of account editing and defaults off. To enable it, set `allowWebPasswordRecovery = true`, configure valid enabled SMTP, and set `publicApplicationUrl` to the externally reachable HTTPS application origin, such as `https://finance.example.org` (no path, query, credentials, or fragment). Restart after configuration changes; missing dependencies stop startup with a sanitized error. Keep the existing trusted access-control and hosting arrangement.
+
+Forgot password sends a link only for an eligible current email username. Eligibility comes from an emailed verification code or explicit **Trust current email for password recovery** in trusted CLI User details; manual account acceptance alone does not prove mailbox ownership. CLI trust is recorded separately from verification. Changing the username clears eligibility. Existing verified accounts need retained proof for their exact current address; use explicit CLI trust when that proof is unavailable. Non-email usernames retain CLI recovery.
+
+Reset links expire after 15 minutes and work once. A newly issued link replaces its predecessor. Recovery requests use the same public response regardless of account eligibility or throttling. Limits apply independently per submitted account and client IP: 30 seconds apart, 5 attempts per rolling 10 minutes, and 20 per rolling 24 hours. Delivery failures count. Successful recovery logs out all of that User's sessions and removes all their notification enrollments; it preserves login/access restrictions and required profile/verification steps. Password resets/changes and username changes invalidate outstanding links. Browser downloads omit recovery state and still require CLI password setup. Full-installation backups retain private recovery state.
 
 Initial Owner setup remains a trusted terminal operation. `allowWebRegistration = true` offers Register only after that setup. Registration uses the same name/password rules and installation-wide username uniqueness, then offers an explicit Yes/No choice to create a ledger. No ledger or other User's access is granted automatically. Passwords remain 8–128 characters; newly set common passwords are rejected offline, while existing passwords continue working.
 
@@ -21,7 +35,7 @@ Codes appear in the email body, not the subject. The single code field supports 
 
 ### Dashboard refresh, notifications, and offline access
 
-Dashboard refreshes when you return to the app, retaining displayed values and form drafts while updating. A visible-page 60-second check refreshes Pending counts on all authorized pages and updates Dashboard periods/totals after a calendar date change. Review Pending stays in the top Dashboard/Transactions actions; new arrivals show a yellow toast until closed or reviewed.
+Dashboard refreshes when you return to the app, retaining displayed values and form drafts while updating. When offline caching is enabled and a matching snapshot exists, initial Dashboard loads show saved account balances after checking your session and ledger access. The existing status beside Hide zeros shows Updating and the saved time, with the subtle offline background tint until fresh results arrive. Navigation remains normal; saved reporting totals and selections are not used for this preview. A visible-page 60-second check refreshes Pending counts on all authorized pages and updates Dashboard periods/totals after a calendar date change. Review Pending stays in the top Dashboard/Transactions actions; new arrivals show a yellow toast until closed or reviewed.
 
 Offline storage and system push are administrator opt-ins in `platform.conf`, both defaulting to `false` when omitted:
 
@@ -46,7 +60,7 @@ Deleting a Ledger permanently removes all its contents, including audit history,
 
 For NGINX, set `trustedProxyAddresses` to its exact application-facing source IP (comma-separated IPv4/IPv6 addresses). This is the internal/source address the app sees, not your home's dynamic public IP or DDNS hostname. A different routable subnet is fine; if source NAT intervenes, the configured source must identify only trusted proxy traffic. Prefer a static address or DHCP reservation. Dynamic public-IP changes do not require application edits when the proxy source stays stable.
 
-The trusted proxy must append/overwrite `X-Forwarded-For` and overwrite `X-Forwarded-Proto` with the original HTTP/HTTPS scheme. The app trusts the rightmost value only from the configured peer; direct callers' forwarding headers are ignored. Missing headers keep direct-connection behavior and generate one understandable warning per condition per server run. This keeps access working, but missing scheme information can prevent Secure cookies and missing client-IP information can combine visitors' rate limits. Malformed supplied values from a trusted proxy return HTTP 400. External routing, HTTPS certificates, firewall rules, and production hosting remain administrator responsibilities; proxy support does not make the built-in server suitable for public exposure.
+The trusted proxy must append/overwrite `X-Forwarded-For` and overwrite `X-Forwarded-Proto` with the original HTTP/HTTPS scheme. The app trusts the rightmost value only from the configured peer; direct callers' forwarding headers are ignored. Missing headers keep direct-connection behavior and generate one understandable warning per condition per server run. This keeps access working, but missing scheme information can prevent Secure cookies and missing client-IP information can combine visitors' rate limits. Malformed supplied values from a trusted proxy return HTTP 400. External routing, HTTPS certificates, firewall rules, and production hosting remain administrator responsibilities; Waitress retains those headers for the application's exact-peer validation rather than enabling a second proxy-trust policy. Proxy support does not authorize direct public exposure.
 
 Plain-text logs are in `logs/startup.log`, `logs/email.log`, and `logs/userManagement.log`, with timestamps and understandable outcomes. Each rotates at 1 MiB with three retained copies. They contain no passwords, verification codes, tokens, SMTP transcripts, or raw configuration values. They do not replace the database audit history. For email problems, read `email.log` and check the SMTP settings indicated by the message; never disable certificate validation to work around a certificate error.
 
@@ -116,6 +130,10 @@ To return to the normal database, stop the demo and run the launcher without `FI
 After cloning or downloading the repository, run the appropriate launcher described below. Normal startup creates a fresh private `finance.db`; trying the demo requires the explicit database selection above.
 
 `.gitignore` excludes private SQLite databases and sidecars, backups, generated ZIP packages, legacy CSV/TSV exports, virtual environments, caches, local secrets, and editor/Codex artifacts. Only the fictional `finance.demo.db` is deliberately included. Keep real financial information out of source files and screenshots as well as database files. Private database-inclusive packages remain excluded from Git.
+
+## Optional server manager
+
+[NPF Server Manager](https://github.com/ajpri/NPF-Server-Manager) provides installation, background service management, manual updates, and backup/recovery tools for No Part Finance on supported Linux and Windows systems. It includes an HTTPS management interface and command-line tools. See its README for supported platforms and setup instructions.
 
 ## First installation
 
@@ -207,7 +225,7 @@ Owners and Auditors can open **Settings — Audit log** to view their ledger’s
 
 Sign-in records the last successful login in UTC; failed attempts and ordinary session activity do not change it. CLI display comes in a later milestone. Five consecutive failed attempts for a normalized username trigger a five-minute cooldown, alongside the existing per-IP limit. Successful sign-in resets failures; cooldown expires automatically and blocked attempts do not extend it. No permanent account disabling is introduced here.
 
-Sign-in sessions expire 168 hours after login without renewal; logout, password reset, and server restart invalidate them earlier. Settings provides Log Out.
+Sign-in sessions expire 168 hours after login without renewal; logout and password reset invalidate them earlier. Server restart also invalidates them unless optional persistent login is enabled. Settings provides Log Out.
 
 The Owner can create labeled Integration Secrets in Settings → Integrations. Each key belongs permanently to that ledger. Disable/Enable reversibly blocks/restores authentication with the same key; Revoke is permanent. Existing revoked keys remain revoked after upgrade, and proposals remain available for review. Public `/docs` and `/openapi.json` describe authenticated reads, ordinary and transfer/payment proposals, explicit entered signs, retries, and each integration's own status. Bearer integrations can read every current Pending item through GET /api/integration/pending and update one through PUT /api/integration/submissions/{proposalId}, including Manual entries, moved events, other integrations’ proposals, and Owner-edited items. Updates reuse Python validation and existing reviewVersion checks and leave the item Pending; only an Owner or Member approves or rejects. Integrations cannot delete proposals, create Manual entries, move ledger events, update terminal items, or write directly to the ledger. The existing submission-status endpoint retains each integration’s own history.
 
@@ -239,13 +257,20 @@ One active personal Account and one active selectable Category are enough for or
 
 Start an existing installation with `startWindows.bat` on Windows or `./startLinux.sh` on Linux, using the commands under [First installation](#first-installation). Keep the server terminal open. On the host computer, open `http://127.0.0.1:5000` in your browser.
 
-To stop the application, press **Ctrl+C in the server terminal** and wait for the server to exit; Windows may also ask whether to terminate the batch job. Closing the browser does not stop the server. To restart, run the same start script again, reopen or reload the application, and sign in with your existing Owner or Auditor username and password. Saved users and financial data remain in the database, but browser sessions do not survive restart.
+To stop the application, press **Ctrl+C in the server terminal** and wait for the server to exit; Windows may also ask whether to terminate the batch job. Closing the browser does not stop the server. To restart, run the same start script again, reopen or reload the application, and sign in with your existing Owner or Auditor username and password. Saved users and financial data remain in the database. Valid browser sessions survive restart only when `persistLoginOnRestart = true`; the default is false.
 
 The default database is `finance.db` beside `app.py` in the application folder. If `FINANCE_DATABASE_PATH` is set, the application uses that path instead; check the startup terminal's `Database path:` line. Supply the same override whenever starting the application or managing users. Use an absolute path to avoid confusion: a relative override resolves from the start script's folder, or from the current working directory when using direct Python commands. The application creates a new database if the selected file is missing, so confirm the configured path before starting.
 
 ### Access from a trusted LAN and deployment boundary
 
-The start scripts run Flask's built-in development server over HTTP on port 5000, bound to all network interfaces (`0.0.0.0`).
+Both start scripts install Waitress from `requirements.txt` and run the same Flask application through that production WSGI server. Direct `python app.py`, `python app.py manage-users`, and `python app.py --version` remain supported after installing the requirements. Startup serves requests while initial Owner/Auditor setup waits for protected input on the main thread; binding failures stop before setup. Ctrl+C shuts down the server's workers and sockets. Both start scripts use `platform.conf` to choose the HTTP port and IPv4 listening address. Missing or commented settings retain these defaults:
+
+```ini
+serverPort = 5000
+listenAddress = 0.0.0.0
+```
+
+`serverPort` accepts whole numbers from 1 through 65535. `listenAddress = 0.0.0.0` listens on all IPv4 interfaces; `127.0.0.1` or `localhost` permits local access only. A specific local IPv4 address listens only on that address. `localhost` is case-insensitive and resolves explicitly to `127.0.0.1`; other hostnames, IPv6 addresses, subnets, and URLs are not accepted. Restart after changes. Invalid settings stop startup; an unavailable address, occupied port, or insufficient binding permission also prevents startup before Owner setup. The terminal reports the selected address/port and browser URL. The examples below use the default port; substitute your configured port.
 
 On another device connected to the same LAN, open:
 
@@ -253,11 +278,11 @@ On another device connected to the same LAN, open:
 http://<computer-lan-ip>:5000
 ```
 
-Use the LAN address of the computer running the application; do not use `0.0.0.0` in the browser address. Your operating-system firewall may ask you to allow inbound access to port 5000.
+Use the LAN address of the computer running the application; do not use `0.0.0.0` in the browser address. Your operating-system firewall may ask you to allow inbound access to the configured port (5000 by default). Local-only listening does not accept LAN connections.
 
 Every installation requires an Owner; sign in with your configured Owner or optional read-only Auditor credentials. Use LAN access only on a trusted private network. Remote integrations require HTTPS at your deployment boundary.
 
-The documented arrangement is host-computer or trusted-LAN use. Authentication does not make the built-in development server suitable for direct public internet exposure. Public access requires an external access-control and production-serving arrangement; the supported arrangement and whether separate production-server work is required before public release remain unresolved release decisions. This guide does not configure hosting, HTTPS certificates, or trusted proxies.
+The documented arrangement is host-computer or trusted-LAN use. Waitress replaces the development server; Flask still handles application requests. Authentication and a production WSGI server alone do not authorize direct public internet exposure. Public access still requires an external access-control and HTTPS/proxy arrangement. This guide does not configure hosting infrastructure or HTTPS certificates; explicit application-side proxy trust is described above.
 
 ## Updating safely
 
@@ -296,7 +321,7 @@ As Owner, use **Settings → System → Database Backup → Download Backup** wh
 2. Preserve the existing database under a separate name or in a separate location before replacement. Keep any associated SQLite sidecar files with that preserved database if present; do not leave old sidecars beside the replacement. Keep the downloaded backup unchanged as well.
 3. Copy the backup to the exact configured database path and filename. For the default configuration, this is `finance.db` beside `app.py`; for `FINANCE_DATABASE_PATH`, use that configured location instead. A downloaded backup's original filename is not automatically selected by startup. Keep the application files and environment configuration in place.
 4. Start normally with the same database configuration. Startup applies supported older-schema upgrades and rejects newer unsupported schemas; see [Automatic schema upgrades and failures](#automatic-schema-upgrades-and-failures). If startup fails, keep the server stopped and preserve the files and error before troubleshooting.
-5. Reload the browser and sign in using the Owner or Auditor credentials saved in the backup. Browser sessions do not survive restart, and password changes made after the snapshot are undone. Check the startup database path, **Settings → System → Database Status**, familiar balances and transaction history, and, as Owner, pending proposals and Integration Secrets. If Owner setup unexpectedly appears, stop and check the restored file and configured path. Revoke any restored secrets that should no longer have access before resuming integration use.
+5. Reload the browser and sign in using the Owner or Auditor credentials saved in the backup. Supported backups exclude saved login sessions, so restoration requires fresh sign-in even with persistence enabled; password changes made after the snapshot are undone. Check the startup database path, **Settings → System → Database Status**, familiar balances and transaction history, and, as Owner, pending proposals and Integration Secrets. If Owner setup unexpectedly appears, stop and check the restored file and configured path. Revoke any restored secrets that should no longer have access before resuming integration use.
 
 Restoring replaces the saved installation state with the snapshot and loses changes made after it. Full-installation CLI and pre-migration backups contain financial data, User password hashes, recoverable integration secrets, and proposal state. Browser downloads are credential-free and require CLI password setup before sign-in; their integration key metadata cannot authenticate. Treat them as both financial data and credentials. An older backup can reactivate a secret revoked after that snapshot; it must be revoked again. Secrets require no separate encryption key. There is intentionally no restore wizard.
 
@@ -342,9 +367,13 @@ Public Release 6 verification used synthetic temporary databases only. Selected 
 
 Browser and computer-use checks were excluded from the final verification scope because of tooling failures. Visual narrow-screen layout and keyboard usability were not verified. Linux startup was not executed. A fresh Windows launcher/dependency-bootstrap attempt did not complete; extracted application checks used the existing Python 3.12.14 environment. These limits are not passing results.
 
-This verification does not declare the release ready for public distribution. The earlier pre-upgrade backup-failure defect is corrected with isolated failure-preservation tests. Public distribution and the production-serving arrangement also remain decisions to make before release.
+This verification does not declare the release ready for public distribution. The earlier pre-upgrade backup-failure defect is corrected with isolated failure-preservation tests. Public distribution and the external access-control/HTTPS hosting arrangement remain separate release decisions; normal application startup now uses Waitress.
 
 ## Tests
+
+Persistent-login verification uses guarded synthetic databases for default/disabled/enabled configuration, fixed expiry, CSRF and role/access gates, logout and authentication-version revocation, concurrent requests, notification association, atomic identity/audit rollback, activity-write independence, sanitized backup/export restoration, and combined schema-30-to-31 recovery and earlier schema-31 backup compatibility. A real Linux test reuses the same browser cookie across two separate Waitress processes; Windows runtime persistence has not been independently exercised.
+
+Waitress verification uses guarded synthetic databases and local HTTP fixtures for initial setup while serving, configured bindings and occupied-port failure, exact-peer proxy/IP/HTTPS behavior, the existing 1 MB request limit, resource cleanup, and real Linux Ctrl+C shutdown. An extracted application-only package verifies requirements, both launcher entry points, version output and command-line user management. Windows launcher contents and the shared shutdown path are checked, but Windows runtime execution has not been verified.
 
 With the virtual environment active:
 

@@ -169,10 +169,10 @@ check().catch(error=>{console.error(error);process.exit(1);});
         functions = source[source.index("function dashboardQuery()"):source.index("function renderDashboard(dashboard)")]
         harness = r'''
 const assert = require("node:assert/strict");
-let dashboardRequestId=0, dashboardCurrentDate=null, lastDashboard=null, lastDashboardQuery=null;
+let dashboardRequestId=0, dashboardCurrentDate=null, lastDashboard=null, lastDashboardQuery=null, cachedBalanceSnapshot=null, offlineMode=false;
 let browserSession={ledgerId:"one"};
 const controls={"#dashboardPeriod":{value:"thisMonth"},"#dashboardStartDate":{value:""},"#dashboardEndDate":{value:""},"#dashboardRefreshMessage":{},"#dashboardRefreshRetry":{}};
-const document={querySelector:(key)=>controls[key]};
+const document={body:{dataset:{}},querySelector:(key)=>controls[key]};
 const requests=[]; function api(){return new Promise((resolve,reject)=>requests.push({resolve,reject}));}
 async function cacheDashboard(){}
 let displayed={value:100}; function renderDashboard(result){displayed=result;}
@@ -539,23 +539,25 @@ async function check(){
         if not node:
             self.skipTest("Set NODE_BINARY for browser lifecycle checks")
         source = Path("app.js").read_text()
-        functions = source[source.index("async function refreshDashboardOnReturn()"):source.index('document.addEventListener("visibilitychange"')]
+        functions = source[source.index("async function refreshDashboardOnReturn("):source.index('document.addEventListener("visibilitychange"')]
         harness = r'''
 const assert=require("node:assert/strict");
 let lifecycleReady=true,offlineMode=false,visibleCheckTimer=null,dashboardRefreshPromise=null;
 let currentPath="/",dashboardCurrentDate="2026-10-31",refreshes=0,counts=0,periods=0;
+const backgroundRequests=[];
 const OfflineFinance={policy:{pwaOfflineEnabled:true,pushNotificationsEnabled:true},async refreshPolicy(){return this.policy;}};
 const controls={"#dashboardRefreshMessage":{},"#dashboardRefreshRetry":{}};
 const document={visibilityState:"hidden",querySelector:(key)=>controls[key]};
-async function api(){return {currentDate:"2026-11-01"};}
+async function api(path, options){backgroundRequests.push(options.background);return {currentDate:"2026-11-01"};}
 async function refreshPendingCount(){counts++;}
-async function loadDashboard(){refreshes++;dashboardCurrentDate="2026-11-01";}
-async function initializeDashboardPeriods(){periods++;}
+async function loadDashboard(background){backgroundRequests.push(background);refreshes++;dashboardCurrentDate="2026-11-01";}
+async function initializeDashboardPeriods(background){backgroundRequests.push(background);periods++;}
 async function recoverOffline(){}
 async function check(){
  await checkVisiblePage(true);assert.equal(refreshes,0);assert.equal(counts,0);
  document.visibilityState="visible";await checkVisiblePage();assert.equal(refreshes,1);assert.equal(counts,1);
  await checkVisiblePage();assert.equal(refreshes,1);
+ assert.ok(backgroundRequests.every(value=>value===true));
  await Promise.all([refreshDashboardOnReturn(),refreshDashboardOnReturn()]);assert.equal(refreshes,2);
  currentPath="/transactions";await checkVisiblePage(true);assert.equal(refreshes,2);assert.equal(counts,3);
 }
@@ -570,7 +572,7 @@ async function check(){
         self.assertNotIn("owner password", response.get_data(as_text=True))
         worker = signedOut.get("/service-worker.js")
         self.assertEqual(200, worker.status_code)
-        self.assertIn("26.10.30", worker.get_data(as_text=True))
+        self.assertIn("26.11", worker.get_data(as_text=True))
         self.assertNotIn("__APPLICATION_VERSION__", worker.get_data(as_text=True))
         self.assertEqual("no-cache", worker.headers["Cache-Control"])
 

@@ -414,7 +414,8 @@ class FullInstallationPackagingTests(unittest.TestCase):
         packagedPath = extractedRoot / "finance.db"
         packaged = ledger.connectDatabase(packagedPath)
         try:
-            self.assertEqual(baseline, list(packaged.iterdump()))
+            # Sanitized copies are vacuumed; schema-object order may change, but no definition or row may change.
+            self.assertEqual(sorted(baseline), sorted(packaged.iterdump()))
             self.assertEqual(3, packaged.execute("SELECT COUNT(*) FROM ledgers").fetchone()[0])
             self.assertEqual(4, packaged.execute("SELECT COUNT(*) FROM users").fetchone()[0])
             self.assertEqual(2, packaged.execute("SELECT COUNT(*) FROM sharingInvitations").fetchone()[0])
@@ -443,7 +444,7 @@ class FullInstallationPackagingTests(unittest.TestCase):
             snapshotPath = root / "linux-snapshot.db"
             snapshotPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
         with sqlite3.connect(snapshotPath) as snapshot:
-            self.assertEqual(baseline, list(snapshot.iterdump()))
+            self.assertEqual(sorted(baseline), sorted(snapshot.iterdump()))
         self.assertFalse((root / "unused-override.db").exists())
         self.assertEqual(baseline, list(self.connection.iterdump()))
         windowsScript = (projectRoot / "packageWindows.bat").read_text()

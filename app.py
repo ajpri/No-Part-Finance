@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import json
 import os
@@ -13,14 +14,16 @@ from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory, redirect, render_template_string
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
-from werkzeug.serving import make_server
+from waitress import create_server
+from waitress.task import ThreadedTaskDispatcher
+from waitress import wasyncore
 
 from packageApplication import PackagingError, applicationVersion, createApplicationPackage
 from users import (
     configureOnStartup, manageUsers, check_password_hash, passwordHash,
     defaultLedgerName, configuredUsername, validateProfile, identityNeedsProfile, emailLikeUsername,
     registrationIsExpired, registerUser, admitRegistration, acceptPendingForPolicy,
-    saveIdentity, issueVerification, verifyIdentityCode, IdentityRateLimit,
+    saveIdentity, updateProfile, changeOwnPassword, issuePasswordRecovery, resetRecoveredPassword, issueVerification, verifyIdentityCode, IdentityRateLimit,
 )
 from platformConfiguration import loadConfiguration, synchronizeConfigurationFiles, OperationalLogs, TrustedProxy, ConfigurationError
 
@@ -161,7 +164,7 @@ def accountEligibility(account):
     }
 
 
-def createApp(databasePathOverride=None, configurationDirectory=None):
+def createApp(databasePathOverride=None, configurationDirectory=None, clearSavedSessions=True):
     app = Flask(__name__, static_folder=None)
     activeDatabasePath = Path(databasePathOverride or databasePath)
     configurationDirectory = Path(configurationDirectory or (activeDatabasePath.parent if databasePathOverride or testDatabaseGuardEnabled else projectDirectory))
@@ -184,17 +187,98 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
     app.config["DATABASE_PATH"] = str(activeDatabasePath)
     app.config["PACKAGE_OUTPUT_DIRECTORY"] = str(projectDirectory / "packages")
     app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+    persistentLogins = configuration["persistLoginOnRestart"]
+    if not persistentLogins and clearSavedSessions:
+        startupConnection = connectDatabase(activeDatabasePath)
+        try:
+            with startupConnection:
+                startupConnection.execute("DELETE FROM browserSessions")
+        finally:
+            startupConnection.close()
     sessions = {}
     loginAttempts = {}
     usernameAttempts = {}
     authenticationLock = threading.RLock()
     dummyPasswordHash = passwordHash(secrets.token_urlsafe(32))
 
+    def sessionKey(token):
+        return hashlib.sha256(token.encode("utf-8")).hexdigest() if token else None
+
+    def sessionSnapshot(value):
+        return json.dumps({key: field for key, field in value.items() if key not in {"userId", "authVersion", "expiresAt"}})
+
+    def insertPersistentSession(connection, key, value):
+        if not persistentLogins or not value.get("userId"):
+            return
+        inserted = connection.execute("""INSERT OR IGNORE INTO browserSessions(tokenDigest,userId,authVersion,expiresAt,snapshot)
+            SELECT ?,id,authVersion,?,? FROM users WHERE id = ? AND authVersion = ? AND enabled = 1 AND passwordSetupRequired = 0 AND deleted = 0 AND registrationExpired = 0""",
+            (key, value["expiresAt"], sessionSnapshot(value), value["userId"], value["authVersion"]))
+        if not inserted.rowcount and not connection.execute("SELECT 1 FROM browserSessions WHERE tokenDigest = ? AND userId = ? AND authVersion = ?", (key, value["userId"], value["authVersion"])).fetchone():
+            raise ValidationError("Your account changed. Sign in again.")
+
+    def refreshPersistentSessions(connection, now):
+        if not persistentLogins:
+            return
+        with connection:
+            connection.execute("""DELETE FROM browserSessions WHERE expiresAt <= ? OR NOT EXISTS (
+                SELECT 1 FROM users u WHERE u.id = browserSessions.userId AND u.authVersion = browserSessions.authVersion
+                AND u.enabled = 1 AND u.passwordSetupRequired = 0 AND u.deleted = 0 AND u.registrationExpired = 0)""", (now,))
+        restored = {}
+        for row in connection.execute("SELECT * FROM browserSessions").fetchall():
+            try:
+                value = dict(json.loads(row["snapshot"]), userId=row["userId"], authVersion=row["authVersion"], expiresAt=row["expiresAt"])
+                if not {"id", "csrfToken", "client", "lastIp", "signedInAt", "lastActiveAt", "installationId"}.issubset(value):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                with connection:
+                    connection.execute("DELETE FROM browserSessions WHERE tokenDigest = ?", (row["tokenDigest"],))
+                continue
+            key = row["tokenDigest"]
+            # Keep object identity for requests already using this session under the lock.
+            if key in sessions:
+                value["lastActiveAt"] = max(value["lastActiveAt"], sessions[key].get("lastActiveAt", 0))
+                if sessions[key].get("registrationWelcome") is False:
+                    value["registrationWelcome"] = False
+                sessions[key].update(value)
+            else:
+                sessions[key] = value
+            restored[key] = value
+        for key in [key for key, value in sessions.items() if value.get("userId") and key not in restored]:
+            del sessions[key]
+
+    def discardSession(key):
+        if persistentLogins and key:
+            with getDatabase() as connection:
+                connection.execute("DELETE FROM browserSessions WHERE tokenDigest = ?", (key,))
+        sessions.pop(key, None)
+
+    @app.after_request
+    def persistSessionActivity(response):
+        # UPDATE cannot resurrect a session revoked by another request/process.
+        key = sessionKey(request.cookies.get("npfSession"))
+        value = g.get("browserSession")
+        if persistentLogins and value and value.get("userId") and response.status_code < 500:
+            with authenticationLock:
+                if sessions.get(key) is value:
+                    try:
+                        connection = getDatabase()
+                        if connection.in_transaction:
+                            logging.warning("Skipped session activity while a request transaction remains open.")
+                            return response
+                        with connection:
+                            connection.execute("""UPDATE browserSessions SET snapshot = ? WHERE tokenDigest = ? AND userId = ? AND authVersion = ?
+                                AND EXISTS (SELECT 1 FROM users WHERE id = ? AND authVersion = ? AND enabled = 1)""",
+                                (sessionSnapshot(value), key, value["userId"], value["authVersion"], value["userId"], value["authVersion"]))
+                    except sqlite3.Error:
+                        # Activity bookkeeping must not turn a committed financial write into a failed response.
+                        logging.warning("Could not save session activity; the original expiry and authorization still apply.")
+        return response
+
     def identityPage(mode, message="", fields=None, status=200):
         return render_template_string((projectDirectory / "authentication.html").read_text(),
-            mode=mode, title={"signIn": "Sign In", "register": "Register", "profile": "Complete account", "verify": "Verify email", "welcome": "Welcome"}.get(mode, "Setup"),
+            mode=mode, title={"signIn": "Sign In", "register": "Register", "profile": "Complete account", "verify": "Verify email", "welcome": "Welcome", "forgotPassword": "Forgot password", "resetPassword": "Reset password", "recoveryComplete": "Password reset"}.get(mode, "Setup"),
             csrfToken=g.browserSession["csrfToken"] if g.browserSession else "",
-            registrationEnabled=configuration["allowWebRegistration"], version=applicationVersion,
+            registrationEnabled=configuration["allowWebRegistration"], recoveryEnabled=configuration["allowWebPasswordRecovery"], version=applicationVersion,
             message=message or "", fields=fields or {},
             migrateUsername=bool(g.get("user") and configuration["enforceEmailUsernames"] and not emailLikeUsername(g.user["username"])),
             migrationChallenge=bool(g.get("user") and getDatabase().execute("SELECT 1 FROM verificationChallenges WHERE userId = ? AND purpose = 'migration' AND consumedAt IS NULL", (g.user["id"],)).fetchone())), status
@@ -202,14 +286,30 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
     def authenticationPage(message=None, csrfToken=None, status=200):
         return identityPage("signIn" if csrfToken else "unconfigured", message or "", status=status)
 
+    def sessionMetadata():
+        agent = request.headers.get("User-Agent", "")[:512]
+        browser = next((label for token, label in [("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"), ("FxiOS/", "Firefox"), ("Chrome/", "Chrome"), ("CriOS/", "Chrome"), ("Safari/", "Safari")] if token in agent), None)
+        operatingSystem = next((label for token, label in [("Android", "Android"), ("iPhone", "iOS"), ("iPad", "iPadOS"), ("Windows", "Windows"), ("Macintosh", "macOS"), ("Linux", "Linux")] if token in agent), None)
+        now = time.time()
+        installationId = request.cookies.get("npfInstallation", "")
+        if len(installationId) != 43 or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in installationId):
+            installationId = secrets.token_urlsafe(32)
+        return {"installationId": installationId, "id": secrets.token_urlsafe(18), "client": " / ".join(value for value in (browser, operatingSystem) if value) or "Unknown client", "lastIp": request.remote_addr or "Unknown", "signedInAt": now, "lastActiveAt": now}
+
     def establishSession(user, welcome=False, expiresAt=None):
         now = time.time()
         token = secrets.token_urlsafe(32)
         with authenticationLock:
-            sessions.pop(request.cookies.get("npfSession"), None)
-            sessions[token] = {"userId": user["id"], "authVersion": user["authVersion"],
+            discardSession(sessionKey(request.cookies.get("npfSession")))
+            sessions[sessionKey(token)] = {"userId": user["id"], "authVersion": user["authVersion"],
                 "expiresAt": expiresAt or now + 168 * 3600, "csrfToken": secrets.token_urlsafe(32),
-                "registrationWelcome": welcome}
+                "registrationWelcome": welcome, **sessionMetadata()}
+            if expiresAt and g.browserSession:
+                for key in ("id", "client", "lastIp", "signedInAt", "lastActiveAt", "installationId"):
+                    sessions[sessionKey(token)][key] = g.browserSession.get(key, sessions[sessionKey(token)][key])
+            if persistentLogins:
+                with getDatabase() as connection:
+                    insertPersistentSession(connection, sessionKey(token), sessions[sessionKey(token)])
         return token
 
     def identityDestination(user, browserSession=None):
@@ -227,12 +327,16 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
             raise ValidationError("Your account changed. Sign in again.")
         # Never extend the fixed login lifetime while upgrading a restricted session.
         with authenticationLock:
-            for oldToken in [key for key, value in sessions.items() if value.get("userId") == user["id"] and key != request.cookies.get("npfSession")]:
+            for oldToken in [key for key, value in sessions.items() if value.get("userId") == user["id"] and key != sessionKey(request.cookies.get("npfSession"))]:
                 del sessions[oldToken]
             token = establishSession(user, g.browserSession.get("registrationWelcome", False), g.browserSession["expiresAt"])
-        return setSessionCookie(redirect(destination or identityDestination(user, sessions[token])), token, max(1, int(sessions[token]["expiresAt"] - time.time())))
+        return setSessionCookie(redirect(destination or identityDestination(user, sessions[sessionKey(token)])), token, max(1, int(sessions[sessionKey(token)]["expiresAt"] - time.time())))
 
     def setSessionCookie(response, token, maxAge):
+
+        installationId = sessions.get(sessionKey(token), {}).get("installationId")
+        if installationId:
+            response.set_cookie("npfInstallation", installationId, max_age=365 * 86400, httponly=True, secure=request.is_secure, samesite="Lax")
         response.set_cookie("npfSession", token, max_age=maxAge, httponly=True, secure=request.is_secure, samesite="Lax")
         return response
 
@@ -267,9 +371,10 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
         # no app access. Browser requests still require the normal session and CSRF.
         if isBearer:
             return jsonify({"error": "Integration credentials cannot access browser operations"}), 403
-        token = request.cookies.get("npfSession")
+        token = sessionKey(request.cookies.get("npfSession"))
         now = time.time()
         with authenticationLock:
+            refreshPersistentSessions(connection, now)
             for expiredToken in [key for key, value in sessions.items() if value["expiresAt"] <= now]:
                 del sessions[expiredToken]
             g.browserSession = sessions.get(token)
@@ -277,6 +382,14 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
         if g.browserSession and g.browserSession.get("userId"):
             user = connection.execute("SELECT *, enabled AS loginEnabled FROM users WHERE id = ?", (g.browserSession["userId"],)).fetchone()
             if user and user["loginEnabled"] and not user["passwordSetupRequired"] and not registrationIsExpired(user) and user["authVersion"] == g.browserSession["authVersion"]:
+                with authenticationLock:
+                    # Recheck after the DB lookup: a concurrent logout may have
+                    # removed the session while this request was authenticating.
+                    if sessions.get(token) is not g.browserSession:
+                        return jsonify({"error": "Sign In required"}), 401
+                    g.browserSession["lastIp"] = request.remote_addr or "Unknown"
+                    if request.headers.get("X-Background-Request") != "true":
+                        g.browserSession["lastActiveAt"] = max(now, g.browserSession["lastActiveAt"])
                 g.accessibleLedgers = accessibleLedgers(connection, user["id"])
                 requestedLedger = request.headers.get("X-Ledger-ID") or request.args.get("ledger")
                 if request.headers.get("X-Ledger-ID") and request.args.get("ledger") and request.headers["X-Ledger-ID"] != request.args["ledger"]:
@@ -287,7 +400,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
                     bindLedger(connection, selected["id"], "user", user["id"], user["username"])
                 else:
                     connection.actorKind, connection.actorId, connection.actorLabel = "user", user["id"], user["username"]
-        if request.endpoint in {"signIn", "register"}:
+        if request.endpoint in {"signIn", "register", "forgotPassword", "resetPassword"}:
             return None
         if not g.user:
             if request.path.startswith("/api/") or request.path == "/health":
@@ -299,7 +412,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
                     return jsonify({"error": "Complete account verification and required profile fields before using the application"}), 403
                 return redirect(identityDestination(g.user))
         isMutation = request.method not in {"GET", "HEAD", "OPTIONS"}
-        identityEndpoints = {"sessionDetails", "ledgers", "invitations", "invitationDecision", "logOut", "completeProfile", "verifyCode", "resendCode", "registrationWelcome"}
+        identityEndpoints = {"sessionDetails", "ledgers", "invitations", "invitationDecision", "logOut", "completeProfile", "verifyCode", "resendCode", "registrationWelcome", "ownAccount", "saveOwnName", "saveOwnPassword", "ownSessions", "revokeOwnSessions", "ownNotificationDevices", "disableOwnNotifications", "renameOwnNotificationDevice"}
         identityOnly = request.endpoint in identityEndpoints and not (request.endpoint == "invitations" and isMutation)
         if request.path.startswith("/api/") and len(g.accessibleLedgers) > 1 and not (request.headers.get("X-Ledger-ID") or request.args.get("ledger")) and not identityOnly:
             return jsonify({"error": "Select a ledger for this request"}), 409
@@ -309,7 +422,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
         if ownerOnly and g.user["role"] != "owner":
             return jsonify({"error": "Owner access required"}), 403
         auditorRestricted = {"integrationSecrets", "editIntegrationLabel", "revealIntegrationSecret", "revokeIntegrationSecret", "changeIntegrationState", "reviewPending", "pendingStatus", "pushEnrollment", "savePendingRow", "previewPending", "summarizePending", "decidePending", "transactionPendingSnapshot", "transferPendingSnapshot"}
-        nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut", "ledgers", "invitationDecision", "completeProfile", "verifyCode", "resendCode", "registrationWelcome"}
+        nonpersistentPosts = {"evaluateMoneyExpression", "accountMinimumHelper", "accountUtilizationWarningHelper", "logOut", "ledgers", "invitationDecision", "completeProfile", "verifyCode", "resendCode", "registrationWelcome", "ownAccount", "saveOwnName", "saveOwnPassword", "ownSessions", "revokeOwnSessions", "ownNotificationDevices", "disableOwnNotifications", "renameOwnNotificationDevice"}
         if g.user["role"] == "auditor" and (request.endpoint in auditorRestricted or (isMutation and request.endpoint not in nonpersistentPosts)):
             return jsonify({"error": "Read-only Auditor access"}), 403
         if isMutation and not csrfValid():
@@ -321,9 +434,9 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
             token = secrets.token_urlsafe(32)
             csrfToken = secrets.token_urlsafe(32)
             with authenticationLock:
-                sessions.pop(request.cookies.get("npfSession"), None)
-                sessions[token] = {"expiresAt": time.time() + 600, "csrfToken": csrfToken}
-                g.browserSession = sessions[token]
+                discardSession(sessionKey(request.cookies.get("npfSession")))
+                sessions[sessionKey(token)] = {"expiresAt": time.time() + 600, "csrfToken": csrfToken}
+                g.browserSession = sessions[sessionKey(token)]
             response = app.make_response(authenticationPage(csrfToken=csrfToken))
             return setSessionCookie(response, token, 600)
         if not csrfValid():
@@ -369,16 +482,71 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
                 if not currentUser or not currentUser["enabled"] or currentUser["passwordSetupRequired"] or currentUser["authVersion"] != user["authVersion"] or registrationIsExpired(currentUser):
                     return authenticationPage("Invalid username or password.", csrfToken=g.browserSession["csrfToken"], status=401)
                 connection.execute("UPDATE users SET lastLoginAt = ? WHERE id = ?", (datetime.fromtimestamp(now, timezone.utc).isoformat(), user["id"]))
-            sessions.pop(request.cookies.get("npfSession"), None)
-            sessions[token] = {"userId": user["id"], "authVersion": user["authVersion"], "expiresAt": now + 168 * 3600, "csrfToken": secrets.token_urlsafe(32), "registrationWelcome": bool(user["registrationCreatedAt"] and user["verificationStatus"] == "pending")}
+                value = {"userId": user["id"], "authVersion": user["authVersion"], "expiresAt": now + 168 * 3600, "csrfToken": secrets.token_urlsafe(32), "registrationWelcome": bool(user["registrationCreatedAt"] and user["verificationStatus"] == "pending"), **sessionMetadata()}
+                if persistentLogins:
+                    connection.execute("DELETE FROM browserSessions WHERE tokenDigest = ?", (sessionKey(request.cookies.get("npfSession")),))
+                insertPersistentSession(connection, sessionKey(token), value)
+            sessions.pop(sessionKey(request.cookies.get("npfSession")), None)
+            sessions[sessionKey(token)] = value
             loginAttempts.pop(address, None)
             usernameAttempts.pop(username, None)
-        return setSessionCookie(redirect(identityDestination(user, sessions[token])), token, 168 * 3600)
+        return setSessionCookie(redirect(identityDestination(user, sessions[sessionKey(token)])), token, 168 * 3600)
+
+    def recoveryPage(mode, message="", fields=None, status=200):
+        if not configuration["allowWebPasswordRecovery"]:
+            return identityPage("unconfigured", "Web password recovery is disabled.", status=403)
+        if not g.browserSession:
+            token = secrets.token_urlsafe(32)
+            with authenticationLock:
+                sessions[sessionKey(token)] = {"expiresAt": time.time() + 1800, "csrfToken": secrets.token_urlsafe(32)}
+                g.browserSession = sessions[sessionKey(token)]
+            return setSessionCookie(app.make_response(identityPage(mode, message, fields, status)), token, 1800)
+        return identityPage(mode, message, fields, status)
+
+    @app.route("/forgot-password", methods=["GET", "POST"])
+    def forgotPassword():
+        if not configuration["allowWebPasswordRecovery"] or request.method == "GET":
+            return recoveryPage("forgotPassword")
+        if not csrfValid():
+            return recoveryPage("forgotPassword", "Form expired. Reload and try again.", status=403)
+        message = issuePasswordRecovery(getDatabase(), request.form.get("username", ""), request.remote_addr or "unknown")
+        return recoveryPage("forgotPassword", message)
+
+    @app.route("/reset-password", methods=["GET", "POST"])
+    def resetPassword():
+        if not configuration["allowWebPasswordRecovery"] or request.method == "GET":
+            return recoveryPage("resetPassword")
+        if not csrfValid():
+            return recoveryPage("resetPassword", "Form expired. Open your reset link again.", status=403)
+        token = request.form.get("token", "")
+        try:
+            with authenticationLock:
+                userId = resetRecoveredPassword(getDatabase(), token, request.form.get("newPassword", ""), request.form.get("confirmation", ""))
+                for sessionToken in [key for key, value in sessions.items() if value.get("userId") == userId]:
+                    del sessions[sessionToken]
+            response = app.make_response(identityPage("recoveryComplete", "Password reset. Sign in with your new password."))
+            if not g.browserSession.get("userId") or g.browserSession.get("userId") == userId:
+                with authenticationLock:
+                    discardSession(sessionKey(request.cookies.get("npfSession")))
+                response.delete_cookie("npfSession", secure=request.is_secure, httponly=True, samesite="Lax")
+            return response
+        except ValidationError as error:
+            # Token stays in the hidden POST field for correction, never in a URL.
+            return recoveryPage("resetPassword", str(error), {"token": token}, status=400)
 
     @app.post("/api/logout")
     def logOut():
         with authenticationLock:
-            sessions.pop(request.cookies.get("npfSession"), None)
+            current = sessions.get(sessionKey(request.cookies.get("npfSession")))
+            if current:
+                from push import removeInstallations
+                connection = getDatabase()
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    removeInstallations(connection, g.user["id"], [current.get("installationId")])
+                    if persistentLogins:
+                        connection.execute("DELETE FROM browserSessions WHERE tokenDigest = ? AND userId = ?", (sessionKey(request.cookies.get("npfSession")), g.user["id"]))
+            sessions.pop(sessionKey(request.cookies.get("npfSession")), None)
         response = redirect("/sign-in") if request.form else jsonify({"status": "ok"})
         response.delete_cookie("npfSession", secure=request.is_secure, httponly=True, samesite="Lax")
         return response
@@ -393,8 +561,8 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
             if not g.browserSession:
                 token = secrets.token_urlsafe(32)
                 with authenticationLock:
-                    sessions[token] = {"expiresAt": time.time() + 600, "csrfToken": secrets.token_urlsafe(32)}
-                    g.browserSession = sessions[token]
+                    sessions[sessionKey(token)] = {"expiresAt": time.time() + 600, "csrfToken": secrets.token_urlsafe(32)}
+                    g.browserSession = sessions[sessionKey(token)]
                 return setSessionCookie(app.make_response(identityPage("register")), token, 600)
             return identityPage("register")
         if not csrfValid():
@@ -417,8 +585,8 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
                 message = issueVerification(getDatabase(), userId, request.remote_addr or "unknown")
             except ValidationError as error:
                 message = str(error)
-            sessions[token]["verificationMessage"] = message
-        return setSessionCookie(redirect(identityDestination(user, sessions[token])), token, 168 * 3600)
+            sessions[sessionKey(token)]["verificationMessage"] = message
+        return setSessionCookie(redirect(identityDestination(user, sessions[sessionKey(token)])), token, 168 * 3600)
 
     @app.route("/complete-profile", methods=["GET", "POST"])
     def completeProfile():
@@ -500,6 +668,126 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
     @app.get("/api/session")
     def sessionDetails():
         return {"userId": g.user["id"], "role": g.user["role"], "username": g.user["username"], "firstName": g.user["firstName"], "lastName": g.user["lastName"], "csrfToken": g.browserSession["csrfToken"], "expiresAt": g.browserSession["expiresAt"], "ledgerId": g.user["ledgerId"], "ledgers": g.accessibleLedgers, "defaultLedgerName": defaultLedgerName(g.user["firstName"], g.user["lastName"])}
+
+    def accountDetails():
+        user = getDatabase().execute("SELECT id, username, firstName, lastName FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+        return {"userId": user["id"], "username": user["username"], "firstName": user["firstName"], "lastName": user["lastName"], "allowAccountSelfService": configuration["allowAccountSelfService"]}
+
+    @app.get("/api/account")
+    def ownAccount():
+        return jsonify(accountDetails())
+
+    def saveOwnAccount(passwordChange=False):
+        if not configuration["allowAccountSelfService"]:
+            return jsonify({"error": "Account self-service is disabled"}), 403
+        submitted = request.get_json(silent=True)
+        expectedFields = {"currentPassword", "newPassword", "confirmation"} if passwordChange else {"firstName", "lastName"}
+        if not isinstance(submitted, dict) or set(submitted) != expectedFields:
+            raise ValidationError("Submit the required account fields")
+        with authenticationLock:
+            currentToken = sessionKey(request.cookies.get("npfSession"))
+            if sessions.get(currentToken) is not g.browserSession:
+                return jsonify({"error": "Sign In required"}), 401
+            if passwordChange:
+                removedInstallations = [value.get("installationId") for key, value in sessions.items() if value.get("userId") == g.user["id"] and key != currentToken and value.get("installationId") != g.browserSession.get("installationId")]
+                changeOwnPassword(getDatabase(), g.user["id"], submitted["currentPassword"], submitted["newPassword"], submitted["confirmation"], g.browserSession["authVersion"], removedInstallations, retainedSession=currentToken if persistentLogins else None)
+            else:
+                updateProfile(getDatabase(), g.user["id"], submitted["firstName"], submitted["lastName"], expectedVersion=g.browserSession["authVersion"], retainedSession=currentToken if persistentLogins else None)
+            # The database invalidation is authoritative. Retain only the completing
+            # session and its original fixed expiry after the atomic audit succeeds.
+            g.browserSession["authVersion"] += 1
+            for token in [key for key, value in sessions.items() if value.get("userId") == g.user["id"] and key != currentToken]:
+                del sessions[token]
+        return jsonify({"status": "ok", "csrfToken": g.browserSession["csrfToken"], **accountDetails()})
+
+    @app.put("/api/account/name")
+    def saveOwnName():
+        return saveOwnAccount()
+
+    @app.post("/api/account/password")
+    def saveOwnPassword():
+        return saveOwnAccount(passwordChange=True)
+
+    @app.get("/api/account/sessions")
+    def ownSessions():
+        with authenticationLock:
+            if sessions.get(sessionKey(request.cookies.get("npfSession"))) is not g.browserSession:
+                return jsonify({"error": "Sign In required"}), 401
+            active = [dict(value, current=(key == sessionKey(request.cookies.get("npfSession")))) for key, value in sessions.items()
+                if value.get("userId") == g.user["id"] and value.get("authVersion") == g.user["authVersion"] and value["expiresAt"] > time.time()]
+        fields = ("id", "client", "lastIp", "signedInAt", "lastActiveAt", "current")
+        return jsonify([{field: value[field] for field in fields} for value in sorted(active, key=lambda value: (not value["current"], -value["signedInAt"], value["id"]))])
+
+    @app.post("/api/account/sessions/logout")
+    def revokeOwnSessions():
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict) or not ((set(submitted) == {"others"} and submitted["others"] is True) or (set(submitted) == {"id"} and isinstance(submitted["id"], str))):
+            raise ValidationError("Choose a session or Log out other sessions")
+        currentToken = sessionKey(request.cookies.get("npfSession"))
+        with authenticationLock:
+            if sessions.get(currentToken) is not g.browserSession:
+                return jsonify({"error": "Sign In required"}), 401
+            matching = [key for key, value in sessions.items() if value.get("userId") == g.user["id"]
+                and (key != currentToken if submitted.get("others") else value.get("id") == submitted["id"])]
+            if "id" in submitted and not matching:
+                raise ValidationError("Session is no longer available")
+            from push import removeInstallations
+            connection = getDatabase()
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                removeInstallations(connection, g.user["id"], [sessions[key].get("installationId") for key in matching])
+                if persistentLogins:
+                    connection.executemany("DELETE FROM browserSessions WHERE tokenDigest = ? AND userId = ?", [(key, g.user["id"]) for key in matching])
+            for key in matching:
+                del sessions[key]
+        loggedOut = currentToken in matching
+        response = jsonify({"status": "ok", "loggedOut": loggedOut})
+        if loggedOut:
+            response.delete_cookie("npfSession", secure=request.is_secure, httponly=True, samesite="Lax")
+        return response
+
+    @app.get("/api/account/notifications")
+    def ownNotificationDevices():
+        with authenticationLock:
+            if sessions.get(sessionKey(request.cookies.get("npfSession"))) is not g.browserSession:
+                return jsonify({"error": "Sign In required"}), 401
+            now = time.time()
+            signedInInstallations = {value.get("installationId") for value in sessions.values()
+                if value.get("userId") == g.user["id"] and value.get("authVersion") == g.user["authVersion"] and value["expiresAt"] > now}
+        devices = []
+        for row in getDatabase().execute("""SELECT p.id, p.client, p.installationId, p.subscription, l.name AS ledgerName
+            FROM pushSubscriptions p JOIN ledgers l ON l.id = p.ledgerId WHERE p.userId = ?""", (g.user["id"],)):
+            label = json.loads(row["subscription"]).get("deviceLabel", "")
+            devices.append({"id": row["id"], "client": row["client"], "ledgerName": row["ledgerName"], "label": label,
+                "current": bool(row["installationId"] and row["installationId"] == g.browserSession.get("installationId")),
+                "sessionStatus": "unknown" if not row["installationId"] else "signed-in" if row["installationId"] in signedInInstallations else "no-active-session"})
+        return jsonify(sorted(devices, key=lambda device: (not device["current"], (device["label"] or device["client"]).casefold(), device["ledgerName"].casefold(), device["id"])))
+
+    @app.post("/api/account/notifications/label")
+    def renameOwnNotificationDevice():
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict) or set(submitted) != {"id", "label"} or type(submitted["id"]) is not int or submitted["id"] <= 0:
+            raise ValidationError("Submit a notification enrollment and device label")
+        from push import renameNotificationDevice
+        renameNotificationDevice(getDatabase(), g.user["id"], submitted["id"], submitted["label"])
+        return jsonify({"status": "ok"})
+
+    @app.post("/api/account/notifications/disable")
+    def disableOwnNotifications():
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict) or not ((set(submitted) == {"all"} and submitted["all"] is True) or (set(submitted) == {"currentDevice"} and submitted["currentDevice"] is True) or (set(submitted) == {"id"} and type(submitted["id"]) is int and submitted["id"] > 0)):
+            raise ValidationError("Choose a notification enrollment or Disable all notifications")
+        connection = getDatabase()
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if submitted.get("all"):
+                connection.execute("DELETE FROM pushSubscriptions WHERE userId = ?", (g.user["id"],))
+            elif submitted.get("currentDevice"):
+                from push import removeInstallations
+                removeInstallations(connection, g.user["id"], [g.browserSession.get("installationId")])
+            elif not connection.execute("DELETE FROM pushSubscriptions WHERE userId = ? AND id = ?", (g.user["id"], submitted["id"])).rowcount:
+                raise ValidationError("Notification enrollment is no longer available")
+        return jsonify({"status": "ok"})
 
     @app.route("/api/ledgers", methods=["GET", "POST"])
     def ledgers():
@@ -1627,7 +1915,11 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
             return {"publicKey": applicationKey(connection)[1], "endpoints": [row[0] for row in connection.execute("SELECT endpoint FROM pushSubscriptions WHERE userId = ? AND ledgerId = ?", (g.user["id"], g.user["ledgerId"]))]}
         submitted = request.get_json(silent=True)
         if request.method == "POST":
-            enroll(connection, g.user["id"], g.user["ledgerId"], submitted, request.headers.get("Origin") or request.url_root)
+            with authenticationLock:
+                if sessions.get(sessionKey(request.cookies.get("npfSession"))) is not g.browserSession:
+                    return jsonify({"error": "Sign In required"}), 401
+                enroll(connection, g.user["id"], g.user["ledgerId"], submitted, request.headers.get("Origin") or request.url_root,
+                    g.browserSession["installationId"], g.browserSession["client"], g.browserSession["authVersion"], refreshOnly=request.headers.get("X-Background-Request") == "true")
         else:
             if not isinstance(submitted, dict) or set(submitted) != {"endpoint"} or not isinstance(submitted["endpoint"], str):
                 raise ValidationError("Submit the installation endpoint")
@@ -1860,16 +2152,45 @@ def createApp(databasePathOverride=None, configurationDirectory=None):
     return app
 
 
+def createHttpServer(app, listenAddress, serverPort):
+    # Own these resources so a bind failure also closes Waitress's trigger sockets.
+    socketMap = {}
+    dispatcher = ThreadedTaskDispatcher()
+    try:
+        server = create_server(app, host=listenAddress, port=serverPort, ipv6=False,
+            # TrustedProxy validates the original peer and only its approved headers.
+            clear_untrusted_proxy_headers=False, max_request_body_size=app.config["MAX_CONTENT_LENGTH"],
+            map=socketMap, _dispatcher=dispatcher)
+        dispatcher.set_thread_count(server.adj.threads)
+        return server
+    except BaseException:
+        dispatcher.shutdown()
+        wasyncore.close_all(socketMap)
+        raise
+
+
+def closeHttpServer(server, serverThread):
+    server.task_dispatcher.shutdown()
+    # Close sockets on the I/O thread; closing a socket during Windows select can fail.
+    if serverThread.is_alive():
+        server.trigger.pull_trigger(lambda: wasyncore.close_all(server._map))
+    serverThread.join()
+    wasyncore.close_all(server._map)
+
+
 def runApplication(app):
     # Bind before prompting so an unavailable port cannot leave setup running
     # without a server. Keep protected terminal input on the main thread.
-    server = make_server("0.0.0.0", 5000, app, threaded=True)
-    serverThread = threading.Thread(target=server.serve_forever, name="development-server", daemon=True)
+    configuration = app.config["PLATFORM_CONFIGURATION"]
+    listenAddress, serverPort = configuration["listenAddress"], configuration["serverPort"]
+    logging.info("Binding server to %s:%s", listenAddress, serverPort)
+    server = createHttpServer(app, listenAddress, serverPort)
+    serverThread = threading.Thread(target=server.run, name="waitress-server", daemon=True)
     serverThread.start()
     logging.info("Starting No Part Finance %s", applicationVersion)
     logging.info("Database path: %s", app.config["DATABASE_PATH"])
     logging.info("Schema version: %s", schemaVersion)
-    logging.info("Development server host: 0.0.0.0")
+    logging.info("Waitress server host: %s; port: %s", listenAddress, serverPort)
     try:
         connection = connectDatabase(app.config["DATABASE_PATH"])
         connection.configuration = app.config["PLATFORM_CONFIGURATION"]
@@ -1877,7 +2198,8 @@ def runApplication(app):
         try:
             ownerConfigured = connection.execute("SELECT 1 FROM ledgerAccess WHERE role = 'owner'").fetchone() is not None
             signInGuidance = "Sign in to use the application." if ownerConfigured else "Complete Owner setup below, then reload to sign in."
-            logging.info("Server is running; open http://127.0.0.1:5000 in your browser. %s Keep this terminal open.", signInGuidance)
+            browserAddress = "127.0.0.1" if listenAddress == "0.0.0.0" else listenAddress
+            logging.info("Server is running; open http://%s:%s in your browser. %s Keep this terminal open.", browserAddress, serverPort, signInGuidance)
             configureOnStartup(connection)
         finally:
             connection.close()
@@ -1887,9 +2209,7 @@ def runApplication(app):
     except KeyboardInterrupt:
         logging.info("Stopping No Part Finance")
     finally:
-        server.shutdown()
-        server.server_close()
-        serverThread.join()
+        closeHttpServer(server, serverThread)
 
 
 if __name__ == "__main__":
@@ -1898,7 +2218,7 @@ if __name__ == "__main__":
         print(applicationVersion)
         sys.exit(0)
     try:
-        app = createApp()
+        app = createApp(clearSavedSessions=not sys.argv[1:])
     except ConfigurationError as error:
         sys.exit(str(error))
     if sys.argv[1:] == ["manage-users"]:

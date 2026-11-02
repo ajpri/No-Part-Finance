@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#202124"><meta name="apple-mobile-web-app-title" content="No Part Finance"><meta name="apple-mobile-web-app-capable" content="yes">
   <link rel="manifest" href="/pwa.webmanifest"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <script src="/theme.js"></script><link rel="stylesheet" href="/styles.css"><script src="/offline.js" defer></script><script src="/authentication.js" defer></script>
-</head>
+<link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png"></head>
 <body><main class="signIn"><h1>No Part Finance</h1>
 {% if mode == "signIn" %}
 <h2>Sign In</h2>
@@ -17,6 +17,36 @@
   <p role="alert">{{ message }}</p><button type="submit">Sign In</button>
 </form>
 {% if registrationEnabled %}<p><a href="/register" data-register>Register</a></p>{% endif %}
+{% if recoveryEnabled %}<p><a href="/forgot-password">Forgot password</a></p>{% endif %}
+{% endif %}
+{% if mode == "forgotPassword" %}
+<h2>Forgot password</h2>
+<p>Enter your email username to request a password reset link.</p>
+<form method="post" action="/forgot-password">
+  <input type="hidden" name="csrfToken" value="{{ csrfToken }}">
+  <label>Email username <input name="username" type="text" inputmode="email" autocomplete="username" value="{{ fields.get('username', '') }}" required maxlength="64"></label>
+  <p role="status">{{ message }}</p><button type="submit">Send reset link</button>
+</form>
+<p><a href="/sign-in">Back to Sign In</a></p>
+{% endif %}
+{% if mode == "resetPassword" %}
+<h2>Reset password</h2>
+<form method="post" action="/reset-password" data-reset-password-form>
+  <input type="hidden" name="csrfToken" value="{{ csrfToken }}">
+  <input type="hidden" name="token" value="{{ fields.get('token', '') }}" data-reset-token>
+  <label>New password <input name="newPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+  <label>Confirm password <input name="confirmation" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+  <p>Use 8–128 characters. Choose a password that is not commonly used.</p>
+  <p role="alert">{{ message }}</p><p role="alert" data-reset-token-message hidden></p>
+  <button type="submit" data-reset-submit>Reset password</button>
+</form>
+<p><a href="/forgot-password">Request a new reset link</a></p>
+<p><a href="/sign-in">Back to Sign In</a></p>
+{% endif %}
+{% if mode == "recoveryComplete" %}
+<h2>Password reset</h2>
+<p role="status">{{ message }}</p>
+<p><a href="/sign-in">Sign In</a></p>
 {% endif %}
 {% if mode == "unconfigured" %}<p>{{ message }}</p>{% endif %}
 {% if mode == "signIn" and registrationEnabled or mode == "register" %}

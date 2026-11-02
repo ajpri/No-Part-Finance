@@ -19,7 +19,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-schemaVersion = 30
+schemaVersion = 31
 
 
 class ValidationError(ValueError):
@@ -239,7 +239,11 @@ def initializeDatabase(databasePath):
             raise RuntimeError(
                 f"Database schema version {currentVersion} is newer than supported version {schemaVersion}"
             )
-        if hasSchema and currentVersion < schemaVersion:
+        # Earlier 26.11 recovery copies can lack the optional login storage.
+        needsSessionSchema = hasSchema and currentVersion == 31 and not connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'browserSessions'"
+        ).fetchone()
+        if hasSchema and (currentVersion < schemaVersion or needsSessionSchema):
             integrityResult = connection.execute("PRAGMA integrity_check").fetchone()[0]
             if integrityResult != "ok":
                 raise RuntimeError(f"Pre-migration database integrity check failed: {integrityResult}")
@@ -251,6 +255,7 @@ def initializeDatabase(databasePath):
                 backupConnection = sqlite3.connect(candidateBackupPath)
                 try:
                     connection.backup(backupConnection)
+                    clearBrowserSessionsFromBackup(backupConnection)
                     backupIntegrity = backupConnection.execute("PRAGMA integrity_check").fetchall()
                     backupVersion = backupConnection.execute("PRAGMA user_version").fetchone()[0]
                     backupHasSchema = backupConnection.execute(
@@ -342,6 +347,12 @@ def initializeDatabase(databasePath):
         if currentVersion < 30 <= schemaVersion:
             from cliDeletion import migration
             migration(connection)
+        if currentVersion < 31 <= schemaVersion:
+            migrateToVersion31(connection)
+        elif needsSessionSchema:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                migrateBrowserSessions(connection)
         connection.execute(f"PRAGMA user_version = {schemaVersion}")
         connection.commit()
         foreignKeyFailure = connection.execute("PRAGMA foreign_key_check").fetchone()
@@ -3726,14 +3737,14 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
             userSelection = "SELECT userId FROM ledgerAccess WHERE ledgerId = ? UNION SELECT creatorUserId FROM integrationSecrets WHERE ledgerId = ?"
             destination = sqlite3.connect(destinationPath)
             definitions = snapshot.execute("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type = 'table' DESC").fetchall()
-            allowedTables = ("pushConfiguration", "pushSubscriptions", *ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents", "sharingInvitations", "invitationAttempts", "userEvents", "verificationChallenges", "verificationState", "verificationSendAttempts", "registrationAttempts")
+            allowedTables = ("browserSessions", "recoveryEligibility", "passwordRecoveryLinks", "passwordRecoveryAttempts", "pushConfiguration", "pushSubscriptions", *ledgerTables, "ledgers", "users", "ledgerAccess", "auditEvents", "sharingInvitations", "invitationAttempts", "userEvents", "verificationChallenges", "verificationState", "verificationSendAttempts", "registrationAttempts")
             for definition in definitions:
                 if definition["type"] == "table" and definition["name"] in allowedTables:
                     destination.execute(definition["sql"])
             for table in allowedTables:
                 # Invitation recipients have not consented to membership in the copy.
                 # Keep these tables empty, but retain their schema for standalone startup.
-                if table in {"pushConfiguration", "pushSubscriptions", "sharingInvitations", "invitationAttempts", "registrationAttempts"}:
+                if table in {"browserSessions", "recoveryEligibility", "passwordRecoveryLinks", "passwordRecoveryAttempts", "pushConfiguration", "pushSubscriptions", "sharingInvitations", "invitationAttempts", "registrationAttempts"}:
                     continue
                 if table == "users":
                     rows = snapshot.execute(f"SELECT * FROM users WHERE id IN ({userSelection})", (ledgerId, ledgerId)).fetchall()
@@ -4307,3 +4318,62 @@ def migrateToVersion28(connection):
         connection.execute("CREATE TABLE registrationAttempts (address TEXT NOT NULL, attemptedAt INTEGER NOT NULL)")
         connection.execute("CREATE INDEX registrationAddressTime ON registrationAttempts(address, attemptedAt)")
         connection.execute("PRAGMA user_version = 28")
+
+
+def migrateToVersion31(connection):
+    """Apply all 26.11 schema changes as one atomic upgrade from version 30."""
+    from push import migrateNotificationDevices
+    with connection:
+        connection.execute("BEGIN IMMEDIATE")
+        migrateNotificationDevices(connection)
+        migratePasswordRecovery(connection)
+        migrateBrowserSessions(connection)
+        connection.execute("PRAGMA user_version = 31")
+
+
+def migratePasswordRecovery(connection):
+    connection.execute("""CREATE TABLE IF NOT EXISTS recoveryEligibility (
+        userId INTEGER PRIMARY KEY REFERENCES users(id), address TEXT NOT NULL,
+        method TEXT NOT NULL CHECK(method IN ('email-code', 'cli-trust')))""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS passwordRecoveryLinks (
+        userId INTEGER PRIMARY KEY REFERENCES users(id), tokenDigest TEXT NOT NULL UNIQUE,
+        address TEXT NOT NULL, authVersion INTEGER NOT NULL, issuedAt INTEGER NOT NULL,
+        expiresAt INTEGER NOT NULL, consumedAt INTEGER)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS passwordRecoveryAttempts (
+        accountKey TEXT NOT NULL, clientAddress TEXT NOT NULL, attemptedAt INTEGER NOT NULL)""")
+    connection.execute("CREATE INDEX IF NOT EXISTS passwordRecoveryAccountAttempts ON passwordRecoveryAttempts(accountKey, attemptedAt)")
+    connection.execute("CREATE INDEX IF NOT EXISTS passwordRecoveryIpAttempts ON passwordRecoveryAttempts(clientAddress, attemptedAt)")
+    # Only a consumed challenge for this exact current address proves historical
+    # mailbox verification. Manual acceptance and email-like text do not.
+    from users import emailLikeUsername
+    for user in connection.execute("""SELECT u.id, u.username FROM users u JOIN verificationChallenges v ON v.userId = u.id
+        WHERE u.acceptanceMethod = 'email-code' AND v.consumedAt IS NOT NULL AND v.address = u.username""").fetchall():
+        if emailLikeUsername(user["username"]):
+            connection.execute("INSERT OR IGNORE INTO recoveryEligibility VALUES (?, ?, 'email-code')", (user["id"], user["username"]))
+
+
+def migrateBrowserSessions(connection):
+    connection.execute("""CREATE TABLE IF NOT EXISTS browserSessions (
+        tokenDigest TEXT PRIMARY KEY CHECK(length(tokenDigest) = 64),
+        userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        authVersion INTEGER NOT NULL, expiresAt REAL NOT NULL, snapshot TEXT NOT NULL)""")
+    connection.execute("CREATE INDEX IF NOT EXISTS browserSessionsUser ON browserSessions(userId)")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS invalidateBrowserSessions AFTER UPDATE OF authVersion, enabled ON users
+        BEGIN DELETE FROM browserSessions WHERE userId = NEW.id AND (authVersion != NEW.authVersion OR NEW.enabled = 0); END""")
+
+
+def clearBrowserSessionsFromBackup(connection):
+    """Recovery copies never carry login authority, including deleted-page contents."""
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'browserSessions'").fetchone():
+        with connection:
+            connection.execute("DELETE FROM browserSessions")
+        connection.execute("VACUUM")
+
+
+def retainBrowserSession(connection, tokenDigest, userId, authVersion):
+    """Caller owns the identity transaction; its version trigger revokes other sessions."""
+    if tokenDigest:
+        updated = connection.execute("UPDATE browserSessions SET authVersion = ? WHERE tokenDigest = ? AND userId = ? AND authVersion = ?",
+            (authVersion + 1, tokenDigest, userId, authVersion))
+        if updated.rowcount != 1:
+            raise ValidationError("Session is no longer available. Sign in again.")
