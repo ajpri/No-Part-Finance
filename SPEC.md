@@ -4,7 +4,7 @@
 
 This is the product specification for No Part Finance. It describes implemented behavior by feature rather than by release order. Future work and the approved next milestone live in `ROADMAP.md`.
 
-The authoritative application version is the exact string `26.11`, defined once by `applicationVersion` in `packageApplication.py`. Settings, the bottom-center sign-in footer, served asset-version references, OpenAPI version metadata, version-bearing package filenames, and command-line version output use that same value. Release History includes the October changes under `Earlier versions`.
+The authoritative application version is the exact string `26.11.10`, defined once by `applicationVersion` in `packageApplication.py`. Settings, the bottom-center sign-in footer, served asset-version references, OpenAPI version metadata, version-bearing package filenames, and command-line version output use that same value. Release History includes the October changes under `Earlier versions`.
 
 ## Product Intent
 
@@ -65,6 +65,8 @@ Apply this rule incrementally when designing or changing features. It does not a
 
 ### Shared Acceptance Standard
 
+Test modules, classes, and methods use feature-based names rather than release/date labels. Historical schema fixtures and migration assertions retain the schema identifiers they verify. Portable packages explicitly include all maintained test modules and shared fixtures.
+
 Each feature must be verified at the level of risk it introduces. Tests should cover its primary success path, validation and boundary rules, relevant failure or rollback behavior, persistence and refresh behavior, and the financial or historical invariants it could affect. Backend-authoritative calculations require Python tests; important user workflows require focused browser or integration coverage.
 
 Financial tests use integer cents and include applicable sign, zero, refund, transfer, date-boundary, and archived-record cases. Schema changes must prove migration preservation and integrity. Responsive controls must retain semantic DOM order, keyboard access, readable narrow-screen layout, and safe text rendering. Tests must use explicit temporary database and backup paths and never initialize, migrate, or write the real `finance.db`.
@@ -86,6 +88,8 @@ Plain HTML
 Plain CSS
 Plain JavaScript
 ```
+
+`index.html` is the shared server-rendered document for authentication workflows and application pages. Python renders only the appropriate content and script for each response; the public offline shell uses the application content without authentication forms or session values. Public integration API documentation remains a separate `docs.html` document.
 
 Use Python's built in `sqlite3` library.
 
@@ -114,6 +118,8 @@ No separate database server is required.
 For future feature decisions, keep financial and planning meaning authoritative in the Python API: validation, money/sign rules, balances, reporting totals, schedule occurrence, Budget calculations, and suggestion eligibility. API responses should provide the semantic values and flags needed for presentation.
 
 The browser collects input, derives browser-local default dates where required, renders and formats returned values, and manages simple interaction state such as dialogs and the active section. Do not independently reimplement financial or planning rules in JavaScript. This is an enduring implementation principle, not authorization for a broad cleanup or architectural refactor.
+
+JSON endpoints that accept object-shaped request bodies reject malformed JSON and non-object bodies with HTTP 400 and the existing JSON error response. Authentication, ledger authorization, CSRF protection, and request-size limits retain their existing precedence. Invalid requests perform no financial writes. Account, Category, parent, and planning Template IDs and configuration Sort Order values require integer values or supported integer strings within SQLite's signed integer range; malformed field types fail with HTTP 400 instead of a server error. Optional references retain their existing blank/null behavior.
 
 ## Explicit Non-Goals
 
@@ -665,6 +671,8 @@ Transfer
 
 When the destination is a credit account, the same transfer operation is presented as a payment. The primary button reads `Make Payment` and helper text reads `This will be recorded as a payment to <Account Name>.` A `Credit Card` destination defaults to `<Account Name> Card Payment`, except that an account name already ending in `Card` defaults to `<Account Name> Payment` to avoid a duplicated `Card Card` phrase. A `Personal Loan` or `Other` Credit destination defaults to `<Account Name> Payment`. Cash and External destinations use `Transfer to <Destination Account Name>`. These defaults apply on destination changes in new entry; opening an existing transfer preserves its saved description.
 
+One Python function generates the destination-based default for transfer entry, Simulator, Pending review, and enabled integration normalization. The existing browser and integration Account catalogues return it as derived `defaultTransferDescription` metadata, including for archived Accounts; it is not a stored Account field. Browsers copy this value only at the existing default-description triggers. Loading, refreshing, rendering, or renaming an Account never rewrites saved descriptions or Simulator labels.
+
 The transfer/payment dialog's primary button reads `Make Payment` for every Credit destination, including Other Credit, and `Save` otherwise, for new and edited events. This presentation does not expand payoff-helper eligibility.
 
 This presentation does not create a separate payment transaction type. The user may edit the default description before saving.
@@ -942,7 +950,7 @@ Apply this convention consistently to Dashboard Recent Transactions, Dashboard P
 
 Make Transactions-page Amount sorting use the same displayed user-facing amount for categorized ordinary transactions. Retain existing combined-transfer sorting by unsigned transfer amount and raw-ledger sorting for uncategorized or invalid underlying rows. Keep deterministic tie breakers and URL sorting behavior unchanged. Transactions Amount filtering remains separately magnitude-based and is not altered by this display convention.
 
-The API returns the semantic display amount or flags needed for presentation and sorting; JavaScript must not infer signs from Category names or independently reproduce Reporting Role math. Do not change stored amounts, account balances, reporting, refunds, editing conversion, transfer atomicity, transaction creation, or database schema.
+Python also supplies the authoritative `enteredAmountCents` for ordinary transaction editing from Recent Transactions, Pinned Transactions, and transaction history, using the same Category Reporting Role conversion. The API returns the semantic display amount or flags needed for presentation and sorting; JavaScript must not infer signs from Category names or independently reproduce Reporting Role math. Do not change stored amounts, account balances, reporting, refunds, editing conversion, transfer atomicity, transaction creation, or database schema.
 
 #### Transactions Amount Filtering
 
@@ -1519,6 +1527,8 @@ Sort newest first and show five events on every form factor. Use date and transa
 
 In Dashboard Recent Transactions, combine a valid two-row transfer as one event showing `From Account → To Account`, its description, `Transfer`, and the unsigned amount. It opens the existing transfer editor and counts as one event. Invalid linked data remains visible as underlying rows.
 
+Transfer grouping, the transfer editor, and Simulator Preview/Send require exactly two opposite-signed nonzero rows with the same transfer ID, zero sum, distinct Accounts, matching Date and Description, and null Categories. Pending moves use the same pair validity rules. Malformed linked history remains visible as underlying signed rows; these operations reject an invalid pair without normalizing or rewriting it.
+
 Show enough information to recognize the transaction:
 
 ```text
@@ -1963,7 +1973,7 @@ Use concise errors that distinguish malformed USD syntax, excess decimal places,
 
 ### Application Version and Release Summary
 
-Settings System displays the authoritative application version above Database Status. The Release History modal has exactly two release groups: the authoritative application version `26.11`, followed by `Earlier versions`. The current-version group summarizes My Account name/password changes; session and notification-device management, device labels, and notification permission cleanup; and optional email password recovery. Include portable Waitress serving, configurable listening address/port, and optional login persistence across restarts in the current-version summary. Derive its heading from the authoritative application version. Group the October `26.10` summary under `Earlier versions` alongside the former August and September summaries. Preserve its three bullets covering shared ledgers, CLI and profile setup, optional registration and email verification, and Audit log; integrations submitting transactions and transfers for human review and approval; and shared Pending review, account selector pins, and Budget template shortcuts. Retain the two earlier bullets covering accounts, transactions, transfers, reporting, and backups; and Budget and Simulator planning, templates, and bulk entry. Do not show separate October, August, or September headings. Keep implementation details out of these summaries and do not add a separate patch-version history entry, extra controls, or another page. Keep the displayed version and summaries synchronized.
+Settings System displays the authoritative application version above Database Status. The Release History modal has exactly two release groups: the authoritative application version `26.11.10`, followed by `Earlier versions`. The current-version group summarizes My Account name/password changes; session and notification-device management, device labels, and notification permission cleanup; and optional email password recovery. Include portable Waitress serving, configurable listening address/port, and optional login persistence across restarts in the current-version summary. Derive its heading from the authoritative application version. Group the October `26.10` summary under `Earlier versions` alongside the former August and September summaries. Preserve its three bullets covering shared ledgers, CLI and profile setup, optional registration and email verification, and Audit log; integrations submitting transactions and transfers for human review and approval; and shared Pending review, account selector pins, and Budget template shortcuts. Retain the two earlier bullets covering accounts, transactions, transfers, reporting, and backups; and Budget and Simulator planning, templates, and bulk entry. Do not show separate October, August, or September headings. Keep implementation details out of these summaries and do not add a separate patch-version history entry, extra controls, or another page. Keep the displayed version and summaries synchronized.
 
 The Release History modal ends with the `About the Name` quotation “The best part is no part, the best process is no process, it weighs nothing, costs nothing, can't go wrong.”, attributed to Elon Musk and identified as the inspiration for No Part Finance. Do not show the version in the application bar or add external loading, tracking, or links.
 

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import tests  # Activates production-database isolation before importing the application.
 from app import createApp, runApplication
+import database as ledger
 from database import connectDatabase, createAccount, createTransaction
 from tests.test_support import createScenarioCategories
 from tests.test_support import connectFixtureDatabase as connectDatabase
@@ -153,17 +154,50 @@ class ApplicationTests(unittest.TestCase):
                 self.assertEqual(200, response.status_code)
                 response.close()
 
+    def testSharedDocumentSeparatesApplicationAndAuthenticationResponses(self):
+        visitor = self.app.test_client()
+        signIn = visitor.get("/sign-in").get_data(as_text=True)
+        self.assertIn("<title>No Part Finance — Sign In</title>", signIn)
+        self.assertIn('src="/authentication.js"', signIn)
+        self.assertIn('name="csrfToken"', signIn)
+        self.assertNotIn('id="dashboardPage"', signIn)
+        self.assertNotIn('src="/app.js', signIn)
+
+        for path in ("/", "/new", "/transactions", "/budget", "/simulator", "/pending", "/settings"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(200, response.status_code)
+                html = response.get_data(as_text=True)
+                self.assertIn("<title>No Part Finance</title>", html)
+                self.assertIn('id="dashboardPage"', html)
+                self.assertIn('src="/app.js?v=26.11.10"', html)
+                self.assertIn("<h3>26.11.10</h3>", html)
+                self.assertNotIn('src="/authentication.js"', html)
+                self.assertNotIn('name="csrfToken"', html)
+                self.assertNotIn('action="/sign-in"', html)
+                for marker in ("{{", "{%", "__APPLICATION_VERSION__"):
+                    self.assertNotIn(marker, html)
+
+        self.app.config["PLATFORM_CONFIGURATION"]["pwaOfflineEnabled"] = True
+        offline = visitor.get("/offline-shell")
+        self.assertEqual(200, offline.status_code)
+        self.assertEqual(self.client.get("/").get_data(), offline.get_data())
+        self.assertEqual(302, visitor.get("/").status_code)
+        with visitor.get("/docs") as documentation:
+            self.assertEqual(200, documentation.status_code)
+            self.assertIn("No Part Finance Integration API", documentation.get_data(as_text=True))
+
     def testHealthReportsSchemaVersion(self):
         response = self.client.get("/health")
         self.assertEqual(200, response.status_code)
         self.assertEqual(
-            {"applicationVersion": "26.11", "schemaVersion": 31, "status": "ok"},
+            {"applicationVersion": "26.11.10", "schemaVersion": 31, "status": "ok"},
             response.get_json(),
         )
 
     def testApplicationIdentityIsExposedFromOneVersionValue(self):
         details = self.client.get("/api/application").get_json()
-        self.assertEqual({"name": "No Part Finance", "version": "26.11"}, details)
+        self.assertEqual({"name": "No Part Finance", "version": "26.11.10"}, details)
         response = self.client.get("/")
         html = response.get_data(as_text=True)
         response.close()
@@ -278,8 +312,8 @@ class ApplicationTests(unittest.TestCase):
         checkbox = '<input id="excludeBufferFromProjectedBalances" type="checkbox"> Exclude buffer from projected balances'
         self.assertIn(checkbox, html)
         self.assertLess(html.index('id="simulatorResultRows"'), html.index(checkbox))
-        self.assertIn('excludeBuffer&&a.accountClass==="cash"?a.projectedBalanceCents-a.bufferCents:a.projectedBalanceCents', javascript)
-        self.assertIn('if(a.minimumStatus)name.append(" ",statusBadge(a.minimumStatus))', javascript)
+        self.assertIn('excludeBuffer && a.accountClass === "cash" ? a.projectedBalanceCents - a.bufferCents : a.projectedBalanceCents', javascript)
+        self.assertIn('if (a.minimumStatus) name.append(" ", statusBadge(a.minimumStatus))', javascript)
         self.assertIn('#excludeBufferFromProjectedBalances").addEventListener("change",renderSimulatorResults)', javascript)
         self.assertIn(".simulatorBufferProjectionOption { align-items: flex-start; margin-top: .5rem; max-width: 100%; width: fit-content; }", styles)
 
@@ -308,6 +342,69 @@ class ApplicationTests(unittest.TestCase):
         self.assertNotIn("Display Order", html[html.index('id="accountDialog"'):html.index('id="categoryDialog"')])
         self.assertIn('account.minimumBalanceCents !== null', javascript)
         self.assertIn('.minimumColumn { width: 1%; }', styles)
+
+    def testAccountBalanceReadsPreserveHistoryFiltersMetadataAndHelpers(self):
+        connection = connectDatabase(self.databasePath)
+        self.addCleanup(connection.close)
+        expense = connection.execute("SELECT id FROM categories WHERE name = 'Wants'").fetchone()[0]
+        income = connection.execute("SELECT id FROM categories WHERE reportingRole = 'income'").fetchone()[0]
+        external = connection.execute("SELECT id FROM accounts WHERE systemIdentity = 'external'").fetchone()[0]
+        cash = createAccount(connection, "z Cash", "cash", openingBalance="100.00", pinnedForSelection=True)
+        emptyCash = createAccount(connection, "Alpha cash", "cash")
+        archived = createAccount(connection, "Old cash", "cash", openingBalance="50.00")
+        card = createAccount(connection, "Card", "credit", "Credit Card", openingBalance="20.00", creditLimit="100.00")
+        loan = createAccount(connection, "Loan", "credit", "Personal Loan", openingBalance="30.00")
+        overpaid = createAccount(connection, "Overpaid", "credit", "Credit Card")
+        zeroCard = createAccount(connection, "Zero card", "credit", "Credit Card")
+        createTransaction(connection, cash, "1999-01-01", "Old purchase", expense, "17.27")
+        createTransaction(connection, cash, "2099-01-01", "Future income", income, "20.00")
+        createTransaction(connection, card, "2099-01-01", "Future purchase", expense, "5.00")
+        createTransaction(connection, card, "1999-01-01", "Old refund", expense, "-1.00")
+        createTransaction(connection, overpaid, "2099-01-01", "Credit refund", expense, "-10.00")
+        createTransaction(connection, archived, "1999-01-01", "Archived history", expense, "1.23")
+        ledger.createTransfer(connection, "2099-01-01", external, cash, "50.00", "Boundary transfer")
+        ledger.updateAccount(connection, archived, "Old cash", "cash", active=False)
+        ledger.setPaychecksPerYear(connection, "24")
+        template = ledger.createTemplate(connection, "Annual", cash, "Annual expense", expense, "1200.00")
+        ledger.createSinkingFundPlan(connection, template, "yearly", "2028-02-29")
+        def snapshot():
+            return tuple(tuple(tuple(row) for row in connection.execute(f"SELECT * FROM {table} ORDER BY id"))
+                         for table in ("accounts", "transactions", "auditEvents", "sinkingFundPlans"))
+        before = snapshot()
+        response = self.client.get("/api/accounts")
+        self.assertEqual(200, response.status_code)
+        catalogue = response.get_json()
+        self.assertEqual([emptyCash, archived, cash, card, loan, overpaid, zeroCard, external], [row["id"] for row in catalogue])
+        expectedBalances = {emptyCash: 0, archived: 4877, cash: 15273, card: -2400, loan: -3000, overpaid: 1000, zeroCard: 0, external: -5000}
+        self.assertEqual(expectedBalances, {row["id"]: row["balanceCents"] for row in catalogue})
+        self.assertTrue(all(type(row["balanceCents"]) is int for row in catalogue))
+        self.assertEqual([0, 4, 6, 1, 3, 5, 7, 2], [row["selectorOrder"] for row in catalogue])
+        accountColumns = {row["name"] for row in connection.execute("PRAGMA table_info(accounts)")}
+        for row in catalogue:
+            self.assertEqual(accountColumns | {"balanceCents", "selectorOrder", "defaultTransferDescription"}, set(row))
+            self.assertIs(type(row["pinnedForSelection"]), bool)
+        self.assertTrue(next(row for row in catalogue if row["id"] == cash)["pinnedForSelection"])
+        dashboard = self.client.get("/api/dashboard?period=custom&startDate=2000-01-01&endDate=2000-01-31").get_json()
+        self.assertEqual([emptyCash, cash, card, loan, overpaid, zeroCard], [row["id"] for row in dashboard["accounts"]])
+        self.assertEqual({key: value for key, value in expectedBalances.items() if key not in (archived, external)}, {row["id"]: row["balanceCents"] for row in dashboard["accounts"]})
+        self.assertEqual((0, 0), (dashboard["expensesCents"], dashboard["incomeCents"]))
+        self.assertEqual(4400, dashboard["totalCreditBalanceCents"])
+        for source, destination, expected in (
+            (cash, card, {"eligible": True, "amountCents": 2400, "label": "Use $24.00 (Payoff)", "kind": "payoff"}),
+            (cash, loan, {"eligible": True, "amountCents": 3000, "label": "Use $30.00 (Payoff)", "kind": "payoff"}),
+            (emptyCash, cash, {"eligible": True, "amountCents": 5000, "label": "Use $50.00 (Sinking Fund per paycheck)", "kind": "sinkingFund"}),
+            (emptyCash, card, {"eligible": False}), (card, loan, {"eligible": False}),
+            (cash, zeroCard, {"eligible": False}), (cash, overpaid, {"eligible": False}),
+            (cash, archived, {"eligible": False}), (archived, card, {"eligible": False}),
+            (cash, external, {"eligible": False}), (external, card, {"eligible": False}),
+            (cash, 999999, {"eligible": False}), ("bad", card, {"eligible": False}),
+        ):
+            with self.subTest(source=source, destination=destination):
+                response = self.client.get(f"/api/transfer-amount-helper?fromAccountId={source}&toAccountId={destination}")
+                self.assertEqual(200, response.status_code)
+                self.assertEqual(expected, response.get_json())
+        self.assertEqual({"eligible": False}, self.client.get(f"/api/transfer-amount-helper?fromAccountId={cash}&toAccountId={card}&editing=true").get_json())
+        self.assertEqual(before, snapshot(), "Balance reads and amount helpers must not change financial records or audits")
 
     def testAccountsUseAuthoritativeAlphabeticalClassGroupsAndPreserveStoredOrder(self):
         connection = connectDatabase(self.databasePath)
@@ -356,7 +453,7 @@ class ApplicationTests(unittest.TestCase):
         javascript = (repositoryPath / "app.js").read_text(encoding="utf-8")
         styles = (repositoryPath / "styles.css").read_text(encoding="utf-8")
         self.assertIn("Leave blank or enter $0 to clear.", html)
-        self.assertIn("requestId!==minimumHelperRequest", javascript)
+        self.assertIn("requestId !== minimumHelperRequest", javascript)
         self.assertIn("helper.replaceChildren(...lines)", javascript)
         self.assertIn("#minimumBalanceHelper { min-height: 3.75rem; }", styles)
 
@@ -367,13 +464,13 @@ class ApplicationTests(unittest.TestCase):
         self.assertIn('id="deleteSimulatorRowButton" class="destructiveButton" type="button">Delete Row</button>', html)
         self.assertIn("An executed row represents activity that has already happened", html)
         self.assertNotIn('id="simulatorExecutionMessage"', html)
-        self.assertIn('form.dataset.hasLinkedLedger=row.executedTransactionId?"true":"false"', javascript)
+        self.assertIn('form.dataset.hasLinkedLedger = row.executedTransactionId ? "true" : "false"', javascript)
         self.assertIn('if(form.dataset.hasLinkedLedger==="true")message+=', javascript)
 
     def testSimulatorTransferDropdownUsesShortUiLabel(self):
         javascript = (Path(__file__).resolve().parents[1] / "app.js").read_text(encoding="utf-8")
-        self.assertIn('{id:"transfer",name:"Transfer",active:true}', javascript)
-        self.assertNotIn('{id:"transfer",name:"Transfer / Payment",active:true}', javascript)
+        self.assertRegex(javascript, r'\{\s*id:\s*"transfer",\s*name:\s*"Transfer",\s*active:\s*true\s*\}')
+        self.assertNotRegex(javascript, r'\{\s*id:\s*"transfer",\s*name:\s*"Transfer / Payment",\s*active:\s*true\s*\}')
 
     def testTemplatePrefillAmountPersistsThroughApi(self):
         connection = connectDatabase(self.databasePath)

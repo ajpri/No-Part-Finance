@@ -33,9 +33,13 @@ from database import (
     sendSharingInvitation, recipientInvitations, decideSharingInvitation,
     changeSharingAccess, InvitationRateLimit,
     localTimestamp, auditLogPage,
-    bindLedger, connectInitialLedgerDatabase, exportLedgerDatabase, setIntegrationState,
+    bindLedger, exportLedgerDatabase, setIntegrationState,
     reconcileAccountBalance,
     connectDatabase,
+    accountBalances,
+    validTransferRows,
+    simulatorTransferMapping,
+    simulatorTransactionMapping,
     createAccount,
     createBulkTransactions,
     createCategory,
@@ -47,6 +51,7 @@ from database import (
     createExpectedIncomePlan,
     createPlannedCreditPayment,
     createTransfer,
+    defaultTransferDescription,
     createSimulatorPlan,
     deleteTransaction,
     deleteTemplate,
@@ -90,7 +95,7 @@ from database import (
     utilizationStatus,
     createIntegrationSecret,
     updateIntegrationLabel,
-    submitPendingTransaction,
+    submitPendingEntry,
     pendingReviewRows,
     pendingReviewSummary,
     savePendingReview,
@@ -98,10 +103,8 @@ from database import (
     SubmissionConflict,
     preparePending,
     pendingCounts,
-    submitPendingEntry,
     ledgerMoveSnapshot,
     moveLedgerToPending,
-    getSelectableCategory,
 )
 
 
@@ -118,16 +121,8 @@ def combinedRecentEvents(rows, limit=5):
         transferId = row["transferId"]
         if transferId and transferId not in handledTransfers:
             linked = transferRows[transferId]
-            valid = (len(linked) == 2 and sum(item["amountCents"] for item in linked) == 0
-                     and linked[0]["accountId"] != linked[1]["accountId"]
-                     and linked[0]["date"] == linked[1]["date"]
-                     and linked[0]["description"] == linked[1]["description"]
-                     and all(item["categoryId"] is None for item in linked))
-            if valid:
-                fromRow = next((item for item in linked if item["amountCents"] < 0), None)
-                toRow = next((item for item in linked if item["amountCents"] > 0), None)
-                valid = fromRow is not None and toRow is not None
-            if valid:
+            if validTransferRows(linked):
+                fromRow, toRow = sorted(linked, key=lambda item: item["amountCents"])
                 event = dict(fromRow)
                 event.update({
                     "id": max(item["id"] for item in linked),
@@ -135,6 +130,7 @@ def combinedRecentEvents(rows, limit=5):
                     "categoryName": "Transfer", "amountCents": -fromRow["amountCents"],
                     "combinedTransfer": True,
                     "displayAmountCents": -fromRow["amountCents"],
+                    "enteredAmountCents": fromRow["amountCents"],
                     "fromAccountId": fromRow["accountId"], "toAccountId": toRow["accountId"],
                     "fromAccountName": fromRow["accountName"], "toAccountName": toRow["accountName"],
                 })
@@ -147,6 +143,10 @@ def combinedRecentEvents(rows, limit=5):
             continue
         event = dict(row)
         event["combinedTransfer"] = False
+        event["enteredAmountCents"] = (
+            -row["amountCents"] if "categoryRole" in row.keys() and row["categoryRole"] == "expense"
+            else row["amountCents"]
+        )
         event["displayAmountCents"] = (
             row["amountCents"] if transferId or not row["categoryName"] or ("categoryRole" in row.keys() and row["categoryRole"] == "income")
             else -row["amountCents"]
@@ -275,7 +275,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
         return response
 
     def identityPage(mode, message="", fields=None, status=200):
-        return render_template_string((projectDirectory / "authentication.html").read_text(),
+        return render_template_string((projectDirectory / "index.html").read_text(),
             mode=mode, title={"signIn": "Sign In", "register": "Register", "profile": "Complete account", "verify": "Verify email", "welcome": "Welcome", "forgotPassword": "Forgot password", "resetPassword": "Reset password", "recoveryComplete": "Password reset"}.get(mode, "Setup"),
             csrfToken=g.browserSession["csrfToken"] if g.browserSession else "",
             registrationEnabled=configuration["allowWebRegistration"], recoveryEnabled=configuration["allowWebPasswordRecovery"], version=applicationVersion,
@@ -460,7 +460,6 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
             connection = getDatabase()
             user = connection.execute("SELECT * FROM users WHERE usernameKey = ?", (username,)).fetchone()
             valid = len(password) <= 128 and check_password_hash(user["passwordHash"] if user else dummyPasswordHash, password)
-            memberships = connection.execute("SELECT ledgerId, enabled FROM ledgerAccess WHERE userId = ?", (user["id"],)).fetchall() if user else []
             if not user or not valid or not user["enabled"] or user["passwordSetupRequired"] or registrationIsExpired(user):
                 failures += 1
                 usernameAttempts[username] = (failures, now + 300 if failures == 5 else until)
@@ -864,6 +863,12 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
     def robots():
         return Response("User-agent: *\nDisallow: /\n", content_type="text/plain; charset=utf-8")
 
+    def jsonObject():
+        submitted = request.get_json(silent=True)
+        if not isinstance(submitted, dict):
+            raise ValidationError("Request body must be a JSON object")
+        return submitted
+
     def getDatabase():
         if "database" not in g:
             g.database = connectDatabase(app.config["DATABASE_PATH"])
@@ -907,7 +912,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
     @app.route("/simulator")
     @app.route("/pending")
     def pageShell():
-        return Response((projectDirectory / "index.html").read_text().replace("__APPLICATION_VERSION__", applicationVersion), mimetype="text/html")
+        return render_template_string((projectDirectory / "index.html").read_text(), mode=None, version=applicationVersion)
 
     @app.route("/styles.css")
     def styles():
@@ -928,7 +933,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
         # A public empty shell contains no authenticated data; snapshots stay local.
         if not configuration["pwaOfflineEnabled"]:
             return Response("Offline access is disabled by the administrator.", status=404)
-        return Response((projectDirectory / "index.html").read_text().replace("__APPLICATION_VERSION__", applicationVersion), mimetype="text/html")
+        return pageShell()
 
     @app.get("/offline.js")
     def offlineJavascript():
@@ -962,7 +967,8 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
     def downloadBackup():
         with tempfile.TemporaryDirectory(prefix="npf-web-backup-") as temporaryDirectory:
             backupPath = Path(temporaryDirectory) / "finance-backup.db"
-            exportLedgerDatabase(getDatabase(), backupPath, disableIntegrationKeysOption())
+            validateDownloadOptions()
+            exportLedgerDatabase(getDatabase(), backupPath)
             backupBytes = backupPath.read_bytes()
         return send_file(
             BytesIO(backupBytes),
@@ -979,10 +985,9 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
     def downloadApplicationPackageWithoutDatabase():
         return packageDownloadResponse(False)
 
-    def disableIntegrationKeysOption():
+    def validateDownloadOptions():
         if set(request.args) - {"ledger"}:
             raise ValidationError("Unsupported download option")
-        return False
 
     def packageDownloadResponse(includeDatabase):
         try:
@@ -990,7 +995,8 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
             with tempfile.TemporaryDirectory(prefix="npf-web-package-") as directory:
                 exportedPath = Path(directory) / "finance.db"
                 if includeDatabase:
-                    exportLedgerDatabase(getDatabase(), exportedPath, disableIntegrationKeysOption())
+                    validateDownloadOptions()
+                    exportLedgerDatabase(getDatabase(), exportedPath)
                 result = createApplicationPackage(
                     repositoryPath=projectDirectory,
                     databasePath=exportedPath,
@@ -1024,7 +1030,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/money/evaluate")
     def evaluateMoneyExpression():
-        expression = (request.get_json(silent=True) or {}).get("expression")
+        expression = jsonObject().get("expression")
         amountCents = parseMoneyCents(expression)
         absoluteCents = abs(amountCents)
         inputValue = f"{absoluteCents // 100:,}.{absoluteCents % 100:02d}"
@@ -1036,18 +1042,9 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
     @app.get("/api/accounts")
     def listAccounts():
         connection = getDatabase()
-        rows = connection.execute(
-            """
-            SELECT a.*, a.balanceOffsetCents + COALESCE(SUM(t.amountCents), 0) AS balanceCents
-            FROM scopedaccounts AS a
-            LEFT JOIN scopedtransactions AS t ON t.accountId = a.id
-            GROUP BY a.id
-            ORDER BY CASE a.accountClass WHEN 'cash' THEN 0 WHEN 'credit' THEN 1 ELSE 2 END,
-                     LOWER(a.name), a.id
-            """
-        ).fetchall()
+        rows = accountBalances(connection)
         selectorOrder = {row["id"]: index for index, row in enumerate(sorted(rows, key=lambda account: (account["name"].lower(), account["id"])))}
-        return jsonify([{**dict(row), "pinnedForSelection": bool(row["pinnedForSelection"]), "selectorOrder": selectorOrder[row["id"]]} for row in rows])
+        return jsonify([{**dict(row), "pinnedForSelection": bool(row["pinnedForSelection"]), "selectorOrder": selectorOrder[row["id"]], "defaultTransferDescription": defaultTransferDescription(row)} for row in rows])
 
     @app.get("/api/dashboard")
     def getDashboard():
@@ -1056,17 +1053,10 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
         report = dashboardReport(
             connection, period, request.args.get("startDate"), request.args.get("endDate")
         )
-        accountRows = connection.execute(
-            """
-            SELECT a.*, a.balanceOffsetCents + COALESCE(SUM(t.amountCents), 0) AS balanceCents
-            FROM scopedaccounts AS a
-            LEFT JOIN scopedtransactions AS t ON t.accountId = a.id
-            WHERE a.active = 1 AND a.accountClass IN ('cash', 'credit')
-            GROUP BY a.id
-            ORDER BY CASE a.accountClass WHEN 'cash' THEN 0 WHEN 'credit' THEN 1 ELSE 2 END,
-                     LOWER(a.name), a.id
-            """
-        ).fetchall()
+        accountRows = [
+            row for row in accountBalances(connection, activeOnly=True)
+            if row["accountClass"] in ("cash", "credit")
+        ]
         report["totalCreditBalanceCents"] = -sum(
             row["balanceCents"] for row in accountRows if row["accountClass"] == "credit"
         )
@@ -1146,7 +1136,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/accounts")
     def addAccount():
-        accountRequest = request.get_json(silent=True) or {}
+        accountRequest = jsonObject()
         accountId = createAccount(
             getDatabase(), accountRequest.get("name"), accountRequest.get("accountClass"),
             accountRequest.get("accountSubtype"), accountRequest.get("displayOrder", 0),
@@ -1159,7 +1149,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/accounts/<int:accountId>")
     def editAccount(accountId):
-        accountRequest = request.get_json(silent=True) or {}
+        accountRequest = jsonObject()
         existingAccount = getDatabase().execute(
             "SELECT displayOrder, pinnedForSelection FROM scopedaccounts WHERE id = ?", (accountId,)
         ).fetchone()
@@ -1177,7 +1167,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/accounts/minimum-helper")
     def accountMinimumHelper():
-        accountRequest = request.get_json(silent=True) or {}
+        accountRequest = jsonObject()
         from database import cashMinimumValues
         minimumBalanceCents, cautionPercent = cashMinimumValues(
             "cash", accountRequest.get("minimumBalance"), accountRequest.get("minimumCautionPercent")
@@ -1194,7 +1184,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/accounts/utilization-warning-helper")
     def accountUtilizationWarningHelper():
-        accountRequest = request.get_json(silent=True) or {}
+        accountRequest = jsonObject()
         warningBalanceCents = utilizationWarningHelper(
             accountRequest.get("creditLimit"), accountRequest.get("utilizationWarning")
         )
@@ -1206,7 +1196,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/accounts/<int:accountId>/reconciliation")
     def reconcileBalance(accountId):
-        reconciliationRequest = request.get_json(silent=True) or {}
+        reconciliationRequest = jsonObject()
         balanceOffsetCents, differenceCents = reconcileAccountBalance(
             getDatabase(), accountId, reconciliationRequest.get("actualBalance"),
         )
@@ -1234,7 +1224,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/categories")
     def addCategory():
-        categoryRequest = request.get_json(silent=True) or {}
+        categoryRequest = jsonObject()
         categoryId = createCategory(
             getDatabase(), categoryRequest.get("name"), categoryRequest.get("parentCategoryId"),
             categoryRequest.get("displayOrder", 0),
@@ -1245,7 +1235,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/categories/<int:categoryId>")
     def editCategory(categoryId):
-        categoryRequest = request.get_json(silent=True) or {}
+        categoryRequest = jsonObject()
         updateCategory(
             getDatabase(), categoryId, categoryRequest.get("name"),
             categoryRequest.get("parentCategoryId"), categoryRequest.get("displayOrder", 0),
@@ -1305,7 +1295,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/simulator/send")
     def sendTransactionToSimulator():
-        sendRequest = request.get_json(silent=True) or {}
+        sendRequest = jsonObject()
         try:
             planId = int(sendRequest.get("planId"))
             transactionId = int(sendRequest["transactionId"]) if sendRequest.get("transactionId") else None
@@ -1318,7 +1308,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/simulator/plans")
     def addSimulatorPlan():
-        planRequest = request.get_json(silent=True) or {}
+        planRequest = jsonObject()
         duplicatePlanId = planRequest.get("duplicatePlanId")
         if duplicatePlanId not in (None, ""):
             try:
@@ -1330,7 +1320,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/simulator/plans/<int:planId>")
     def editSimulatorPlan(planId):
-        planRequest = request.get_json(silent=True) or {}
+        planRequest = jsonObject()
         updateSimulatorPlan(getDatabase(), planId, planRequest.get("name"), planRequest.get("planDate"))
         return jsonify({"status": "ok"})
 
@@ -1341,7 +1331,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/simulator/plans/<int:planId>/rows")
     def addSimulatorRow(planId):
-        rowRequest = request.get_json(silent=True) or {}
+        rowRequest = jsonObject()
         rowId = saveSimulatorRow(getDatabase(), planId, None, rowRequest.get("rowType"),
             rowRequest.get("fromAccountId"), rowRequest.get("toAccountId"), rowRequest.get("categoryId"),
             rowRequest.get("label"), rowRequest.get("amount"))
@@ -1349,7 +1339,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/simulator/plans/<int:planId>/rows/<int:rowId>")
     def editSimulatorRow(planId, rowId):
-        rowRequest = request.get_json(silent=True) or {}
+        rowRequest = jsonObject()
         saveSimulatorRow(getDatabase(), planId, rowId, rowRequest.get("rowType"),
             rowRequest.get("fromAccountId"), rowRequest.get("toAccountId"), rowRequest.get("categoryId"),
             rowRequest.get("label"), rowRequest.get("amount"))
@@ -1362,7 +1352,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.delete("/api/simulator/plans/<int:planId>/executed-rows")
     def removeExecutedSimulatorRows(planId):
-        cleanupRequest = request.get_json(silent=True) or {}
+        cleanupRequest = jsonObject()
         planName, deletedCount = deleteExecutedSimulatorRows(
             getDatabase(), planId, cleanupRequest.get("expectedCount")
         )
@@ -1370,13 +1360,13 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/simulator/plans/<int:planId>/rows/<int:rowId>/execution")
     def editSimulatorExecution(planId, rowId):
-        executionRequest = request.get_json(silent=True) or {}
+        executionRequest = jsonObject()
         setSimulatorRowExecuted(getDatabase(), planId, rowId, bool(executionRequest.get("executed")))
         return jsonify({"status": "ok"})
 
     @app.post("/api/simulator/plans/<int:planId>/rows/<int:rowId>/transaction")
     def recordSimulatorOrdinaryTransaction(planId, rowId):
-        transactionRequest = request.get_json(silent=True) or {}
+        transactionRequest = jsonObject()
         transactionId = recordSimulatorTransaction(
             getDatabase(), planId, rowId, transactionRequest.get("accountId"),
             transactionRequest.get("date"), transactionRequest.get("description"),
@@ -1387,7 +1377,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/simulator/plans/<int:planId>/rows/<int:rowId>/transfer")
     def recordSimulatorPaymentOrTransfer(planId, rowId):
-        transferRequest = request.get_json(silent=True) or {}
+        transferRequest = jsonObject()
         transferId, transactionId = recordSimulatorTransfer(
             getDatabase(), planId, rowId, transferRequest.get("date"),
             transferRequest.get("fromAccountId"), transferRequest.get("toAccountId"),
@@ -1418,7 +1408,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.put("/api/settings/reimbursement-category")
     def setReimbursementCategory():
-        categoryId = (request.get_json(silent=True) or {}).get("categoryId")
+        categoryId = jsonObject().get("categoryId")
         category = getDatabase().execute(
             """SELECT c.* FROM scopedcategories c WHERE c.id = ? AND c.active = 1
                AND c.reportingRole = 'income' AND c.parentCategoryId IS NULL
@@ -1453,23 +1443,23 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
             raise ValidationError("Transaction sort is invalid")
         rows = getDatabase().execute(
             """
-            SELECT t.*, a.name AS accountName, a.accountClass, c.name AS categoryName, c.reportingRole AS categoryRole
+            SELECT t.*, a.name AS accountName, a.accountClass, a.active AS accountActive,
+                   c.name AS categoryName, c.reportingRole AS categoryRole, c.active AS categoryActive,
+                   EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
             FROM scopedtransactions AS t
             JOIN scopedaccounts AS a ON a.id = t.accountId
             LEFT JOIN scopedcategories AS c ON c.id = t.categoryId
             ORDER BY t.date DESC, t.id DESC
             """
         ).fetchall()
-        transactions = []
+        rowsById = {row["id"]: row for row in rows}
+        transferRows = {}
         for row in rows:
-            transaction = dict(row)
-            transaction["enteredAmountCents"] = (
-                -row["amountCents"] if row["categoryRole"] == "expense" else row["amountCents"]
-            )
-            transactions.append(transaction)
+            if row["transferId"]:
+                transferRows.setdefault(row["transferId"], []).append(row)
         # Group the full ledger before any filter so either Account side retains
         # the complete transfer and malformed linked history cannot be disguised.
-        events = combinedRecentEvents(transactions, limit=len(transactions))
+        events = combinedRecentEvents(rows, limit=len(rows))
         if period != "all":
             events = [event for event in events if periodStart <= event["date"] <= periodEnd]
         if transactionType != "all":
@@ -1530,12 +1520,15 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
                 events = [event for event in events if comparisons[amountMode](abs(event["amountCents"]))]
         for event in events:
             try:
-                simulatorLedgerMapping(
-                    getDatabase(), None if event["transferId"] else event["id"], event["transferId"]
-                )
+                if event["transferId"]:
+                    simulatorTransferMapping(transferRows[event["transferId"]])
+                else:
+                    simulatorTransactionMapping(rowsById[event["id"]])
                 event["simulatorEligible"] = True
             except ValidationError:
                 event["simulatorEligible"] = False
+            for field in ("accountActive", "categoryActive", "hasChildren"):
+                event.pop(field, None)
         if request.args.get("includeSummary") == "true":
             return jsonify({
                 "transactions": events,
@@ -1557,7 +1550,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/transactions")
     def addTransaction():
-        transactionRequest = request.get_json(silent=True) or {}
+        transactionRequest = jsonObject()
         if transactionRequest.get("alsoLogReimbursement"):
             reimbursement = transactionRequest.get("reimbursement") or {}
             transactionId, reimbursementId = createTransactionWithReimbursement(
@@ -1577,13 +1570,13 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/transactions/bulk")
     def addBulkTransactions():
-        bulkRequest = request.get_json(silent=True) or {}
+        bulkRequest = jsonObject()
         createdCount = createBulkTransactions(getDatabase(), bulkRequest.get("rows"))
         return jsonify({"createdCount": createdCount}), 201
 
     @app.patch("/api/transactions/<int:transactionId>")
     def editTransaction(transactionId):
-        transactionRequest = request.get_json(silent=True) or {}
+        transactionRequest = jsonObject()
         updateTransaction(
             getDatabase(), transactionId, transactionRequest.get("accountId"),
             transactionRequest.get("date"), transactionRequest.get("description"),
@@ -1599,7 +1592,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/transfers")
     def addTransfer():
-        transferRequest = request.get_json(silent=True) or {}
+        transferRequest = jsonObject()
         transferId = createTransfer(
             getDatabase(), transferRequest.get("date"), transferRequest.get("fromAccountId"),
             transferRequest.get("toAccountId"), transferRequest.get("amount"),
@@ -1617,11 +1610,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
             toId = int(request.args.get("toAccountId", ""))
         except ValueError:
             return jsonify({"eligible": False})
-        accountRows = connection.execute(
-            """SELECT a.*, a.balanceOffsetCents + COALESCE(SUM(t.amountCents), 0) balanceCents
-               FROM scopedaccounts a LEFT JOIN scopedtransactions t ON t.accountId = a.id
-               WHERE a.id IN (?, ?) AND a.active = 1 GROUP BY a.id""", (fromId, toId)
-        ).fetchall()
+        accountRows = accountBalances(connection, activeOnly=True, accountIds=(fromId, toId))
         accountMap = {row["id"]: row for row in accountRows}
         source, destination = accountMap.get(fromId), accountMap.get(toId)
         if not source or not destination or source["accountClass"] != "cash":
@@ -1643,7 +1632,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
         rows = getDatabase().execute(
             "SELECT * FROM scopedtransactions WHERE transferId = ? ORDER BY amountCents", (transferId,)
         ).fetchall()
-        if len(rows) != 2 or sum(row["amountCents"] for row in rows) != 0:
+        if not validTransferRows(rows):
             raise ValidationError("Transfer is incomplete or invalid")
         fromRow, toRow = rows
         return jsonify({
@@ -1657,7 +1646,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/transfers/<transferId>")
     def editTransfer(transferId):
-        transferRequest = request.get_json(silent=True) or {}
+        transferRequest = jsonObject()
         updateTransfer(
             getDatabase(), transferId, transferRequest.get("date"),
             transferRequest.get("fromAccountId"), transferRequest.get("toAccountId"),
@@ -1676,21 +1665,35 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
         return jsonify({"status": "ok"})
 
     @app.get("/api/templates")
-    def listTemplates():
+    def listTemplates(includeEligibility=False):
         rows = getDatabase().execute(
             """
-            SELECT tt.*, a.name AS accountName, c.name AS categoryName
+            SELECT tt.*, a.name AS accountName, c.name AS categoryName,
+                   a.active AS accountActive, a.accountClass, c.active AS categoryActive,
+                   c.reportingRole AS categoryRole,
+                   EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
             FROM scopedtransactionTemplates AS tt
             LEFT JOIN scopedaccounts AS a ON a.id = tt.accountId
             LEFT JOIN scopedcategories AS c ON c.id = tt.categoryId
             ORDER BY tt.displayOrder, tt.name
             """
         ).fetchall()
-        return jsonify([dict(row) for row in rows])
+        templates = []
+        for row in rows:
+            template = {key: row[key] for key in row.keys()
+                        if key not in ("accountActive", "accountClass", "categoryActive", "categoryRole", "hasChildren")}
+            if includeEligibility:
+                accountEligible = not row["accountId"] or bool(row["accountActive"] and row["accountClass"] != "system")
+                categoryEligible = not row["categoryId"] or bool(row["categoryActive"] and not row["hasChildren"])
+                template["ordinaryEligible"] = bool(row["active"] and accountEligible and categoryEligible)
+                if row["categoryId"] and categoryEligible:
+                    template["reportingRole"] = row["categoryRole"]
+            templates.append(template)
+        return jsonify(templates)
 
     @app.post("/api/templates")
     def addTemplate():
-        templateRequest = request.get_json(silent=True) or {}
+        templateRequest = jsonObject()
         templateId = createTemplate(
             getDatabase(), templateRequest.get("name"), templateRequest.get("accountId"),
             templateRequest.get("description"), templateRequest.get("categoryId"),
@@ -1701,7 +1704,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/templates/<int:templateId>")
     def editTemplate(templateId):
-        templateRequest = request.get_json(silent=True) or {}
+        templateRequest = jsonObject()
         updateTemplate(
             getDatabase(), templateId, templateRequest.get("name"),
             templateRequest.get("accountId"), templateRequest.get("description"),
@@ -1742,20 +1745,20 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
     @app.put("/api/settings/paychecks-per-year")
     def savePaychecksPerYear():
         paychecksPerYear = setPaychecksPerYear(
-            getDatabase(), (request.get_json(silent=True) or {}).get("paychecksPerYear")
+            getDatabase(), jsonObject().get("paychecksPerYear")
         )
         return jsonify({"paychecksPerYear": paychecksPerYear})
 
     @app.put("/api/settings/suggestion-rounding")
     def saveSuggestionRounding():
         roundingCents = setSuggestionRounding(
-            getDatabase(), (request.get_json(silent=True) or {}).get("amount")
+            getDatabase(), jsonObject().get("amount")
         )
         return jsonify({"suggestionRoundingCents": roundingCents})
 
     @app.put("/api/settings/budget-suggestion-windows")
     def saveBudgetSuggestionWindows():
-        settingsRequest = request.get_json(silent=True) or {}
+        settingsRequest = jsonObject()
         return jsonify(setBudgetSuggestionWindows(
             getDatabase(), settingsRequest.get("monthlyDays"),
             settingsRequest.get("quarterlyMonths"), settingsRequest.get("annualMonths"),
@@ -1763,7 +1766,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/flexible-budgets")
     def addFlexibleBudget():
-        budgetRequest = request.get_json(silent=True) or {}
+        budgetRequest = jsonObject()
         budgetId = createFlexibleCategoryBudget(
             getDatabase(), budgetRequest.get("categoryId"), budgetRequest.get("monthlyTarget")
         )
@@ -1771,7 +1774,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/flexible-budgets/<int:budgetId>")
     def editFlexibleBudget(budgetId):
-        budgetRequest = request.get_json(silent=True) or {}
+        budgetRequest = jsonObject()
         updateFlexibleCategoryBudget(
             getDatabase(), budgetId, budgetRequest.get("categoryId"),
             budgetRequest.get("monthlyTarget"), budgetRequest.get("active", True),
@@ -1785,7 +1788,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/expected-income-plans")
     def addExpectedIncome():
-        planRequest = request.get_json(silent=True) or {}
+        planRequest = jsonObject()
         planId = createExpectedIncomePlan(
             getDatabase(), planRequest.get("templateId"), planRequest.get("expectedDate")
         )
@@ -1793,7 +1796,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/expected-income-plans/<int:planId>")
     def editExpectedIncome(planId):
-        planRequest = request.get_json(silent=True) or {}
+        planRequest = jsonObject()
         updateExpectedIncomePlan(
             getDatabase(), planId, planRequest.get("templateId"), planRequest.get("expectedDate"),
             planRequest.get("active", True),
@@ -1807,7 +1810,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/planned-credit-payments")
     def addPlannedPayment():
-        planRequest = request.get_json(silent=True) or {}
+        planRequest = jsonObject()
         planId = createPlannedCreditPayment(
             getDatabase(), planRequest.get("expectedDate"), planRequest.get("accountId"),
             planRequest.get("description"), planRequest.get("amount"),
@@ -1816,7 +1819,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/planned-credit-payments/<int:planId>")
     def editPlannedPayment(planId):
-        planRequest = request.get_json(silent=True) or {}
+        planRequest = jsonObject()
         updatePlannedCreditPayment(
             getDatabase(), planId, planRequest.get("expectedDate"), planRequest.get("accountId"),
             planRequest.get("description"), planRequest.get("amount"), planRequest.get("active", True),
@@ -1830,7 +1833,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.post("/api/sinking-funds")
     def addSinkingFund():
-        planRequest = request.get_json(silent=True) or {}
+        planRequest = jsonObject()
         planId = createSinkingFundPlan(
             getDatabase(), planRequest.get("templateId"), planRequest.get("frequency"),
             planRequest.get("expectedDate"),
@@ -1839,7 +1842,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
 
     @app.patch("/api/sinking-funds/<int:planId>")
     def editSinkingFund(planId):
-        planRequest = request.get_json(silent=True) or {}
+        planRequest = jsonObject()
         updateSinkingFundPlan(
             getDatabase(), planId, planRequest.get("templateId"), planRequest.get("frequency"),
             planRequest.get("expectedDate"), planRequest.get("active", True),
@@ -2012,7 +2015,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
         return jsonify({"snapshot": ledgerMoveSnapshot(getDatabase(), transferId=transferId)})
 
     def movePendingRequest(transactionId=None, transferId=None):
-        moveRequest = request.get_json(silent=True) or {}
+        moveRequest = jsonObject()
         if set(moveRequest) != {"requestId", "snapshot"}:
             raise ValidationError("Move requires requestId and snapshot")
         proposal, created = moveLedgerToPending(getDatabase(), moveRequest["requestId"], moveRequest["snapshot"], transactionId, transferId)
@@ -2070,7 +2073,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
         if request.method == "POST":
             if request.args:
                 raise ValidationError("Submission does not accept query parameters")
-            proposal, created = submitPendingTransaction(connection, g.integration["id"], request.get_json(silent=True))
+            proposal, created = submitPendingEntry(connection, g.integration["id"], request.get_json(silent=True))
             if created: g.pushProposalId = proposal["id"]
             return jsonify(statusResult(proposal)), 201 if created else 200
         if set(request.args) - {"limit", "offset", "submissionId", "status"}:
@@ -2117,7 +2120,7 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
                         raise ValidationError(f"{label} ID must be a positive integer") from error
                     if selectedId < 1:
                         raise ValidationError(f"{label} ID must be a positive integer")
-        result = app.make_response(readView()).get_json()
+        result = app.make_response(readView(includeEligibility=True) if resource == "templates" else readView()).get_json()
         if resource == "accounts":
             for account in result:
                 account.update(accountEligibility(account))
@@ -2127,18 +2130,6 @@ def createApp(databasePathOverride=None, configurationDirectory=None, clearSaved
         if resource == "categories":
             for category in result:
                 category["ordinaryEligible"] = bool(category["active"] and not category["hasChildren"])
-        if resource == "templates":
-            for template in result:
-                template["ordinaryEligible"] = bool(template["active"])
-                if template["accountId"]:
-                    account = getDatabase().execute("SELECT active, accountClass FROM scopedaccounts WHERE id = ?", (template["accountId"],)).fetchone()
-                    template["ordinaryEligible"] = bool(template["ordinaryEligible"] and account and account["active"] and account["accountClass"] != "system")
-                if template["categoryId"]:
-                    try:
-                        category = getSelectableCategory(getDatabase(), template["categoryId"])
-                        template["reportingRole"] = category["reportingRole"]
-                    except ValidationError:
-                        template["ordinaryEligible"] = False
         if resource == "transactions":
             limit, offset = pageBounds()
             events = result["transactions"] if isinstance(result, dict) else result

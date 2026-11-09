@@ -1,4 +1,5 @@
 import tests
+from tests.test_support import PendingFixture
 import json
 import sqlite3
 import os
@@ -9,20 +10,10 @@ import unittest
 
 import database as ledger
 from app import createApp
-from tests import test_pending_next as pendingFixtures
-from tests.test_release_2610 import signIn
+from tests.test_support import signIn
 
 
-class IntegrationTransferDescriptionTests(unittest.TestCase):
-    setUp = pendingFixtures.PendingNextTests.setUp
-    tearDown = pendingFixtures.PendingNextTests.tearDown
-    submit = pendingFixtures.PendingNextTests.submit
-    rows = pendingFixtures.PendingNextTests.rows
-    snapshot = pendingFixtures.PendingNextTests.snapshot
-    integrationUpdateFields = pendingFixtures.PendingNextTests.integrationUpdateFields
-    integrationPendingRow = pendingFixtures.PendingNextTests.integrationPendingRow
-    updateThroughIntegration = pendingFixtures.PendingNextTests.updateThroughIntegration
-
+class IntegrationTransferDescriptionTests(PendingFixture, unittest.TestCase):
     def setEnabled(self, enabled=True):
         response = self.owner.put("/api/settings/integration-transfers", json={"useDefaultDescription": enabled})
         self.assertEqual(200, response.status_code, response.get_json())
@@ -55,7 +46,17 @@ class IntegrationTransferDescriptionTests(unittest.TestCase):
         visa = ledger.createAccount(self.connection, "Visa", "credit", "Credit Card")
         other = ledger.createAccount(self.connection, "Other Debt", "credit", "Other")
         pairs = ((visa, "Visa Card Payment"), (other, "Other Debt Payment"), (self.card, "Example Card Payment"), (cash, "Transfer to Savings"), (loan, "Example Loan Payment"), (card, "Another CARD Payment"), (self.external, "Transfer to External"))
+        edgeCases = (("Scorecard", "Scorecard Card Payment"), ("Visa card", "Visa card Payment"), ("_Card", "_Card Card Payment"), ("éCard", "éCard Payment"), ("Card <script>", "Card <script> Card Payment"))
+        pairs += tuple((ledger.createAccount(self.connection, name, "credit", "Credit Card"), expected) for name, expected in edgeCases)
+        before = self.snapshot()
+        browserAccounts = {row["id"]: row for row in self.owner.get("/api/accounts").get_json()}
+        integrationResponse = self.agent.get("/api/integration/read/accounts", headers=self.headers)
+        self.assertEqual(200, integrationResponse.status_code)
+        integrationAccounts = {row["id"]: row for row in integrationResponse.get_json()}
+        self.assertEqual(before, self.snapshot(), "Catalogue defaults must not write any state")
         for index, (destination, expected) in enumerate(pairs):
+            self.assertEqual(expected, browserAccounts[destination]["defaultTransferDescription"])
+            self.assertEqual(expected, integrationAccounts[destination]["defaultTransferDescription"])
             submitted = {**self.transfer, "submissionId": f"normalized-{index}", "toAccountId": destination}
             response = self.agent.post("/api/integration/submissions", json=submitted, headers=self.headers)
             self.assertEqual(201, response.status_code, response.get_json())
@@ -68,6 +69,101 @@ class IntegrationTransferDescriptionTests(unittest.TestCase):
         ledger.decidePendingTransactions(self.connection, "approve", self.rows())
         self.assertEqual({expected for _, expected in pairs}, {row[0] for row in self.connection.execute("SELECT description FROM transactions")})
         self.assertTrue(all(row[0] == 0 for row in self.connection.execute("SELECT SUM(amountCents) FROM transactions GROUP BY transferId")))
+
+    def testCatalogueRefreshAndAccountChangesPreserveSavedDescriptions(self):
+        self.setEnabled()
+        proposal = self.submit(self.transfer)
+        ledger.createTransfer(self.connection, "2028-02-29", self.cash, self.card, "5.00", "Saved custom payment")
+        plan = ledger.createSimulatorPlan(self.connection, "Example Plan", "2028-02-29")
+        rowId = ledger.saveSimulatorRow(self.connection, plan, None, "transfer", self.cash, self.card, label="Saved custom label", amount="5.00")
+        ledger.updateAccount(self.connection, self.card, "Renamed Loan", "credit", "Personal Loan", active=False)
+        before = self.snapshot()
+        for response in (self.owner.get("/api/accounts"), self.agent.get("/api/integration/read/accounts", headers=self.headers)):
+            self.assertEqual(200, response.status_code)
+            account = next(row for row in response.get_json() if row["id"] == self.card)
+            self.assertEqual("Renamed Loan Payment", account["defaultTransferDescription"])
+            self.assertFalse(account["active"])
+        self.assertEqual("Example Card Payment", self.integrationPendingRow(proposal["id"])["description"])
+        self.assertEqual(["Saved custom payment"] * 2, [row[0] for row in self.connection.execute("SELECT description FROM transactions")])
+        self.assertEqual("Saved custom label", self.connection.execute("SELECT label FROM simulatorRows WHERE id = ?", (rowId,)).fetchone()[0])
+        self.assertEqual(before, self.snapshot())
+        self.assertNotIn("defaultTransferDescription", {row[1] for row in self.connection.execute("PRAGMA table_info(accounts)")})
+        contract = self.owner.get("/openapi.json").get_json()
+        schema = contract["paths"]["/api/integration/read/accounts"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["items"]
+        self.assertIn("defaultTransferDescription", schema["required"])
+        self.assertEqual("string", schema["properties"]["defaultTransferDescription"]["type"])
+
+    def testFrontendSimulatorAndPendingCopyCatalogueDefaultsWithoutChangingSavedDrafts(self):
+        nodePath = os.environ.get("NODE_BINARY") or shutil.which("node") or shutil.which("nodejs")
+        if not nodePath:
+            self.skipTest("JavaScript runtime unavailable")
+        ledger.createAccount(self.connection, "Savings", "cash")
+        ledger.createAccount(self.connection, "Loan", "credit", "Personal Loan")
+        ledger.createAccount(self.connection, "Other <script>", "credit", "Other")
+        catalogue = self.owner.get("/api/accounts").get_json()
+        harness = r"""
+const fs = require("fs"), vm = require("vm"), assert = require("assert/strict");
+const source = fs.readFileSync(process.argv[1], "utf8"), accounts = JSON.parse(fs.readFileSync(0, "utf8"));
+class Element {
+ constructor(tag) {this.tag=tag;this.children=[];this.dataset={};this.events={};this.value="";this.className="";const names=new Set();this.classList={add:name=>names.add(name),remove:name=>names.delete(name),contains:name=>names.has(name)};}
+ append(...items){this.children.push(...items);}
+ replaceChildren(...items){this.children=[...items];}
+ insertCell(){const cell=new Element("td");this.append(cell);return cell;}
+ insertBefore(item,before){this.children.splice(this.children.indexOf(before),0,item);}
+ addEventListener(name,handler){(this.events[name]??=[]).push(handler);}
+ dispatch(name){for(const handler of this.events[name]||[])handler({});}
+ setAttribute(){}
+ matches(selector){return selector.startsWith(".")?this.className.split(" ").includes(selector.slice(1))||this.classList.contains(selector.slice(1)):this.tag===selector;}
+ querySelectorAll(selector){return this.children.filter(child=>child instanceof Element).flatMap(child=>[...(child.matches(selector)?[child]:[]),...child.querySelectorAll(selector)]);}
+ querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
+}
+const body=new Element("tbody");
+const document={createElement:tag=>new Element(tag),querySelector:selector=>{assert.equal(selector,"#simulatorRows");return body;}};
+function select(rows,placeholder,value){const control=new Element("select");control.value=String(value??"");return control;}
+let previews=0;
+const context={accounts,document,simulatorDirtyRows:new Set(),simulatorSelect:select,simulatorAccountSelect:select,dollars:()=>"$5.00",pendingDecisionBusy:false,previewPendingRow:()=>previews++};
+vm.createContext(context);
+vm.runInContext(source.slice(source.indexOf("function appendSimulatorRow("),source.indexOf("function recordSimulatorRow(")),context);
+const cash=accounts.find(account=>account.accountClass==="cash"),card=accounts.find(account=>account.accountClass==="credit");
+for(const rowType of ["transfer","payoff"]){
+ const saved={id:10,rowType,fromAccountId:cash.id,toAccountId:card.id,label:"Saved <custom> label",amountCents:500,effectiveAmountCents:500};
+ context.appendSimulatorRow(saved);
+ const row=body.children.at(-1),accountCell=row.children[2],label=()=>row.children[3].querySelector("input");
+ assert.equal(label().value,saved.label,"Rendering an existing row preserves its label");
+ const destination=accountCell.querySelector(".toAccount"),from=accountCell.querySelector(".fromAccount");
+ label().value="User's custom label";from.dispatch("change");assert.equal(label().value,"User's custom label");
+ for(const account of accounts){
+  label().value="User's custom label";destination.value=String(account.id);destination.dispatch("change");
+  assert.equal(label().value,["cash","credit"].includes(account.accountClass)?account.defaultTransferDescription:"User's custom label");
+ }
+ destination.value="999999";label().value="Keep unavailable destination label";destination.dispatch("change");assert.equal(label().value,"Keep unavailable destination label");
+ const cancel=row.children[5].querySelectorAll("button").find(button=>button.textContent==="Cancel Changes");
+ cancel.dispatch("click");assert.equal(label().value,saved.label);assert.equal(accountCell.querySelector(".toAccount").value,String(card.id));
+}
+// Exercise the Pending draft, default-button state, and cancellation together.
+const draftStart=source.indexOf("function pendingDraft("),draftEnd=source.indexOf("\nfunction ",draftStart+1);
+vm.runInContext(source.slice(draftStart,draftEnd),context);
+const actionsStart=source.indexOf("function updatePendingRowActions("),actionsEnd=source.indexOf("async function savePendingRow(",actionsStart);
+vm.runInContext(source.slice(actionsStart,actionsEnd)+source.slice(source.indexOf("function pendingTransferDefaultDescription("),source.indexOf("async function previewPendingRow(")),context);
+const fields=Object.fromEntries(Object.entries({fromAccountId:String(cash.id),toAccountId:String(card.id),description:"Saved custom description",date:"2028-02-29",amount:"5.00"}).map(([name,value])=>[name,{value,dataset:{pendingField:name}}]));
+const button={setAttribute(){}};
+const row={dataset:{id:"20",kind:"transfer"},saving:false,classList:{toggle(){}},querySelectorAll:()=>Object.values(fields),querySelector(selector){if(selector==="[data-pending-default-description]")return button;if(selector.startsWith("[data-pending-field="))return fields[selector.match(/data-pending-field="?([^"\]]+)/)[1]];return {};}};
+row.savedDraft=JSON.parse(JSON.stringify(context.pendingDraft(row)));
+context.updatePendingRowActions(row);assert.equal(fields.description.value,"Saved custom description");assert.equal(button.disabled,false);
+for(const account of accounts){
+ fields.toAccountId.value=String(account.id);fields.description.value="User draft";
+ assert.equal(context.usePendingTransferDescription(row),true);assert.equal(fields.description.value,account.defaultTransferDescription);assert.equal(button.disabled,true);
+ fields.description.value+=" edited";context.updatePendingRowActions(row);assert.equal(button.disabled,false);
+}
+fields.toAccountId.value="999999";fields.description.value="Keep unavailable destination description";context.updatePendingRowActions(row);assert.equal(button.disabled,true);assert.equal(context.usePendingTransferDescription(row),false);assert.equal(fields.description.value,"Keep unavailable destination description");
+fields.toAccountId.value=String(card.id);
+for(const busy of ["saving","decision"]){row.saving=busy==="saving";context.pendingDecisionBusy=busy==="decision";assert.equal(context.usePendingTransferDescription(row),false);assert.equal(fields.description.value,"Keep unavailable destination description");}
+row.saving=false;context.pendingDecisionBusy=false;context.cancelPendingRowChanges(row);assert.equal(fields.description.value,row.savedDraft.description);assert.equal(fields.toAccountId.value,row.savedDraft.toAccountId);
+assert(previews>0);
+"""
+        javascriptPath = Path(__file__).resolve().parents[1] / "app.js"
+        result = subprocess.run([nodePath, "-e", harness, str(javascriptPath)], input=json.dumps(catalogue), capture_output=True, text=True, timeout=15)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def testUpdatesUseChangedDestinationAndOwnerManualAndOrdinaryStayEditable(self):
         self.setEnabled()
@@ -172,14 +268,12 @@ assert.equal(errorElement.textContent, "Save failed");
 assert.deepEqual(JSON.parse(request.options.body), {useDefaultDescription: false});
 assert.equal(prevented, 2);
 assert(source.includes('defaultDescription.addEventListener("click", () => usePendingTransferDescription(row))'));
-const begin = source.indexOf("function paymentDescription(account)");
-const end = source.indexOf("function updateTransferPresentation", begin);
 const pendingBegin = source.indexOf("function pendingTransferDefaultDescription(row)");
 const pendingEnd = source.indexOf("function cancelPendingRowChanges", pendingBegin);
 let actions = 0, previews = 0;
-const pendingContext = {accounts: [{id: 1, name: "Visa", accountClass: "credit", accountSubtype: "Credit Card"}], pendingDecisionBusy: false, updatePendingRowActions: () => actions++, previewPendingRow: () => previews++};
+const pendingContext = {accounts: [{id: 1, name: "Visa", accountClass: "credit", accountSubtype: "Credit Card", defaultTransferDescription: "Visa Card Payment"}], pendingDecisionBusy: false, updatePendingRowActions: () => actions++, previewPendingRow: () => previews++};
 vm.createContext(pendingContext);
-vm.runInContext(source.slice(begin, end) + source.slice(pendingBegin, pendingEnd), pendingContext);
+vm.runInContext(source.slice(pendingBegin, pendingEnd), pendingContext);
 const description = {value: "Incorrect"};
 const row = {dataset: {kind: "transfer"}, saving: false, querySelector: selector => selector.includes("toAccountId") ? {value: "1"} : description};
 pendingContext.row = row;

@@ -1,40 +1,19 @@
+"""Budget calculations and Simulator allocation and utilization."""
+
+import tests  # Enable the production-database guard before application imports.
+from tests.test_support import initializeTestDatabase
 import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
-
-import tests  # Activates production-database isolation before importing database code.
-from database import (
-    ValidationError,
-    budgetTemplateSuggestions,
-    connectDatabase,
-    createAccount,
-    createCategory,
-    createExpectedIncomePlan,
-    createFlexibleCategoryBudget,
-    createPlannedCreditPayment,
-    createSinkingFundPlan,
-    createTemplate,
-    createTransaction,
-    deleteTemplate,
-    initializeDatabase,
-    setPaychecksPerYear,
-    setSuggestionRounding,
-    setBudgetSuggestionWindows,
-    sinkingFundOccurrenceRange,
-    sinkingFundSummary,
-    updateTemplate,
-)
+from database import ValidationError, budgetTemplateSuggestions, createAccount, createCategory, createExpectedIncomePlan, createFlexibleCategoryBudget, createPlannedCreditPayment, createSinkingFundPlan, createTemplate, createTransaction, deleteTemplate, setPaychecksPerYear, setSuggestionRounding, setBudgetSuggestionWindows, sinkingFundOccurrenceRange, sinkingFundSummary, updateTemplate
 from tests.test_support import createScenarioCategories
+import database
 from tests.test_support import connectFixtureDatabase as connectDatabase
-
 
 class BudgetPhaseOneTests(unittest.TestCase):
     def setUp(self):
-        self.temporaryDirectory = tempfile.TemporaryDirectory()
-        self.databasePath = Path(self.temporaryDirectory.name) / "budget.db"
-        initializeDatabase(self.databasePath)
-        self.connection = connectDatabase(self.databasePath)
+        initializeTestDatabase(self, "budget.db")
         self.categoryIds = createScenarioCategories(self.connection)
         self.accountId = createAccount(self.connection, "Checking", "cash")
         self.templateId = createTemplate(
@@ -42,9 +21,48 @@ class BudgetPhaseOneTests(unittest.TestCase):
             self.categoryIds["Wants"], "1200.00", 1,
         )
 
-    def tearDown(self):
-        self.connection.close()
-        self.temporaryDirectory.cleanup()
+    def testPlanningTemplateCompletenessRetainsRoleRulesAndErrors(self):
+        cases = [({}, True), ({"accountId": None}, True), ({"active": 0}, False),
+                 ({"description": None}, False), ({"categoryId": None}, False),
+                 ({"enteredAmountCents": None}, False), ({"enteredAmountCents": -100}, False)]
+        for role, categoryId, validator, message in (
+            ("expense", self.categoryIds["Wants"], database.validateCompleteExpenseTemplate, "Sinking Fund plans require a complete active Expense template with a positive amount"),
+            ("income", self.categoryIds["Income/Reimbursement"], database.validateCompleteIncomeTemplate, "Expected income plans require a complete active Income template with a positive amount"),
+        ):
+            templateId = createTemplate(self.connection, f"Completeness {role}", self.accountId, "Explicit label", categoryId, "1.00")
+            for changes, valid in cases:
+                with self.subTest(role=role, changes=changes):
+                    with self.connection:
+                        self.connection.execute("UPDATE transactionTemplates SET active = 1, description = 'Explicit label', accountId = ?, categoryId = ?, enteredAmountCents = 100 WHERE id = ?", (self.accountId, categoryId, templateId))
+                        for field, value in changes.items():
+                            self.connection.execute(f"UPDATE transactionTemplates SET {field} = ? WHERE id = ?", (value, templateId))
+                    before = list(self.connection.iterdump())
+                    if valid:
+                        self.assertEqual(templateId, validator(self.connection, templateId)["id"])
+                    else:
+                        with self.assertRaises(ValidationError) as raised:
+                            validator(self.connection, templateId)
+                        self.assertEqual(message, str(raised.exception))
+                    self.assertEqual(before, list(self.connection.iterdump()))
+            with self.connection:
+                self.connection.execute("UPDATE transactionTemplates SET active=1, description='Explicit label', accountId=?, categoryId=?, enteredAmountCents=100 WHERE id=?", (self.accountId, categoryId, templateId))
+            for table, identifier in (("accounts", self.accountId), ("categories", categoryId)):
+                with self.connection:
+                    self.connection.execute(f"UPDATE {table} SET active = 0 WHERE id = ?", (identifier,))
+                with self.assertRaises(ValidationError) as raised:
+                    validator(self.connection, templateId)
+                self.assertEqual(message, str(raised.exception))
+                with self.connection:
+                    self.connection.execute(f"UPDATE {table} SET active = 1 WHERE id = ?", (identifier,))
+            otherValidator = database.validateCompleteIncomeTemplate if role == "expense" else database.validateCompleteExpenseTemplate
+            with self.assertRaises(ValidationError):
+                otherValidator(self.connection, templateId)
+        with self.assertRaises(ValidationError) as raised:
+            database.validateCompleteExpenseTemplate(self.connection, -1)
+        self.assertEqual("Template does not exist", str(raised.exception))
+        with self.assertRaises(ValidationError) as raised:
+            database.validateCompleteIncomeTemplate(self.connection, -1)
+        self.assertEqual("Expected income plans require a complete active Income template with a positive amount", str(raised.exception))
 
     def testQuarterlyAndYearlyIntegerCentCalculations(self):
         setPaychecksPerYear(self.connection, "26")
@@ -304,6 +322,171 @@ class BudgetPhaseOneTests(unittest.TestCase):
         self.assertEqual(3000, next(row for row in rounded["flexibleCategories"] if row["id"] == self.categoryIds["Wants"])["suggestionCents"])
         self.assertEqual(7777, rounded["flexibleBudgets"][0]["monthlyTargetCents"])
         self.assertEqual(7777, rounded["monthlyRequirementCents"])
+
+class ExternalSimulatorAllocationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.databasePath = Path(self.directory.name) / "explicit-external-allocation.db"
+        database.initializeDatabase(self.databasePath)
+        self.connection = connectDatabase(self.databasePath)
+        self.addCleanup(self.connection.close)
+        self.cashId = database.createAccount(self.connection, "Fictional Cash", "cash", openingBalance="90.00")
+        self.externalId = self.connection.execute("SELECT id FROM accounts WHERE systemIdentity = 'external'").fetchone()[0]
+        self.planId = database.createSimulatorPlan(self.connection, "Fictional allocation", "2026-10-17")
+
+    def workspace(self):
+        return database.simulatorWorkspace(self.connection, self.planId)["plan"]
+
+    def transfer(self, incoming, amount="50.00", cashId=None):
+        cashId = cashId or self.cashId
+        return database.saveSimulatorRow(self.connection, self.planId, None, "transfer", self.externalId if incoming else cashId, cashId if incoming else self.externalId, label="Fictional boundary transfer", amount=amount)
+
+    def testBothDirectionsSelectedAndUnselected(self):
+        for selected in [False, True]:
+            for incoming in [False, True]:
+                with self.subTest(selected=selected, incoming=incoming):
+                    with self.connection:
+                        self.connection.execute("DELETE FROM simulatorRows")
+                    if selected:
+                        database.saveSimulatorRow(self.connection, self.planId, None, "live", self.cashId)
+                    self.transfer(incoming)
+                    plan = self.workspace()
+                    totals = plan["totals"]
+                    expectedContribution = (-5000 if incoming else 5000) if selected else 0
+                    self.assertEqual(9000 if selected else 0, totals["startingCashCents"])
+                    self.assertEqual(expectedContribution, totals["transfersPaymentsCents"])
+                    self.assertEqual((9000 if selected else 0) - expectedContribution, totals["unallocatedMoneyCents"])
+                    self.assertEqual((0, 0), (totals["plannedIncomeCents"], totals["plannedSpendingCents"]))
+                    self.assertEqual([self.cashId], [row["id"] for row in plan["results"]])
+                    self.assertEqual(14000 if incoming else 4000, plan["results"][0]["projectedBalanceCents"])
+                    self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
+
+    def testChangingLivePoolAndRefreshPreservesTransfer(self):
+        rowId = self.transfer(True)
+        before = dict(self.connection.execute("SELECT * FROM simulatorRows WHERE id = ?", (rowId,)).fetchone())
+        self.assertEqual(0, self.workspace()["totals"]["unallocatedMoneyCents"])
+        liveId = database.saveSimulatorRow(self.connection, self.planId, None, "live", self.cashId)
+        self.assertEqual(14000, self.workspace()["totals"]["unallocatedMoneyCents"])
+        database.deleteSimulatorRow(self.connection, self.planId, liveId)
+        self.assertEqual(0, self.workspace()["totals"]["unallocatedMoneyCents"])
+        self.assertEqual(before, dict(self.connection.execute("SELECT * FROM simulatorRows WHERE id = ?", (rowId,)).fetchone()))
+        otherConnection = connectDatabase(self.databasePath)
+        try:
+            self.assertEqual(0, database.simulatorWorkspace(otherConnection, self.planId)["plan"]["totals"]["unallocatedMoneyCents"])
+        finally:
+            otherConnection.close()
+
+    def testMultipleCashAccountsOffsetAndNegativeAllocation(self):
+        secondCash = database.createAccount(self.connection, "Second fictional cash", "cash", openingBalance="10.00")
+        for cashId in [self.cashId, secondCash]:
+            database.saveSimulatorRow(self.connection, self.planId, None, "live", cashId)
+        self.transfer(True)
+        self.transfer(False, cashId=secondCash)
+        self.assertEqual(0, self.workspace()["totals"]["transfersPaymentsCents"])
+        self.transfer(False, "150.00")
+        self.assertEqual(-5000, self.workspace()["totals"]["unallocatedMoneyCents"])
+        with self.connection:
+            self.connection.execute("UPDATE accounts SET active = 0 WHERE id = ?", (secondCash,))
+        self.assertEqual(-5000, self.workspace()["totals"]["unallocatedMoneyCents"])
+
+    def testRecordedTransfersAndPayoffsRollbackPairAndLinkFailures(self):
+        import sqlite3
+        creditId = database.createAccount(self.connection, "Synthetic Card", "credit", "Credit Card", openingBalance="40.00")
+        for rowType in ("transfer", "payoff"):
+            for failure in ("source", "destination", "execution"):
+                with self.subTest(rowType=rowType, failure=failure):
+                    rowId = database.saveSimulatorRow(self.connection, self.planId, None, rowType, self.cashId, creditId, label="Saved draft", amount="10.00")
+                    if failure == "execution":
+                        statement = f"CREATE TRIGGER failRecordedTransfer BEFORE UPDATE ON simulatorRows WHEN NEW.id = {rowId} AND NEW.executed = 1 BEGIN SELECT RAISE(ABORT, 'forced execution failure'); END"
+                    else:
+                        sign = "<" if failure == "source" else ">"
+                        statement = f"CREATE TRIGGER failRecordedTransfer BEFORE INSERT ON transactions WHEN NEW.transferId IS NOT NULL AND NEW.amountCents {sign} 0 BEGIN SELECT RAISE(ABORT, 'forced pair failure'); END"
+                    with self.connection:
+                        self.connection.execute(statement)
+                    before = list(self.connection.iterdump())
+                    with self.assertRaisesRegex(sqlite3.IntegrityError, "forced .* failure"):
+                        database.recordSimulatorTransfer(self.connection, self.planId, rowId, "2024-02-29", self.cashId, creditId, "10.00", "Confirmed payment")
+                    self.assertEqual(before, list(self.connection.iterdump()), "Both ledger inserts, audits, and execution changes must roll back together")
+                    with self.connection:
+                        self.connection.execute("DROP TRIGGER failRecordedTransfer")
+                    transferId, sourceId = database.recordSimulatorTransfer(self.connection, self.planId, rowId, "2024-02-29", self.cashId, creditId, "10.00", "Confirmed payment")
+                    rows = self.connection.execute("SELECT * FROM transactions WHERE transferId = ? ORDER BY amountCents", (transferId,)).fetchall()
+                    self.assertTrue(database.validTransferRows(rows))
+                    self.assertEqual(sourceId, rows[0]["id"])
+                    saved = self.connection.execute("SELECT * FROM simulatorRows WHERE id = ?", (rowId,)).fetchone()
+                    self.assertEqual((1, sourceId, "fixed"), tuple(saved[field] for field in ("executed", "executedTransactionId", "amountMode")))
+                    if rowType == "payoff":
+                        self.assertEqual((1000, "Confirmed payment"), (saved["amountCents"], saved["label"]))
+
+    def testRecordedTransferIsZeroSumAndExcludedFromPlannedTotals(self):
+        database.saveSimulatorRow(self.connection, self.planId, None, "live", self.cashId)
+        rowId = self.transfer(True)
+        database.recordSimulatorTransfer(self.connection, self.planId, rowId, "2026-10-17", self.externalId, self.cashId, "50.00", "Fictional boundary transfer")
+        plan = self.workspace()
+        self.assertEqual((14000, 0, 14000), (plan["totals"]["startingCashCents"], plan["totals"]["transfersPaymentsCents"], plan["totals"]["unallocatedMoneyCents"]))
+        self.assertEqual((2, 0), tuple(self.connection.execute("SELECT COUNT(*), SUM(amountCents) FROM transactions").fetchone()))
+        self.assertEqual((0, 0), (database.dashboardReport(self.connection)["incomeCents"], database.dashboardReport(self.connection)["expensesCents"]))
+
+    def testExternalCreditPaymentRetainsAllocationDeduction(self):
+        creditId = database.createAccount(self.connection, "Fictional Card", "credit", "Credit Card", openingBalance="100.00")
+        database.saveSimulatorRow(self.connection, self.planId, None, "live", self.cashId)
+        database.saveSimulatorRow(self.connection, self.planId, None, "transfer", self.externalId, creditId, label="Fictional card payment", amount="50.00")
+        plan = self.workspace()
+        self.assertEqual((5000, 4000), (plan["totals"]["transfersPaymentsCents"], plan["totals"]["unallocatedMoneyCents"]))
+        self.assertEqual(-5000, next(row for row in plan["results"] if row["id"] == creditId)["projectedBalanceCents"])
+        self.assertNotIn(self.externalId, [row["id"] for row in plan["results"]])
+
+class UtilizationThresholdTests(unittest.TestCase):
+    def testExactThresholdsAndRoundedLabels(self):
+        for owedCents, expectedState, expectedLabel in [
+            (0, "green", "0.00%"), (-100, "green", "0.00%"),
+            (29995, "green", "30.00%"), (29996, "green", "30.00%"),
+            (30000, "yellow", "30.00%"), (30001, "yellow", "30.00%"),
+            (49996, "yellow", "50.00%"), (50000, "red", "50.00%"),
+            (50001, "red", "50.00%"), (125000, "red", "125.00%"),
+        ]:
+            with self.subTest(owedCents=owedCents):
+                status = database.utilizationStatus(owedCents, 100000, "Fictional utilization")
+                self.assertEqual((expectedState, expectedLabel), (status["state"], status["label"]))
+                self.assertEqual(f"Fictional utilization: {expectedLabel}", status["accessibleLabel"])
+        self.assertIsNone(database.utilizationStatus(100, None, "Unavailable"))
+        self.assertIsNone(database.utilizationStatus(0, 0, "Unavailable"))
+        self.assertEqual("green", database.utilizationStatus(29996000000000000000000, 100000000000000000000000, "Large exact")["state"])
+
+    def testSimulatorUsesSameExactClassificationAtProjectedBoundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            databasePath = Path(directory) / "explicit-utilization.db"
+            database.initializeDatabase(databasePath)
+            connection = connectDatabase(databasePath)
+            try:
+                planId = database.createSimulatorPlan(connection, "Fictional limits", "2026-10-17")
+                cardId = database.createAccount(connection, "Fictional Card", "credit", "Credit Card", openingBalance="299.96", creditLimit="1000.00", utilizationWarning="30.00")
+                database.saveSimulatorRow(connection, planId, None, "spend", cardId, label="Small fictional charge", amount="200.00")
+                result = database.simulatorWorkspace(connection, planId)["plan"]["results"][0]
+                self.assertEqual((-49996, "50.00%", "yellow"), (result["projectedBalanceCents"], result["projectedUtilization"]["label"], result["projectedUtilization"]["state"]))
+                expected = database.utilizationStatus(49996, 100000, "Fictional Card projected utilization")
+                self.assertEqual(expected, result["projectedUtilization"])
+                with connection:
+                    connection.execute("UPDATE simulatorRows SET amountCents = 20004 WHERE planId = ?", (planId,))
+                self.assertEqual("red", database.simulatorWorkspace(connection, planId)["plan"]["results"][0]["projectedUtilization"]["state"])
+                self.assertEqual(3000, connection.execute("SELECT utilizationWarningBasisPoints FROM accounts WHERE id = ?", (cardId,)).fetchone()[0])
+            finally:
+                connection.close()
+
+    def testIneligibleProjectedAccountsHaveNoBadge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            databasePath = Path(directory) / "explicit-ineligible-utilization.db"
+            database.initializeDatabase(databasePath)
+            connection = connectDatabase(databasePath)
+            try:
+                planId = database.createSimulatorPlan(connection, "Fictional ineligible", "2026-10-17")
+                for name, accountClass, subtype in [("Fictional Cash", "cash", None), ("Fictional Loan", "credit", "Personal Loan"), ("Fictional Other", "credit", "Other"), ("Fictional Unlimited", "credit", "Credit Card")]:
+                    accountId = database.createAccount(connection, name, accountClass, subtype)
+                    database.saveSimulatorRow(connection, planId, None, "spend", accountId, label="Fictional charge", amount="10.00")
+                self.assertTrue(all(row["projectedUtilization"] is None for row in database.simulatorWorkspace(connection, planId)["plan"]["results"]))
+            finally:
+                connection.close()
 
 
 if __name__ == "__main__":

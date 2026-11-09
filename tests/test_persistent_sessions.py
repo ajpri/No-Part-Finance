@@ -1,5 +1,6 @@
 """Persistent login uses isolated synthetic databases; production is never opened."""
 import tests
+from tests.test_support import RecoveryFixture, SessionFixture
 
 import concurrent.futures
 import hashlib
@@ -14,17 +15,12 @@ from unittest.mock import patch
 import database as ledger
 from app import createApp
 from packageApplication import createVerifiedDatabaseCopy
-from tests import test_sessions as sessionTests
-from tests import test_recovery_routes as recoveryTests
 from users import setUserEnabled, resetPassword
 
 
-class PersistentSessionTests(unittest.TestCase):
-    login = sessionTests.SessionManagementTests.login
-    sessions = sessionTests.SessionManagementTests.sessions
-
+class PersistentSessionTests(SessionFixture, unittest.TestCase):
     def setUp(self):
-        sessionTests.SessionManagementTests.setUp(self)
+        SessionFixture.setUp(self)
         self.configurationPath = self.path.parent / "platform.conf"
         self.configurationPath.write_text("persistLoginOnRestart = true\n")
         self.application = createApp(self.path)
@@ -154,10 +150,10 @@ class PersistentSessionTests(unittest.TestCase):
         self.assertEqual(200, self.restoredClient(first).get("/api/session").status_code)
         self.assertEqual(200, self.restoredClient(remote).get("/api/session").status_code)
 
-    testPersistentUserIsolationAndPublicIds = sessionTests.SessionManagementTests.testOwnSessionsPublicIdentifiersClientsAndIndividualRevocation
-    testPersistentBackgroundActivity = sessionTests.SessionManagementTests.testBackgroundRequestsUpdateIpWithoutLastActivity
-    testPersistentRolesAndNoLedger = sessionTests.SessionManagementTests.testAllRolesNoLedgerAndDisabledSelfService
-    testPersistentCsrfAndPayloads = sessionTests.SessionManagementTests.testAuthorizationCsrfAndInvalidPayloads
+    testPersistentUserIsolationAndPublicIds = SessionFixture.checkOwnSessionsPublicIdentifiersClientsAndIndividualRevocation
+    testPersistentBackgroundActivity = SessionFixture.checkBackgroundRequestsUpdateIpWithoutLastActivity
+    testPersistentRolesAndNoLedger = SessionFixture.checkAllRolesNoLedgerAndDisabledSelfService
+    testPersistentCsrfAndPayloads = SessionFixture.checkAuthorizationCsrfAndInvalidPayloads
 
     def testLogoutFailureRollsBackDurableRevocation(self):
         current = self.login()
@@ -288,7 +284,7 @@ class PersistentSessionTests(unittest.TestCase):
                 loadConfiguration(self.path.parent)
             self.assertNotIn("invalid-secret", str(raised.exception))
 
-    def testCombinedSchema31UpgradeAndFailedUpgradeRecovery(self):
+    def testCombinedAccountSessionUpgradeAndFailedUpgradeRecovery(self):
         for fail in (False, True):
             path = self.path.parent / ("legacy-failure.db" if fail else "legacy-success.db")
             with patch.object(ledger, "schemaVersion", 30):
@@ -319,7 +315,7 @@ class PersistentSessionTests(unittest.TestCase):
             with sqlite3.connect(backups.pop()) as connection:
                 self.assertEqual(before, "\n".join(connection.iterdump()))
 
-    def testEarlierSchema31BackupGainsSessionsWithVerifiedRollback(self):
+    def testEarlierRecoveryBackupGainsSessionsWithVerifiedRollback(self):
         for fail in (False, True):
             path = self.path.parent / ("earlier31-failure.db" if fail else "earlier31-success.db")
             ledger.initializeDatabase(path)
@@ -353,13 +349,9 @@ class PersistentSessionTests(unittest.TestCase):
                 self.assertEqual(before, "\n".join(connection.iterdump()))
 
 
-class PersistentRecoveryTests(unittest.TestCase):
-    csrf = recoveryTests.RecoveryRouteTests.csrf
-    login = recoveryTests.RecoveryRouteTests.login
-    issue = recoveryTests.RecoveryRouteTests.issue
-
+class PersistentRecoveryTests(RecoveryFixture, unittest.TestCase):
     def setUp(self):
-        recoveryTests.RecoveryRouteTests.setUp(self)
+        RecoveryFixture.setUp(self)
         configurationPath = self.root / "platform.conf"
         configurationPath.write_text(configurationPath.read_text() + "\npersistLoginOnRestart = true\n")
         self.application = createApp(self.path)

@@ -47,6 +47,51 @@ class HardeningTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def testNonObjectJsonBodiesFailClearlyWithoutWritesOrServerErrors(self):
+        import json
+        routes = [
+            ("POST", "/api/money/evaluate"),
+            ("POST", "/api/accounts"), ("PATCH", "/api/accounts/1"),
+            ("POST", "/api/accounts/minimum-helper"), ("POST", "/api/accounts/utilization-warning-helper"),
+            ("POST", "/api/accounts/1/reconciliation"),
+            ("POST", "/api/categories"), ("PATCH", "/api/categories/1"),
+            ("POST", "/api/simulator/send"), ("POST", "/api/simulator/plans"),
+            ("PATCH", "/api/simulator/plans/1"), ("POST", "/api/simulator/plans/1/rows"),
+            ("PATCH", "/api/simulator/plans/1/rows/1"),
+            ("DELETE", "/api/simulator/plans/1/executed-rows"),
+            ("PATCH", "/api/simulator/plans/1/rows/1/execution"),
+            ("POST", "/api/simulator/plans/1/rows/1/transaction"),
+            ("POST", "/api/simulator/plans/1/rows/1/transfer"),
+            ("PUT", "/api/settings/reimbursement-category"),
+            ("POST", "/api/transactions"), ("POST", "/api/transactions/bulk"),
+            ("PATCH", "/api/transactions/1"),
+            ("POST", "/api/transfers"), ("PATCH", "/api/transfers/example"),
+            ("POST", "/api/templates"), ("PATCH", "/api/templates/1"),
+            ("PUT", "/api/settings/paychecks-per-year"), ("PUT", "/api/settings/suggestion-rounding"),
+            ("PUT", "/api/settings/budget-suggestion-windows"),
+            ("POST", "/api/flexible-budgets"), ("PATCH", "/api/flexible-budgets/1"),
+            ("POST", "/api/expected-income-plans"), ("PATCH", "/api/expected-income-plans/1"),
+            ("POST", "/api/planned-credit-payments"), ("PATCH", "/api/planned-credit-payments/1"),
+            ("POST", "/api/sinking-funds"), ("PATCH", "/api/sinking-funds/1"),
+            ("POST", "/api/transactions/1/move-to-pending"),
+            ("POST", "/api/transfers/example/move-to-pending"),
+        ]
+        connection = connectDatabase(self.databasePath)
+        self.addCleanup(connection.close)
+        before = list(connection.iterdump())
+        bodies = [json.dumps(value) for value in ([], [1], "text", 12, True, False, None)] + ["{", ""]
+        with patch.object(self.app.logger, "exception") as unexpectedFailure:
+            for method, path in routes:
+                for body in bodies:
+                    with self.subTest(method=method, path=path, body=body):
+                        response = self.client.open(path, method=method, data=body, content_type="application/json")
+                        self.assertEqual(400, response.status_code, response.get_data(as_text=True))
+                        self.assertEqual({"error": "Request body must be a JSON object"}, response.get_json())
+            unexpectedFailure.assert_not_called()
+        self.assertEqual(401, self.app.test_client().post("/api/transactions", json=[1]).status_code)
+        self.assertEqual(403, self.client.post("/api/transactions", json=[1], headers={"X-CSRF-Token": "invalid"}).status_code)
+        self.assertEqual(before, list(connection.iterdump()))
+
     def testBackupIsValidConsistentSQLiteDatabase(self):
         accountId, _ = self.seedTransaction()
         response = self.client.get("/api/backup")

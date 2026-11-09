@@ -1,6 +1,8 @@
+"""Pending review, arrival checks, retries, signs, and atomic decisions."""
+
+import tests  # Enable the production-database guard before application imports.
+from tests.test_support import PendingFixture
 from tests.test_support import useHistoricalSchema21
-from tests.test_support import snapshotWithoutLoginTime
-import tests
 import json
 import sqlite3
 import tempfile
@@ -8,52 +10,17 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
 from app import createApp
 import database as ledger
+from tests.test_support import signIn
+import os
+import subprocess
+from unittest.mock import patch
 from users import createUser
-from tests.test_release_2610 import signIn
 from tests.test_support import connectFixtureDatabase as connectDatabase
+from tests.test_support import PwaFixture
 
-
-class PendingNextTests(unittest.TestCase):
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.path = Path(self.directory.name) / "synthetic.db"
-        self.backupsPath = Path(self.directory.name) / "backups"
-        self.backupsPath.mkdir()
-        ledger.initializeDatabase(self.path)
-        self.connection = connectDatabase(self.path)
-        createUser(self.connection, "owner", "Owner", "owner password", firstName="Owner")
-        createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
-        self.cash = ledger.createAccount(self.connection, "Example Cash", "cash", openingBalance="100.00")
-        self.card = ledger.createAccount(self.connection, "Example Card", "credit", "Credit Card", openingBalance="20.00")
-        self.expense = ledger.createCategory(self.connection, "Example Expense")
-        self.income = ledger.createCategory(self.connection, "Example Income", reportingRole="income")
-        self.external = self.connection.execute("SELECT id FROM accounts WHERE systemIdentity = 'external'").fetchone()[0]
-        self.integration = ledger.createIntegrationSecret(self.connection, "Example Agent")
-        secret = self.connection.execute("SELECT secret FROM integrationSecrets WHERE id = ?", (self.integration,)).fetchone()[0]
-        self.headers = {"Authorization": "Bearer " + secret}
-        self.app = createApp(self.path)
-        self.owner = self.app.test_client()
-        self.assertEqual(302, signIn(self.owner).status_code)
-        self.agent = self.app.test_client()
-        self.ordinary = {"submissionId": "ordinary", "date": "2028-02-29", "accountId": self.cash, "description": "Example purchase", "categoryId": self.expense, "amount": "10.00"}
-        self.transfer = {"submissionId": "transfer", "type": "transfer", "date": "2028-02-29", "fromAccountId": self.cash, "toAccountId": self.card, "description": "Example payment", "amount": "50.00"}
-
-    def tearDown(self):
-        self.connection.close()
-        self.directory.cleanup()
-
-    def submit(self, content, manual=False):
-        return ledger.submitPendingEntry(self.connection, None if manual else self.integration, content)[0]
-
-    def rows(self):
-        return [{"id": row["id"], **{key: row[key] for key in ledger.pendingFields(row["kind"])}, "reviewedRole": row["currentRole"], "reviewVersion": row["reviewVersion"]} for row in ledger.pendingReviewRows(self.connection)]
-
-    def snapshot(self):
-        return tuple(snapshotWithoutLoginTime(self.connection))
-
+class PendingEntryTests(PendingFixture, unittest.TestCase):
     def testMixedKindsAndSourcesCountsSignsPinDatesAndNoPendingEffect(self):
         before = self.owner.get("/api/dashboard?period=custom&startDate=1900-01-01&endDate=2100-12-31").get_json()
         self.submit(self.transfer)
@@ -163,7 +130,7 @@ class PendingNextTests(unittest.TestCase):
     def testDocumentedRequestsVersionAndOwnerOnlyContract(self):
         from packageApplication import applicationVersion
         contract = self.owner.get("/openapi.json").get_json()
-        self.assertEqual("26.11", applicationVersion)
+        self.assertEqual("26.11.10", applicationVersion)
         self.assertEqual(applicationVersion, contract["info"]["version"])
         body = contract["paths"]["/api/integration/submissions"]["post"]["requestBody"]["content"]["application/json"]
         shapes = body["schema"]["oneOf"]
@@ -437,7 +404,7 @@ class PendingNextTests(unittest.TestCase):
                 self.connection.execute("UPDATE accounts SET pinnedForSelection = 1 WHERE id = ?", (self.external,))
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
 
-    def testVersion20MigrationPreservesAllStateAndBackup(self):
+    def testPendingReviewMigrationPreservesAllStateAndBackup(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "version20.db"
             ledger.initializeDatabase(path)
@@ -570,20 +537,8 @@ class PendingNextTests(unittest.TestCase):
                 self.connection.execute("UPDATE transactions SET description = 'Transfer', categoryId = NULL, accountId = ? WHERE amountCents > 0", (self.card,))
 
 
-    def integrationUpdateFields(self, row):
-        fields = {key: row[key] for key in ledger.pendingFields(row["kind"])}
-        fields["reviewVersion"] = row["reviewVersion"]
-        if row["kind"] == "transaction":
-            fields["reviewedRole"] = row["currentRole"]
-        return fields
 
-    def integrationPendingRow(self, proposalId):
-        response = self.agent.get("/api/integration/pending", headers=self.headers)
-        self.assertEqual(200, response.status_code)
-        return next(row for row in response.get_json()["rows"] if row["id"] == proposalId)
 
-    def updateThroughIntegration(self, proposalId, fields):
-        return self.agent.put(f"/api/integration/submissions/{proposalId}", headers=self.headers, json=fields)
 
     def testIntegrationPendingReadAllSourcesWithoutWritesOrSecrets(self):
         self.assertEqual({"count": 0, "transactionCount": 0, "transferCount": 0, "rows": []}, self.agent.get("/api/integration/pending", headers=self.headers).get_json())
@@ -855,7 +810,7 @@ class PendingNextTests(unittest.TestCase):
     def testIntegrationPendingPublishedContractAndExamples(self):
         from packageApplication import applicationVersion
         contract = self.owner.get("/openapi.json").get_json()
-        self.assertEqual("26.11", applicationVersion)
+        self.assertEqual("26.11.10", applicationVersion)
         self.assertEqual(applicationVersion, contract["info"]["version"])
         pending = contract["paths"]["/api/integration/pending"]["get"]
         update = contract["paths"]["/api/integration/submissions/{proposalId}"]["put"]
@@ -897,3 +852,94 @@ class PendingNextTests(unittest.TestCase):
         fields = self.integrationUpdateFields(self.integrationPendingRow(manualTransfer["id"]))
         self.assertEqual(200, self.updateThroughIntegration(manualTransfer["id"], {**fields, "description": "Manual transfer correction"}).status_code)
         self.assertEqual("Manual", self.integrationPendingRow(manualTransfer["id"])["label"])
+
+class PendingArrivalTests(PwaFixture, unittest.TestCase):
+    def testPendingStatusIsSmallAuthorizedAndDetectsUnchangedCount(self):
+        baseline = self.client.get("/api/pending/status").get_json()
+        self.assertEqual([], baseline["ids"])
+        response = self.submit("first")
+        self.assertEqual(201, response.status_code, response.get_json())
+        first = self.client.get("/api/pending/status").get_json()
+        self.assertEqual(1, first["count"])
+        self.assertNotIn("rows", first)
+        with self.connection:
+            self.connection.execute("UPDATE pendingSubmissions SET status = 'Rejected' WHERE id = ?", (first["ids"][0],))
+        self.assertEqual(201, self.submit("second").status_code)
+        second = self.client.get("/api/pending/status").get_json()
+        self.assertEqual(first["count"], second["count"])
+        self.assertGreater(second["latestId"], first["latestId"])
+        self.login("Auditor", "auditor password")
+        self.assertEqual(403, self.client.get("/api/pending/status").status_code)
+        self.assertRegex(self.client.get("/api/calendar").get_json()["currentDate"], r"^\d{4}-\d{2}-\d{2}$")
+
+    def testDashboardHasStableActionsAndServerCalendar(self):
+        response = self.client.get("/api/dashboard").get_json()
+        self.assertIn("currentDate", response)
+        shell = self.client.get("/").get_data(as_text=True)
+        self.assertNotIn('id="pendingBanner"', shell)
+        self.assertIn('id="dashboardReviewPendingButton"', shell)
+        self.assertIn('id="dashboardRefreshRetry"', shell)
+
+    def testDashboardLateResponseAndFailureRetainValues(self):
+        node = os.environ.get("NODE_BINARY")
+        if not node:
+            self.skipTest("Set NODE_BINARY to run asynchronous JavaScript checks")
+        source = Path("app.js").read_text()
+        functions = source[source.index("function dashboardQuery()"):source.index("function renderDashboard(dashboard)")]
+        harness = r'''
+const assert = require("node:assert/strict");
+let dashboardRequestId=0, dashboardCurrentDate=null, lastDashboard=null, lastDashboardQuery=null, cachedBalanceSnapshot=null, offlineMode=false;
+let browserSession={ledgerId:"one"};
+const controls={"#dashboardPeriod":{value:"thisMonth"},"#dashboardStartDate":{value:""},"#dashboardEndDate":{value:""},"#dashboardRefreshMessage":{},"#dashboardRefreshRetry":{}};
+const document={body:{dataset:{}},querySelector:(key)=>controls[key]};
+const requests=[]; function api(){return new Promise((resolve,reject)=>requests.push({resolve,reject}));}
+async function cacheDashboard(){}
+let displayed={value:100}; function renderDashboard(result){displayed=result;}
+async function check(){
+ const old=loadDashboard();
+ assert.equal(displayed.value,100);
+ controls["#dashboardPeriod"].value="lastMonth";
+ const fresh=loadDashboard(); requests[1].resolve({value:200,currentDate:"2026-11-01"});await fresh;
+ requests[0].resolve({value:999,currentDate:"2026-10-31"});await old;
+ assert.equal(displayed.value,200);assert.equal(dashboardCurrentDate,"2026-11-01");
+ const failure=loadDashboard(); requests[2].reject(new Error("network"));await failure;
+ assert.equal(displayed.value,200);assert.equal(controls["#dashboardRefreshRetry"].hidden,false);
+}
+'''
+        result = subprocess.run([node, "-e", harness + functions + "check().catch(error=>{console.error(error);process.exit(1)});"], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def testVisibleLifecyclePausesAndHandlesCalendarRollover(self):
+        node = os.environ.get("NODE_BINARY")
+        if not node:
+            self.skipTest("Set NODE_BINARY for browser lifecycle checks")
+        source = Path("app.js").read_text()
+        functions = source[source.index("async function refreshDashboardOnReturn("):source.index('document.addEventListener("visibilitychange"')]
+        harness = r'''
+const assert=require("node:assert/strict");
+let lifecycleReady=true,offlineMode=false,visibleCheckTimer=null,dashboardRefreshPromise=null;
+let currentPath="/",dashboardCurrentDate="2026-10-31",refreshes=0,counts=0,periods=0;
+const backgroundRequests=[];
+const OfflineFinance={policy:{pwaOfflineEnabled:true,pushNotificationsEnabled:true},async refreshPolicy(){return this.policy;}};
+const controls={"#dashboardRefreshMessage":{},"#dashboardRefreshRetry":{}};
+const document={visibilityState:"hidden",querySelector:(key)=>controls[key]};
+async function api(path, options){backgroundRequests.push(options.background);return {currentDate:"2026-11-01"};}
+async function refreshPendingCount(){counts++;}
+async function loadDashboard(background){backgroundRequests.push(background);refreshes++;dashboardCurrentDate="2026-11-01";}
+async function initializeDashboardPeriods(background){backgroundRequests.push(background);periods++;}
+async function recoverOffline(){}
+async function check(){
+ await checkVisiblePage(true);assert.equal(refreshes,0);assert.equal(counts,0);
+ document.visibilityState="visible";await checkVisiblePage();assert.equal(refreshes,1);assert.equal(counts,1);
+ await checkVisiblePage();assert.equal(refreshes,1);
+ assert.ok(backgroundRequests.every(value=>value===true));
+ await Promise.all([refreshDashboardOnReturn(),refreshDashboardOnReturn()]);assert.equal(refreshes,2);
+ currentPath="/transactions";await checkVisiblePage(true);assert.equal(refreshes,2);assert.equal(counts,3);
+}
+'''
+        result = subprocess.run([node, "-e", harness + functions + "check().catch(e=>{console.error(e);process.exit(1)});"], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

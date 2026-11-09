@@ -1,53 +1,13 @@
 """Recovery browser flows use synthetic databases and captured email only."""
 import tests
-import re
+from tests.test_support import RecoveryFixture
 import sqlite3
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
-from app import createApp
-from database import connectInitialLedgerDatabase
 from platformConfiguration import ConfigurationError, loadConfiguration
-from users import createUser, trustRecoveryEmail
 
 
-class RecoveryRouteTests(unittest.TestCase):
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
-        self.path = self.root / "routes.db"
-        self.root.joinpath("platform.conf").write_text("allowWebPasswordRecovery = true\nsmtpEnabled = true\nsmtpHost = smtp.example.test\nsmtpFromAddress = finance@example.test\npublicApplicationUrl = https://finance.example.test\n")
-        self.application = createApp(self.path)
-        self.connection = connectInitialLedgerDatabase(self.path)
-        self.addCleanup(self.connection.close)
-        self.connection.configuration = self.application.config["PLATFORM_CONFIGURATION"]
-        self.userId = createUser(self.connection, "owner", "owner@example.test", "original passphrase", firstName="Owner")
-        trustRecoveryEmail(self.connection, self.userId)
-        self.client = self.application.test_client()
-
-    def csrf(self, client, route):
-        page = client.get(route).get_data(as_text=True)
-        return re.search(r'name="csrfToken" value="([^"]+)"', page).group(1)
-
-    def login(self):
-        client = self.application.test_client()
-        csrfToken = self.csrf(client, "/sign-in")
-        self.assertEqual(302, client.post("/sign-in", data={"username": "owner@example.test", "password": "original passphrase", "csrfToken": csrfToken}).status_code)
-        client.environ_base["HTTP_X_CSRF_TOKEN"] = client.get("/api/session").get_json()["csrfToken"]
-        return client
-
-    def issue(self):
-        csrfToken = self.csrf(self.client, "/forgot-password")
-        with patch("users.sendRecoveryEmail") as send:
-            response = self.client.post("/forgot-password", data={"username": "owner@example.test", "csrfToken": csrfToken}, headers={"X-Forwarded-Host": "untrusted.example.test"})
-        self.assertEqual(200, response.status_code)
-        link = send.call_args.args[2]
-        self.assertTrue(link.startswith("https://finance.example.test/reset-password#"))
-        return link.split("#", 1)[1], response
-
+class RecoveryRouteTests(RecoveryFixture, unittest.TestCase):
     def testConfigurationDependenciesAndSafeErrors(self):
         other = self.root / "configuration"
         other.mkdir()

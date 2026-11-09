@@ -125,6 +125,10 @@
                       },
                       "transferEligible": {
                         "type": "boolean"
+                      },
+                      "defaultTransferDescription": {
+                        "type": "string",
+                        "description": "Derived destination-based transfer/payment description from Python. Available for archived Accounts without granting eligibility. Cash/External: Transfer to <Name>. Credit Card: <Name> Card Payment unless Name already ends in Card; other Credit: <Name> Payment. Copy only when applying a default; saved descriptions remain editable and unchanged."
                       }
                     },
                     "required": [
@@ -133,7 +137,8 @@
                       "accountClass",
                       "active",
                       "ordinaryEligible",
-                      "transferEligible"
+                      "transferEligible",
+                      "defaultTransferDescription"
                     ],
                     "description": "Cash and Credit current internal balances include offsets and all ledger activity. System External has neither balanceCents nor balanceOffsetCents. Eligible flags are authoritative; archived Accounts remain readable."
                   }

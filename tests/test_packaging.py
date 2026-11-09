@@ -1,3 +1,7 @@
+"""Portable package contents, credential boundaries, and standalone startup."""
+
+import tests  # Enable the production-database guard before application imports.
+from tests.test_support import IdentityFixture, SharingFixture
 from io import BytesIO
 from packageApplication import pwaIconFiles
 from tests.test_support import ownerClient
@@ -12,21 +16,18 @@ from contextlib import redirect_stdout
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
-
-import tests  # Activates production-database isolation before importing the application.
 from app import createApp
-from database import connectDatabase, createAccount, createCategory, createTransaction, createIntegrationSecret, initializeDatabase
-from packageApplication import (
-    PackagingError,
-    applicationVersion,
-    archiveRootName,
-    createApplicationPackage,
-    includedFiles,
-    main,
-)
+from database import createAccount, createCategory, createTransaction, createIntegrationSecret, initializeDatabase
+from packageApplication import PackagingError, archiveRootName, main
+import database as ledger
+import os
+from platformConfiguration import configurationSample
+from packageApplication import createApplicationPackage, includedFiles, applicationVersion
+import users
+from unittest.mock import patch
+from users import createOwner
 from tests.test_support import connectFixtureDatabase as connectDatabase
-
+from tests.test_support import PwaFixture
 
 class PackagingTests(unittest.TestCase):
     def setUp(self):
@@ -167,7 +168,6 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("packageWindows.bat", helpText)
         self.assertIn("./packageLinux.sh", helpText)
 
-
 class PackageEndpointTests(unittest.TestCase):
     def setUp(self):
         self.temporaryDirectory = tempfile.TemporaryDirectory()
@@ -216,7 +216,6 @@ class PackageEndpointTests(unittest.TestCase):
                 set(archive.namelist()),
             )
         response.close()
-
 
 class ActualDistributionTests(unittest.TestCase):
     def testActualApplicationOnlyArchiveExcludesPrivateStateAndRunsExtracted(self):
@@ -277,13 +276,162 @@ class ActualDistributionTests(unittest.TestCase):
                 "tests.test_startup_serving",
                 "tests.test_app.ApplicationTests.testFreshOrdinaryEntryPreservesOpeningBalanceSignsAndRestart",
                 "tests.test_app.ApplicationTests.testMinimalIndependentConfigurationSupportsAllOrdinaryEntrySigns",
-                "tests.test_release_2610.UserManagementAndMigrationTests.testProtectedInputFailureAndSuccessfulSetupRetry",
-                "tests.test_release_2610.UserManagementAndMigrationTests.testStartupExplainsBrowserAccessAfterSkippedOrCompletedSetup",
+                "tests.test_user_management.UserManagementAndMigrationTests.testProtectedInputFailureAndSuccessfulSetupRetry",
+                "tests.test_user_management.UserManagementAndMigrationTests.testStartupExplainsBrowserAccessAfterSkippedOrCompletedSetup",
             ], cwd=extractedPath, capture_output=True, text=True, timeout=120)
             self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
             startupTestCount = unittest.defaultTestLoader.loadTestsFromName("tests.test_startup_serving").countTestCases()
             self.assertIn(f"Ran {startupTestCount + 4} tests", completed.stderr)
             self.assertFalse((extractedPath / "finance.db").exists())
+
+class FullInstallationPackagingTests(SharingFixture, unittest.TestCase):
+    def testCompleteSnapshotAndLinuxLauncherPreserveEveryLedgerAndCredential(self):
+        import os
+        import subprocess
+        from packageApplication import createApplicationPackage
+        from users import setUserEnabled
+        self.accept(self.invite())
+        ledger.bindLedger(self.connection, self.ledgerId, "user", self.owner, "Owner")
+        cash = ledger.createAccount(self.connection, "Synthetic cash", "cash", openingBalance="123.45")
+        savings = ledger.createAccount(self.connection, "Synthetic savings", "cash")
+        category = ledger.createCategory(self.connection, "Synthetic expense")
+        ledger.createTransaction(self.connection, cash, "2026-10-22", "Synthetic expense", category, "12.34")
+        ledger.createTransfer(self.connection, "2026-10-22", cash, savings, "10", "Synthetic transfer")
+        keys = [ledger.createIntegrationSecret(self.connection, label) for label in ("Enabled", "Disabled", "Revoked")]
+        ledger.setIntegrationState(self.connection, keys[1], False)
+        with self.connection:
+            self.connection.execute("UPDATE integrationSecrets SET active = 0, revoked = 1 WHERE id = ?", (keys[2],))
+        ledger.submitPendingEntry(self.connection, None, {"submissionId": "synthetic-package-pending", "date": "2026-10-22", "accountId": cash, "description": "Synthetic pending", "categoryId": category, "amount": "1.23", "pinned": False})
+        recipient = createOwner(self.connection, "Recipient", "recipient password", firstName="Recipient")
+        self.invite("Recipient")
+        setUserEnabled(self.connection, self.auditor, False)
+        secret = self.connection.execute("SELECT secret FROM integrationSecrets WHERE id = ?", (keys[0],)).fetchone()[0]
+        baseline = list(self.connection.iterdump())
+        root = Path(self.directory.name)
+        projectRoot = Path(__file__).resolve().parents[1]
+        result = createApplicationPackage(repositoryPath=projectRoot, databasePath=self.path, outputPath=root / "full-output")
+        with zipfile.ZipFile(result["archivePath"]) as archive:
+            archive.extractall(root / "extracted")
+        extractedRoot = root / "extracted" / "No-Part-Finance"
+        packagedPath = extractedRoot / "finance.db"
+        packaged = ledger.connectDatabase(packagedPath)
+        try:
+            # Sanitized copies are vacuumed; schema-object order may change, but no definition or row may change.
+            self.assertEqual(sorted(baseline), sorted(packaged.iterdump()))
+            self.assertEqual(3, packaged.execute("SELECT COUNT(*) FROM ledgers").fetchone()[0])
+            self.assertEqual(4, packaged.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            self.assertEqual(2, packaged.execute("SELECT COUNT(*) FROM sharingInvitations").fetchone()[0])
+        finally:
+            packaged.close()
+        originalApplication = self.application
+        self.application = createApp(packagedPath)
+        self.assertEqual(200, self.login().get("/api/session").status_code)
+        self.assertEqual(200, self.login("Other", "other password").get("/api/session").status_code)
+        self.assertEqual(200, self.application.test_client().get("/api/integration/read/accounts", headers={"Authorization": "Bearer " + secret}).status_code)
+        self.application = originalApplication
+        # Refresh the disposable extracted source using supported SQLite backup,
+        # then run the real Linux wrapper. Its DB override must remain ignored.
+        packaged = sqlite3.connect(packagedPath)
+        try:
+            self.connection.backup(packaged)
+        finally:
+            packaged.close()
+        completed = subprocess.run(["sh", str(extractedRoot / "packageLinux.sh"), "--output", str(root / "linux-output")], cwd=root,
+                                   env={**os.environ, "FINANCE_DATABASE_PATH": str(root / "unused-override.db")}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        self.assertIn("complete unencrypted financial database", completed.stdout)
+        self.assertIn("credentials excluded", completed.stdout)
+        linuxArchive = next((root / "linux-output").glob("*.zip"))
+        with zipfile.ZipFile(linuxArchive) as archive:
+            snapshotPath = root / "linux-snapshot.db"
+            snapshotPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
+        with sqlite3.connect(snapshotPath) as snapshot:
+            self.assertEqual(sorted(baseline), sorted(snapshot.iterdump()))
+        self.assertFalse((root / "unused-override.db").exists())
+        self.assertEqual(baseline, list(self.connection.iterdump()))
+        windowsScript = (projectRoot / "packageWindows.bat").read_text()
+        linuxScript = (projectRoot / "packageLinux.sh").read_text()
+        self.assertIn("packageApplication.py %*", windowsScript)
+        self.assertIn('packageApplication.py "$@"', linuxScript)
+        self.assertNotIn("--no-db", windowsScript)
+        self.assertNotIn("--no-db", linuxScript)
+
+class PackageAndMigrationTests(IdentityFixture, unittest.TestCase):
+    def testSampleRegenerationAndPrivateCliFiles(self):
+        repository = self.root / "repository"
+        repository.mkdir()
+        for relativePath in includedFiles:
+            source = repository / relativePath
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("synthetic maintained fixture")
+        (repository / "platform.conf").write_text("smtpPassword = CONFIG_SECRET")
+        (repository / "logs").mkdir()
+        (repository / "logs/email.log").write_text("PRIVATE_LOG")
+        (repository / "logs/email.log.1").write_text("ROTATED_LOG")
+        (repository / "logs/nested.zip").write_text("NESTED_SECRET")
+        for serverFiles in (False, True):
+            result = createApplicationPackage(repositoryPath=repository, outputPath=self.root / "packages", includeDatabase=False, includeServerFiles=serverFiles)
+            with zipfile.ZipFile(result["archivePath"]) as archive:
+                sample = archive.read("No-Part-Finance/platform.conf.sample").decode()
+                self.assertEqual(configurationSample(), sample)
+                self.assertNotIn("CONFIG_SECRET", sample)
+                self.assertEqual(serverFiles, "No-Part-Finance/platform.conf" in archive.namelist())
+                self.assertEqual(serverFiles, "No-Part-Finance/logs/email.log.1" in archive.namelist())
+                self.assertFalse(any("nested.zip" in name for name in archive.namelist()))
+                if not serverFiles:
+                    for name in archive.namelist():
+                        self.assertNotIn(b"CONFIG_SECRET", archive.read(name))
+                        self.assertNotIn(b"PRIVATE_LOG", archive.read(name))
+
+    def testProfileMigrationPreservesIdentitiesFinancialHistoryAndBackup(self):
+        path = self.root / "legacy27.db"
+        with patch.object(ledger, "schemaVersion", 27):
+            ledger.initializeDatabase(path)
+        connection = ledger.connectInitialLedgerDatabase(path)
+        with connection:
+            userId = connection.execute("INSERT INTO users (username, usernameKey, passwordHash, authVersion) VALUES ('Legacy', 'legacy', ?, 7)", (users.passwordHash("legacy password"),)).lastrowid
+            connection.execute("INSERT INTO ledgerAccess (userId, ledgerId, role) VALUES (?, currentLedgerId(), 'owner')", (userId,))
+        account = ledger.createAccount(connection, "Cash", "cash", openingBalance="123.45")
+        category = ledger.createCategory(connection, "Expense")
+        ledger.createTransaction(connection, account, "2026-10-23", "Historical", category, "1.23")
+        before = {table: [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")] for table in ("transactions", "accounts", "ledgers", "ledgerAccess", "auditEvents")}
+        oldUser = tuple(connection.execute("SELECT * FROM users").fetchone())
+        connection.close()
+        ledger.initializeDatabase(path)
+        connection = ledger.connectInitialLedgerDatabase(path)
+        for table, expected in before.items():
+            self.assertEqual(expected, [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")])
+        self.assertEqual(oldUser, tuple(connection.execute("SELECT * FROM users").fetchone())[:len(oldUser)])
+        self.assertEqual("accepted", connection.execute("SELECT verificationStatus FROM users").fetchone()[0])
+        self.assertEqual("", connection.execute("SELECT firstName FROM users").fetchone()[0])
+        connection.close()
+        self.assertTrue(list((self.root / "backups").glob("pre-migration-v27-to-v31-*.db")))
+        ledger.initializeDatabase(path)
+
+    def testExportAcceptanceUnchangedAndCredentialsExcluded(self):
+        with self.connection:
+            self.connection.execute("UPDATE users SET verificationStatus='pending', acceptanceMethod='awaiting-email', registrationCreatedAt=2000000000, registrationExpiresAt=2000086400 WHERE id=?", (self.owner,))
+        before = [tuple(row) for row in self.connection.execute("SELECT * FROM users")]
+        exported = self.root / "export.db"
+        ledger.exportLedgerDatabase(self.connection, exported)
+        copy = sqlite3.connect(exported)
+        self.assertEqual(("pending", "awaiting-email", "", 1), copy.execute("SELECT verificationStatus, acceptanceMethod, passwordHash, passwordSetupRequired FROM users").fetchone())
+        self.assertEqual([], copy.execute("PRAGMA foreign_key_check").fetchall())
+        copy.close()
+        self.assertEqual(before, [tuple(row) for row in self.connection.execute("SELECT * FROM users")])
+
+class NotificationExportTests(PwaFixture, unittest.TestCase):
+    def testPortableExportHasNoPushCredentials(self):
+        self.client.get("/api/push")
+        self.client.post("/api/push", json=self.pushSubscription())
+        response = self.client.get("/api/backup")
+        self.assertEqual(200, response.status_code)
+        exported = Path(self.directory.name) / "export.db"
+        exported.write_bytes(response.get_data())
+        with sqlite3.connect(exported) as connection:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM pushSubscriptions").fetchone()[0])
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM pushConfiguration").fetchone()[0])
+            self.assertIsNone(connection.execute("PRAGMA foreign_key_check").fetchone())
 
 
 if __name__ == "__main__":

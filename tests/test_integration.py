@@ -1,43 +1,27 @@
+"""Integration requests, authentication, Pending decisions, and retry integrity."""
+
+import tests  # Enable the production-database guard before application imports.
 from tests.test_support import snapshotWithoutLoginTime
-from tests.test_support import useHistoricalSchema21
 import json
-import getpass
 import re
-import runpy
 import sqlite3
 import tempfile
 import threading
 import zipfile
 from io import BytesIO
 import unittest
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
-
-import tests
 from app import createApp
-from database import (
-    ValidationError, SubmissionConflict, connectDatabase, initializeDatabase,
-    createAccount, createCategory, createTransaction, createTransfer, createTemplate,
-    createSimulatorPlan, saveSimulatorRow, createIntegrationSecret,
-    submitPendingTransaction, decidePendingTransactions, pendingReviewRows,
-    updateCategory, schemaVersion,
-)
-from users import createUser, resetPassword, configureOnStartup, manageUsers
+from database import ValidationError, SubmissionConflict, createAccount, createCategory, createTransaction, createTransfer, createSimulatorPlan, saveSimulatorRow, createIntegrationSecret, submitPendingEntry, decidePendingTransactions, pendingReviewRows, updateCategory
+from users import resetPassword
+import database as ledger
+from users import createUser
 from tests.test_support import connectFixtureDatabase as connectDatabase
+from tests.test_support import signIn
 
-
-def signIn(client, username="Owner", password="owner password"):
-    html = client.get("/sign-in").get_data(as_text=True)
-    token = re.search(r'name="csrfToken" value="([^"]+)"', html).group(1)
-    response = client.post("/sign-in", data={"username": username, "password": password, "csrfToken": token})
-    if response.status_code == 302:
-        client.environ_base["HTTP_X_CSRF_TOKEN"] = client.get("/api/session").get_json()["csrfToken"]
-    return response
-
-
-class OctoberTests(unittest.TestCase):
+class IntegrationApiTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.path = Path(self.directory.name) / "test-finance.db"
@@ -108,6 +92,63 @@ class OctoberTests(unittest.TestCase):
         # The integration submission boundary intentionally uses Bearer authentication, not browser CSRF.
         self.assertEqual(201, self.submit().status_code)
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
+
+    def testTemplateCataloguePreservesEligibilityWithOneJoinedRead(self):
+        import app as applicationModule
+        archivedAccountId = createAccount(self.connection, "Archived Cash", "cash")
+        archivedCategoryId = createCategory(self.connection, "Archived Expense")
+        parentId = createCategory(self.connection, "Rollup")
+        childId = createCategory(self.connection, "Child", parentId)
+        externalId = self.connection.execute("SELECT id FROM accounts WHERE systemIdentity='external'").fetchone()[0]
+        expected = {}
+        def template(name, accountId, categoryId, eligible, role=None, active=True):
+            templateId = ledger.createTemplate(self.connection, name, accountId, None, categoryId, None)
+            if not active:
+                with self.connection:
+                    self.connection.execute("UPDATE transactionTemplates SET active=0 WHERE id=?", (templateId,))
+            expected[templateId] = (eligible, role)
+            return templateId
+        template("Partial", None, None, True)
+        template("Expense", self.cashId, self.expenseId, True, "expense")
+        template("Income", self.creditId, self.incomeId, True, "income")
+        template("No Account", None, self.expenseId, True, "expense")
+        template("No Category", self.cashId, None, True)
+        template("Archived Account", archivedAccountId, self.incomeId, False, "income")
+        template("Archived Category", self.cashId, archivedCategoryId, False)
+        template("Inactive Template", self.cashId, self.incomeId, False, "income", False)
+        rollupTemplateId = template("Historical rollup reference", self.cashId, childId, False)
+        systemTemplateId = template("Historical System reference", self.cashId, self.expenseId, False, "expense")
+        with self.connection:
+            self.connection.execute("UPDATE accounts SET active=0 WHERE id=?", (archivedAccountId,))
+            self.connection.execute("UPDATE categories SET active=0 WHERE id=?", (archivedCategoryId,))
+            self.connection.execute("UPDATE transactionTemplates SET categoryId=? WHERE id=?", (parentId, rollupTemplateId))
+            self.connection.execute("UPDATE transactionTemplates SET accountId=? WHERE id=?", (externalId, systemTemplateId))
+        browserRows = self.owner.get("/api/templates").get_json()
+        browserById = {row["id"]: row for row in browserRows}
+        statements = []
+        rawConnect = applicationModule.connectDatabase
+        def tracedConnect(*arguments, **keywords):
+            connection = rawConnect(*arguments, **keywords)
+            connection.set_trace_callback(statements.append)
+            return connection
+        before = list(self.connection.iterdump())
+        with patch.object(applicationModule, "connectDatabase", tracedConnect):
+            response = self.agent.get("/api/integration/read/templates", headers=self.headers)
+        self.assertEqual(200, response.status_code)
+        rows = response.get_json()
+        self.assertEqual(list(browserById), [row["id"] for row in rows])
+        self.assertEqual(1, sum("FROM scopedtransactionTemplates AS tt" in statement for statement in statements))
+        self.assertFalse(any("SELECT active, accountClass FROM scopedaccounts WHERE id =" in statement or "SELECT c.*, EXISTS(" in statement for statement in statements))
+        for row in rows:
+            eligible, role = expected[row["id"]]
+            self.assertIs(eligible, row["ordinaryEligible"])
+            self.assertEqual(role, row.get("reportingRole"))
+            if role is None:
+                self.assertNotIn("reportingRole", row)
+            ordinary = {key: value for key, value in row.items() if key not in ("ordinaryEligible", "reportingRole")}
+            self.assertEqual(browserById[row["id"]], ordinary)
+            self.assertFalse({"accountActive", "accountClass", "categoryActive", "categoryRole", "hasChildren"} & row.keys())
+        self.assertEqual(before, list(self.connection.iterdump()))
 
     def testProposalApprovalUsesAllEntrySignsOnCashAndCredit(self):
         updateCategory(self.connection, self.expenseId, "Income-looking name", reportingRole="expense")
@@ -634,7 +675,7 @@ class OctoberTests(unittest.TestCase):
             connection = connectDatabase(self.path)
             try:
                 barrier.wait()
-                return submitPendingTransaction(connection, self.secretId, self.proposed)
+                return submitPendingEntry(connection, self.secretId, self.proposed)
             finally:
                 connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -663,11 +704,11 @@ class OctoberTests(unittest.TestCase):
         response = self.owner.get("/api/package")
         try:
             self.assertEqual(200, response.status_code)
-            self.assertIn("26.11", response.headers["Content-Disposition"])
+            self.assertIn("26.11.10", response.headers["Content-Disposition"])
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 copiedPath = Path(self.directory.name) / "package-database.db"
                 copiedPath.write_bytes(archive.read("No-Part-Finance/finance.db"))
-                self.assertIn('applicationVersion = "26.11"', archive.read("No-Part-Finance/packageApplication.py").decode())
+                self.assertIn('applicationVersion = "26.11.10"', archive.read("No-Part-Finance/packageApplication.py").decode())
                 self.assertIn("No-Part-Finance/users.py", archive.namelist())
                 self.assertIn("No-Part-Finance/openapi.json", archive.namelist())
             connection = connectDatabase(copiedPath)
@@ -684,7 +725,7 @@ class OctoberTests(unittest.TestCase):
             with zipfile.ZipFile(BytesIO(response.get_data())) as archive:
                 self.assertNotIn("No-Part-Finance/finance.db", archive.namelist())
                 self.assertFalse(any(self.secret.encode() in archive.read(name) for name in archive.namelist()))
-        self.assertEqual("26.11", applicationVersion)
+        self.assertEqual("26.11.10", applicationVersion)
 
     def testAuditorAndIntegrationSimulatorReadsNeverWrite(self):
         planId = createSimulatorPlan(self.connection, "Example Plan", "2026-10-01")
@@ -696,231 +737,197 @@ class OctoberTests(unittest.TestCase):
             self.assertEqual(200, client.get(url, headers=headers).status_code)
         self.assertEqual(before, self.path.read_bytes())
 
+class IntegrationApiFixture(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.databasePath = Path(self.directory.name) / "synthetic.db"
+        self.backupsPath = Path(self.directory.name) / "backups"
+        self.backupsPath.mkdir()
+        self.application = createApp(self.databasePath)
+        self.connection = connectDatabase(self.databasePath)
+        createUser(self.connection, "owner", "Owner", "owner password", firstName="Owner")
+        self.cash = ledger.createAccount(self.connection, "Example Cash", "cash")
+        self.expense = ledger.createCategory(self.connection, "Example Expense")
+        self.integrationId = ledger.createIntegrationSecret(self.connection, "Example Agent")
+        self.secret = self.connection.execute("SELECT secret FROM integrationSecrets WHERE id = ?", (self.integrationId,)).fetchone()[0]
+        self.headers = {"Authorization": "Bearer " + self.secret}
+        self.client = self.application.test_client()
+        self.limit = self.application.config["MAX_CONTENT_LENGTH"]
+        self.proposal = {"submissionId": "example", "date": "2026-10-01", "accountId": self.cash, "categoryId": self.expense, "description": "Example purchase", "amount": "1.00"}
 
-class UserManagementAndMigrationTests(unittest.TestCase):
-    def testUsernamePasswordConstraintsAndCasefoldUniqueness(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "explicit-users.db"
-            initializeDatabase(path)
-            connection = connectDatabase(path)
-            try:
-                for username in ["", "x" * 65, "bad\nname"]:
-                    with self.assertRaises(ValidationError):
-                        createUser(connection, "owner", username, "valid password", firstName="Test")
-                for password in ["short", "x" * 129]:
-                    with self.assertRaises(ValidationError):
-                        createUser(connection, "owner", "Owner", password, firstName="Owner")
-                createUser(connection, "owner", "  Straße  ", "  password α  ", firstName="Straße")
-                self.assertEqual("Straße", connection.execute("SELECT username FROM users").fetchone()[0])
-                with self.assertRaises(ValidationError):
-                    createUser(connection, "auditor", "STRASSE", "valid password", firstName="STRASSE")
-                with self.assertRaises(ValidationError):
-                    createUser(connection, "owner", "Other", "valid password", firstName="Other")
-            finally:
-                connection.close()
+    def tearDown(self):
+        self.connection.close()
+        self.directory.cleanup()
 
-    def testStartupDeclineInterruptionAndOptionalAuditorFailure(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "explicit-setup.db"
-            initializeDatabase(path)
-            connection = connectDatabase(path)
-            try:
-                for response in ["", "n", EOFError(), KeyboardInterrupt(), OSError()]:
-                    with patch("users.input", side_effect=[response]), patch("builtins.print") as output:
-                        configureOnStartup(connection)
-                    setupText = str(output.call_args_list)
-                    self.assertIn("cannot sign in", setupText)
-                    self.assertIn("Restart to retry Owner setup", setupText)
-                    self.assertIn("startWindows.bat manage-users", setupText)
-                    self.assertIn("./startLinux.sh manage-users", setupText)
-                    self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-                with patch("users.input", side_effect=["y", "Owner", "Owner", "", "y", "Auditor", "Auditor", ""]), patch("users.getpass.getpass", side_effect=["valid password", "valid password", "mismatch", "different"]), patch("builtins.print") as output:
-                    configureOnStartup(connection)
-                setupText = str(output.call_args_list)
-                self.assertIn("Your Owner is saved and can sign in", setupText)
-                self.assertIn("Optional Auditor setup did not complete", setupText)
-                self.assertIn("Passwords do not match", setupText)
-                self.assertNotIn("No Owner was created", setupText)
-                self.assertNotIn("valid password", setupText)
-                self.assertNotIn("mismatch", setupText)
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
-                with connection:
-                    connection.execute("DROP TRIGGER preserveOwnerMembership")
-                    connection.execute("DROP TRIGGER userEventsNoDELETE")
-                    connection.execute("DELETE FROM userEvents")
-                    connection.execute("DELETE FROM users")
-                originalCreateUser = createUser
-                def failOptionalAuditor(connection, role, username, password, firstName="", lastName=""):
-                    if role == "auditor":
-                        raise sqlite3.OperationalError("fixture write failure")
-                    return originalCreateUser(connection, role, username, password, firstName, lastName)
-                with patch("users.input", side_effect=["y", "Owner", "Owner", "", "y", "Auditor", "Auditor", ""]), patch("users.getpass.getpass", return_value="valid password"), patch("users.createUser", side_effect=failOptionalAuditor), patch("builtins.print") as output:
-                    configureOnStartup(connection)
-                self.assertIn("Your Owner is saved and can sign in", str(output.call_args_list))
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
-                with patch("users.input", side_effect=["1", "1", "2", "0", "0"]), patch("users.getpass.getpass", side_effect=["new owner pass", "new owner pass", "auditor pass", "auditor pass", "new auditor pass", "new auditor pass"]), patch("builtins.print") as output:
-                    manageUsers(path)
-                    text = str(output.call_args_list)
-                    self.assertNotIn("new owner pass", text)
-                    self.assertNotIn("scrypt:", text)
-                    self.assertIn("User management does not start the server", text)
-                    self.assertIn("without manage-users", text)
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
-            finally:
-                connection.close()
+    def snapshot(self):
+        return tuple(snapshotWithoutLoginTime(self.connection))
 
-    def testProtectedInputFailureAndSuccessfulSetupRetry(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "explicit-protected-input.db"
-            initializeDatabase(path)
-            connection = connectDatabase(path)
-            try:
-                def unavailablePasswordInput(prompt):
-                    warnings.warn("Password input may be echoed", getpass.GetPassWarning)
-                    self.fail("Unprotected password input must never proceed")
+    def bodyWithSize(self, size, content=None):
+        encoded = json.dumps(self.proposal if content is None else content).encode("utf-8")
+        return encoded + b" " * (size - len(encoded))
 
-                with patch("users.input", side_effect=["y", "Example Owner", "Example", ""]), patch("users.getpass.getpass", side_effect=unavailablePasswordInput), patch("builtins.print") as output:
-                    configureOnStartup(connection)
-                self.assertIn("Protected password input is unavailable", str(output.call_args_list))
-                self.assertIn("No Owner was created", str(output.call_args_list))
-                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+class IntegrationRequestSizeTests(IntegrationApiFixture):
+    def testOversizedSubmissionUsesDocumentedJsonAndWritesNothing(self):
+        before = self.snapshot()
+        for body in (self.bodyWithSize(self.limit + 1), b"PRIVATE MALFORMED " + b"x" * self.limit, b"\xc3\xa9" * (self.limit // 2 + 1)):
+            with self.subTest(byteLength=len(body)):
+                response = self.client.post("/api/integration/submissions", data=body, content_type="application/json", headers=self.headers)
+                self.assertEqual(413, response.status_code)
+                self.assertEqual("application/json", response.mimetype)
+                self.assertEqual({"error": "Request exceeds the 1 MiB limit"}, response.get_json())
+                self.assertEqual(before, self.snapshot())
 
-                with patch("users.input", side_effect=["y", "Example Owner", "Example", "", ""]), patch("users.getpass.getpass", return_value="  password α  ") as passwordInput, patch("builtins.print") as output:
-                    configureOnStartup(connection)
-                setupText = str(output.call_args_list)
-                self.assertIn("8–128 characters", setupText)
-                self.assertIn("typing shows no characters", setupText)
-                self.assertIn("Auditor setup skipped", setupText)
-                self.assertNotIn("  password α  ", setupText)
-                self.assertEqual([("Password: ",), ("Confirm password: ",)], [call.args for call in passwordInput.call_args_list])
-                client = createApp(path).test_client()
-                self.assertEqual(302, signIn(client, "Example Owner", "  password α  ").status_code)
-                with patch("users.input") as startupInput, patch("builtins.print") as output:
-                    configureOnStartup(connection)
-                startupInput.assert_not_called()
-                output.assert_not_called()
+    def testByteBoundaryStillParsesAndValidatesAtLimit(self):
+        self.assertEqual(1048576, self.limit)
+        response = self.client.post("/api/integration/submissions", data=self.bodyWithSize(self.limit), content_type="application/json", headers=self.headers)
+        self.assertEqual(201, response.status_code)
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM pendingSubmissions").fetchone()[0])
+        before = self.snapshot()
+        response = self.client.post("/api/integration/submissions", data=self.bodyWithSize(self.limit, {}), content_type="application/json", headers=self.headers)
+        self.assertEqual(400, response.status_code)
+        self.assertEqual({"error"}, set(response.get_json()))
+        self.assertEqual(before, self.snapshot())
 
-                with patch("users.input", side_effect=["3", "1", "Example Auditor", "Example", ""]), patch("users.getpass.getpass", side_effect=unavailablePasswordInput), patch("builtins.print") as output:
-                    manageUsers(path)
-                self.assertIn("User management closed", str(output.call_args_list))
-                self.assertIn("interactive Command Prompt or terminal", str(output.call_args_list))
-                self.assertEqual(["owner"], [row[0] for row in connection.execute("SELECT role FROM scopedusers")])
-                with patch("users.input", side_effect=["3", "1", "Example Auditor", "Example", "", "0"]), patch("users.getpass.getpass", return_value="auditor password"), patch("builtins.print"):
-                    manageUsers(path)
-                self.assertEqual(302, signIn(client, "Example Auditor", "auditor password").status_code)
-                self.assertEqual(403, client.post("/api/accounts", json={}).status_code)
-            finally:
-                connection.close()
+    def testAuthenticationAndOwnerPrecedenceRemainUnchanged(self):
+        oversized = self.bodyWithSize(self.limit + 1)
+        before = self.snapshot()
+        for headers in ({}, {"Authorization": "Bearer invalid"}):
+            response = self.client.post("/api/integration/submissions", data=oversized, content_type="application/json", headers=headers)
+            self.assertEqual(401, response.status_code)
+            self.assertEqual({"error"}, set(response.get_json()))
+        self.assertEqual(before, self.snapshot())
+        with self.connection:
+            self.connection.execute("UPDATE integrationSecrets SET active = 0 WHERE id = ?", (self.integrationId,))
+        before = self.snapshot()
+        response = self.client.post("/api/integration/submissions", data=oversized, content_type="application/json", headers=self.headers)
+        self.assertEqual(401, response.status_code)
+        self.assertEqual(before, self.snapshot())
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        with self.connection:
+            self.connection.execute("DROP TRIGGER preserveOwnerMembership")
+            self.connection.execute("DELETE FROM ledgerAccess")
+        self.connection.execute("PRAGMA foreign_keys = ON")
+        before = self.snapshot()
+        response = self.client.post("/api/integration/submissions", data=oversized, content_type="application/json", headers=self.headers)
+        self.assertEqual(503, response.status_code)
+        self.assertEqual(before, self.snapshot())
 
-    def testStartupExplainsBrowserAccessAfterSkippedOrCompletedSetup(self):
-        scenarios = (
-            ([""], []),
-            (["y", "Example Owner", "Example", "", ""], ["owner"]),
-            (["y", "Example Owner", "Example", "", "y", "Example Auditor", "Example", ""], ["auditor", "owner"]),
-            (["y", "Example Owner", "Example", "", KeyboardInterrupt()], ["owner"]),
-        )
-        for responses, expectedRoles in scenarios:
-            with self.subTest(expectedRoles=expectedRoles, interrupted=isinstance(responses[-1], KeyboardInterrupt)), tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "explicit-startup.db"
-                with patch.dict("os.environ", {"FINANCE_DATABASE_PATH": str(path)}), patch("sys.argv", ["app.py"]), patch("users.input", side_effect=responses), patch("users.getpass.getpass", return_value="startup password"), patch("waitress.create_server") as runServer, patch("waitress.task.ThreadedTaskDispatcher") as dispatcher, patch("builtins.print") as output, self.assertLogs(level="INFO") as startupLogs:
-                    runServer.return_value.adj.threads = 4
-                    runServer.return_value.task_dispatcher = dispatcher.return_value
-                    runpy.run_path(str(Path(__file__).resolve().parents[1] / "app.py"), run_name="__main__")
-                runServer.assert_called_once()
-                self.assertEqual("0.0.0.0", runServer.call_args.kwargs["host"])
-                self.assertEqual(5000, runServer.call_args.kwargs["port"])
-                self.assertFalse(runServer.call_args.kwargs["clear_untrusted_proxy_headers"])
-                runServer.return_value.run.assert_called_once()
-                dispatcher.return_value.shutdown.assert_called_once()
-                logText = "\n".join(startupLogs.output)
-                self.assertIn("open http://127.0.0.1:5000", logText)
-                self.assertIn("Keep this terminal open", logText)
-                self.assertNotIn("startup password", logText + str(output.call_args_list))
-                connection = connectDatabase(path)
-                try:
-                    self.assertEqual(expectedRoles, [row[0] for row in connection.execute("SELECT role FROM scopedusers ORDER BY role")])
-                    self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
-                    self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
-                finally:
-                    connection.close()
+    def testPendingUpdateOversizeLeavesSavedProposalIntact(self):
+        proposalId = self.client.post("/api/integration/submissions", json=self.proposal, headers=self.headers).get_json()["id"]
+        before = self.snapshot()
+        response = self.client.put(f"/api/integration/submissions/{proposalId}", data=self.bodyWithSize(self.limit + 1), content_type="application/json", headers=self.headers)
+        self.assertEqual(413, response.status_code)
+        self.assertEqual({"error": "Request exceeds the 1 MiB limit"}, response.get_json())
+        self.assertEqual(before, self.snapshot())
 
-    def testVersion19MigrationPreservesPendingContentCredentialsAndLedger(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "explicit-v19-migration.db"
-            initializeDatabase(path)
-            connection = connectDatabase(path)
-            try:
-                createUser(connection, "owner", "Migration Owner", "owner password", firstName="Migration Owner")
-                cashId = createAccount(connection, "Migration Cash", "cash", openingBalance="100.00")
-                categoryId = createCategory(connection, "Migration Expense")
-                createTransaction(connection, cashId, "2026-09-30", "Existing ledger", categoryId, "10.00")
-                secretId = createIntegrationSecret(connection, "Migration Agent")
-                proposal, _ = submitPendingTransaction(connection, secretId, {"submissionId": "existing", "date": "2026-09-30", "accountId": cashId, "description": "Existing pending", "categoryId": categoryId, "amount": "5.00"})
-                useHistoricalSchema21(connection)
-                with connection:
-                    connection.execute("ALTER TABLE pendingSubmissions DROP COLUMN reviewContent")
-                    connection.execute("ALTER TABLE pendingSubmissions DROP COLUMN reviewVersion")
-                    useHistoricalSchema21(connection)
-                    connection.execute("PRAGMA user_version = 19")
-                before = {row[0]: [dict(record) for record in connection.execute('SELECT * FROM "' + row[0] + '"')] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            finally:
-                connection.close()
-            initializeDatabase(path)
-            connection = connectDatabase(path)
-            try:
-                for table, records in before.items():
-                    after = [dict(row) for row in connection.execute('SELECT * FROM ' + ('scopedusers' if table == 'users' else '"' + table + '"'))]
-                    if table == "pendingSubmissions":
-                        self.assertEqual(None, after[0].pop("reviewContent"))
-                        self.assertEqual(0, after[0].pop("reviewVersion"))
-                    after = [{key: row[key] for key in records[index]} for index, row in enumerate(after)]
-                    if table == "sqlite_sequence":
-                        records = sorted(records, key=lambda row: row["name"])
-                        after = sorted(after, key=lambda row: row["name"])
-                    self.assertEqual(records, after, table)
-                self.assertEqual(schemaVersion, connection.execute("PRAGMA user_version").fetchone()[0])
-                self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
-                self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
-            finally:
-                connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v19-to-v31-*.db"))
-            self.assertEqual(1, len(backups))
+    def testOrdinaryErrorsAndBrowserHtmlRemainUnchanged(self):
+        before = self.snapshot()
+        response = self.client.post("/api/integration/submissions", data=b"{invalid", content_type="application/json", headers=self.headers)
+        self.assertEqual(400, response.status_code)
+        self.assertEqual({"error"}, set(response.get_json()))
+        owner = self.application.test_client()
+        signIn(owner)
+        response = owner.post("/api/transactions", data=self.bodyWithSize(self.limit + 1), content_type="application/json")
+        self.assertEqual(413, response.status_code)
+        self.assertEqual("text/html", response.mimetype)
+        self.assertEqual(before, self.snapshot())
 
-    def testMigrationPreservesEveryExistingTableAndBackup(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "explicit-migration.db"
-            initializeDatabase(path)
-            connection = connectDatabase(path)
-            cashId = createAccount(connection, "Fixture Cash", "cash", openingBalance="123.45")
-            creditId = createAccount(connection, "Fixture Credit", "credit", "Credit Card")
-            categoryId = createCategory(connection, "Fixture Expense")
-            createTransaction(connection, cashId, "2026-10-01", "Fixture", categoryId, "10.00")
-            createTransfer(connection, "2026-10-01", cashId, creditId, "5.00")
-            createTemplate(connection, "Fixture Template", cashId, "Fixture", categoryId, "10.00")
-            useHistoricalSchema21(connection)
-            before = {row[0]: [tuple(record) for record in connection.execute('SELECT * FROM "' + row[0] + '"')] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('users', 'integrationSecrets', 'pendingSubmissions', 'sqlite_sequence')")}
-            with connection:
-                connection.execute("DROP TABLE pendingSubmissions")
-                connection.execute("DROP TABLE integrationSecrets")
-                connection.execute("DROP TABLE users")
-                useHistoricalSchema21(connection)
-                connection.execute("PRAGMA user_version = 18")
-            connection.close()
-            initializeDatabase(path)
-            connection = connectDatabase(path)
-            try:
-                self.assertEqual(schemaVersion, connection.execute("PRAGMA user_version").fetchone()[0])
-                for table, records in before.items():
-                    self.assertEqual(records, [tuple(row)[1:] for row in connection.execute('SELECT * FROM "' + table + '"')])
-                self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-                self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
-                self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
-            finally:
-                connection.close()
-            backups = list((Path(directory) / "backups").glob("pre-migration-v18-to-v31-*.db"))
-            self.assertEqual(1, len(backups))
-            backup = sqlite3.connect(backups[0])
-            try:
-                self.assertEqual(18, backup.execute("PRAGMA user_version").fetchone()[0])
-            finally:
-                backup.close()
+class IntegrationHistoryFilterTests(IntegrationApiFixture):
+    def setUp(self):
+        super().setUp()
+        createUser(self.connection, "auditor", "Auditor", "auditor password", firstName="Auditor")
+        self.otherCash = ledger.createAccount(self.connection, "Other Cash", "cash")
+        self.purchase = ledger.createTransaction(self.connection, self.cash, "2026-10-01", "Example purchase", self.expense, "10.00")
+        self.refund = ledger.createTransaction(self.connection, self.cash, "2026-10-02", "Example refund", self.expense, "-2.00")
+        self.transferId = ledger.createTransfer(self.connection, "2026-10-03", self.cash, self.otherCash, "5.00", "Example transfer")
+        with self.connection:
+            self.connection.execute("INSERT INTO transactions (accountId, date, description, amountCents, transferId) VALUES (?, ?, ?, ?, ?)", (self.cash, "2026-10-04", "Invalid linked row", -300, "invalid-group"))
+        self.historyPath = "/api/integration/read/transactions"
+
+    def history(self, **filters):
+        return self.client.get(self.historyPath, query_string={"period": "all", **filters}, headers=self.headers)
+
+    def testMalformedSuppliedIdsReturnJson400WithoutWrites(self):
+        before = self.snapshot()
+        for name in ("accountId", "categoryId"):
+            for value in ("", "0", "-1", "-99", "abc", "1.5", "1e2", " ", "null", "1/2"):
+                with self.subTest(name=name, value=value):
+                    response = self.history(**{name: value, "includeSummary": "true", "description": "Example", "limit": "1", "offset": "0"})
+                    self.assertEqual(400, response.status_code)
+                    self.assertEqual("application/json", response.mimetype)
+                    self.assertEqual({"error": ("Account" if name == "accountId" else "Category") + " ID must be a positive integer"}, response.get_json())
+                    self.assertEqual(before, self.snapshot())
+        for filters in ({"accountId": self.cash, "categoryId": "0"}, {"accountId": "", "categoryId": self.expense}):
+            self.assertEqual(400, self.history(**filters).status_code)
+
+    def testOmittedExistingAndUnavailableIdsPreserveEnvelopeAndSummary(self):
+        before = self.snapshot()
+        result = self.history(includeSummary="true").get_json()
+        self.assertEqual(4, result["total"])
+        self.assertEqual({"expenseCents": 800, "incomeCents": 0, "transferPaymentCents": 500}, result["summary"])
+        for filters in ({"accountId": 999999}, {"categoryId": 999999}, {"accountId": self.cash, "categoryId": 999999}):
+            with self.subTest(filters=filters):
+                response = self.history(includeSummary="true", **filters)
+                self.assertEqual(200, response.status_code)
+                self.assertEqual({"transactions": [], "total": 0, "offset": 0, "limit": 100, "nextOffset": None, "summary": {"expenseCents": 0, "incomeCents": 0, "transferPaymentCents": 0}}, response.get_json())
+        result = self.history(accountId=self.cash, categoryId=self.expense, includeSummary="true").get_json()
+        self.assertEqual(2, result["total"])
+        self.assertEqual({self.purchase, self.refund}, {event["id"] for event in result["transactions"]})
+        self.assertEqual(800, result["summary"]["expenseCents"])
+        self.assertEqual(before, self.snapshot())
+
+    def testArchivedReferencesStillMatchAndIntegerSyntaxIsPreserved(self):
+        with self.connection:
+            self.connection.execute("UPDATE accounts SET active = 0 WHERE id = ?", (self.cash,))
+            self.connection.execute("UPDATE categories SET active = 0 WHERE id = ?", (self.expense,))
+        before = self.snapshot()
+        for value in (str(self.cash), f"+{self.cash}", f" {self.cash} ", f"0{self.cash}"):
+            response = self.history(accountId=value)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(4, response.get_json()["total"])
+        result = self.history(accountId=self.cash, categoryId=self.expense).get_json()
+        self.assertEqual(2, result["total"])
+        self.assertEqual(before, self.snapshot())
+
+    def testTransferSideCategoryExclusionAndInvalidLinkedVisibility(self):
+        before = self.snapshot()
+        source = self.history(accountId=self.cash).get_json()
+        destination = self.history(accountId=self.otherCash).get_json()
+        self.assertEqual(1, destination["total"])
+        event = destination["transactions"][0]
+        self.assertTrue(event["combinedTransfer"])
+        self.assertEqual(self.transferId, event["transferId"])
+        self.assertIn(event, source["transactions"])
+        invalid = next(row for row in source["transactions"] if row["transferId"] == "invalid-group")
+        self.assertFalse(invalid["combinedTransfer"])
+        self.assertEqual(-300, invalid["displayAmountCents"])
+        self.assertEqual(0, self.history(categoryId=self.expense, type="transfers").get_json()["total"])
+        self.assertEqual(before, self.snapshot())
+
+    def testOtherFiltersPaginationAndSummaryRemainAuthoritative(self):
+        before = self.snapshot()
+        filters = {"accountId": self.cash, "categoryId": self.expense, "period": "custom", "startDate": "2026-10-01", "endDate": "2026-10-02", "type": "transactions", "description": "EXAMPLE", "amountMode": "between", "amountMin": "1.00", "amountMax": "10.00", "sort": "amount", "direction": "desc", "includeSummary": "true", "limit": 1}
+        first = self.history(**filters).get_json()
+        self.assertEqual((2, 1, self.purchase), (first["total"], first["nextOffset"], first["transactions"][0]["id"]))
+        second = self.history(**filters, offset=1).get_json()
+        self.assertEqual((2, None, self.refund), (second["total"], second["nextOffset"], second["transactions"][0]["id"]))
+        self.assertEqual(first["summary"], second["summary"])
+        self.assertEqual({"expenseCents": 800, "incomeCents": 0, "transferPaymentCents": 0}, first["summary"])
+        self.assertEqual(before, self.snapshot())
+
+    def testPermissionsAndBrowserStableIdBehaviorRemainUnchanged(self):
+        before = self.snapshot()
+        self.assertEqual(401, self.client.get(self.historyPath, query_string={"accountId": "0"}).status_code)
+        owner = self.application.test_client()
+        signIn(owner)
+        auditor = self.application.test_client()
+        signIn(auditor, "Auditor", "auditor password")
+        for browser in (owner, auditor):
+            self.assertEqual(401, browser.get(self.historyPath, query_string={"accountId": self.cash}).status_code)
+            self.assertEqual(200, browser.get("/api/transactions?period=all&accountId=0").status_code)
+            self.assertEqual([], browser.get("/api/transactions?period=all&accountId=0").get_json())
+        self.assertEqual(before, self.snapshot())
+
+
+if __name__ == "__main__":
+    unittest.main()

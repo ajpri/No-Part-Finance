@@ -849,8 +849,51 @@ def requireText(rawText, fieldName):
     return textValue
 
 
+def accountBalances(connection, activeOnly=False, accountIds=None):
+    requireLedger(connection)
+    accountFilters = []
+    filterValues = []
+    if activeOnly:
+        accountFilters.append("a.active = 1")
+    if accountIds is not None:
+        if not accountIds:
+            return []
+        accountFilters.append("a.id IN (" + ", ".join("?" for accountId in accountIds) + ")")
+        filterValues.extend(accountIds)
+    whereClause = "WHERE " + " AND ".join(accountFilters) if accountFilters else ""
+    return connection.execute(
+        f"""
+        SELECT a.*, a.balanceOffsetCents + COALESCE(SUM(t.amountCents), 0) AS balanceCents
+        FROM scopedaccounts AS a
+        LEFT JOIN scopedtransactions AS t ON t.accountId = a.id
+        {whereClause}
+        GROUP BY a.id
+        ORDER BY CASE a.accountClass WHEN 'cash' THEN 0 WHEN 'credit' THEN 1 ELSE 2 END,
+                 LOWER(a.name), a.id
+        """,
+        filterValues,
+    ).fetchall()
+
+
+def integerFieldValue(rawValue, errorMessage, optional=False):
+    if optional and rawValue in (None, ""):
+        return None
+    if type(rawValue) not in (int, str):
+        raise ValidationError(errorMessage)
+    if isinstance(rawValue, str) and not re.fullmatch(r"[+-]?[0-9]+", rawValue.strip()):
+        raise ValidationError(errorMessage)
+    try:
+        integerValue = int(rawValue)
+    except ValueError as error:
+        raise ValidationError(errorMessage) from error
+    if not -9223372036854775808 <= integerValue <= 9223372036854775807:
+        raise ValidationError(errorMessage)
+    return integerValue
+
+
 def getAccount(connection, accountId, activeRequired=False):
     requireLedger(connection)
+    accountId = integerFieldValue(accountId, "Account ID must be an integer", optional=True)
     account = connection.execute(
         "SELECT * FROM scopedaccounts WHERE id = ?", (accountId,)
     ).fetchone()
@@ -863,6 +906,7 @@ def getAccount(connection, accountId, activeRequired=False):
 
 def getSelectableCategory(connection, categoryId, allowArchived=False):
     requireLedger(connection)
+    categoryId = integerFieldValue(categoryId, "Category ID must be an integer", optional=True)
     category = connection.execute(
         """
         SELECT c.*, EXISTS(
@@ -1024,10 +1068,7 @@ def updateTransaction(connection, transactionId, accountId, transactionDate, des
         raise ValidationError("Edit linked transfers through the transfer operation")
     validateDate(transactionDate)
     description = requireText(description, "Description")
-    try:
-        selectedAccountId = int(accountId)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValidationError("Account ID must be an integer") from error
+    selectedAccountId = integerFieldValue(accountId, "Account ID must be an integer")
     account = getAccount(
         connection, accountId,
         activeRequired=selectedAccountId != existing["accountId"],
@@ -1043,7 +1084,7 @@ def updateTransaction(connection, transactionId, accountId, transactionDate, des
     else:
         category = getSelectableCategory(
             connection, categoryId,
-            allowArchived=int(categoryId) == existing["categoryId"],
+            allowArchived=integerFieldValue(categoryId, "Category ID must be an integer") == existing["categoryId"],
         )
         storedAmountCents = storedAmountForCategory(category["reportingRole"], enteredAmountCents)
     with connection:
@@ -1086,6 +1127,14 @@ def deleteTransaction(connection, transactionId):
             connection.execute("DELETE FROM transactions WHERE ledgerId = currentLedgerId() AND (id = ?)", (transactionId,))
 
 
+def defaultTransferDescription(destination):
+    name = destination["name"].strip()
+    if destination["accountClass"] == "credit":
+        suffix = " Card" if destination["accountSubtype"] == "Credit Card" and not re.search(r"\bcard$", name, re.IGNORECASE | re.ASCII) else ""
+        return f"{name}{suffix} Payment"
+    return f"Transfer to {name}"
+
+
 def prepareTransfer(connection, transactionDate, fromAccountId, toAccountId, enteredAmount, description):
     requireLedger(connection)
     validateDate(transactionDate)
@@ -1098,23 +1147,34 @@ def prepareTransfer(connection, transactionDate, fromAccountId, toAccountId, ent
     return fromAccount["id"], toAccount["id"], transactionDate, description, amountCents
 
 
-def insertTransfer(connection, values):
+def validTransferRows(rows):
+    return (
+        len(rows) == 2 and bool(rows[0]["transferId"])
+        and rows[0]["transferId"] == rows[1]["transferId"]
+        and rows[0]["amountCents"] != 0
+        and sum(row["amountCents"] for row in rows) == 0
+        and rows[0]["accountId"] != rows[1]["accountId"]
+        and rows[0]["date"] == rows[1]["date"]
+        and rows[0]["description"] == rows[1]["description"]
+        and all(row["categoryId"] is None for row in rows)
+    )
+
+
+def insertTransfer(connection, values, transferId=None):
     requireLedger(connection)
     fromId, toId, transactionDate, description, amountCents = values
-    transferId = str(uuid4())
-    for accountId, signedAmount in ((fromId, -amountCents), (toId, amountCents)):
-        connection.execute(
-            "INSERT INTO transactions (accountId, date, description, amountCents, categoryId, transferId) VALUES (?, ?, ?, ?, NULL, ?)",
-            (accountId, transactionDate, description, signedAmount, transferId),
-        )
-    return transferId
+    transferId = transferId or str(uuid4())
+    statement = "INSERT INTO transactions (accountId, date, description, amountCents, categoryId, transferId) VALUES (?, ?, ?, ?, NULL, ?)"
+    sourceCursor = connection.execute(statement, (fromId, transactionDate, description, -amountCents, transferId))
+    connection.execute(statement, (toId, transactionDate, description, amountCents, transferId))
+    return transferId, sourceCursor.lastrowid
 
 
 def createTransfer(connection, transactionDate, fromAccountId, toAccountId, enteredAmount, description="Transfer"):
     requireLedger(connection)
     values = prepareTransfer(connection, transactionDate, fromAccountId, toAccountId, enteredAmount, description)
     with connection:
-        return insertTransfer(connection, values)
+        return insertTransfer(connection, values)[0]
 
 
 def updateTransfer(connection, transferId, transactionDate, fromAccountId, toAccountId, enteredAmount, description="Transfer"):
@@ -1122,16 +1182,13 @@ def updateTransfer(connection, transferId, transactionDate, fromAccountId, toAcc
     transferRows = connection.execute(
         "SELECT * FROM scopedtransactions WHERE transferId = ? ORDER BY amountCents", (transferId,)
     ).fetchall()
-    if len(transferRows) != 2 or sum(row["amountCents"] for row in transferRows) != 0:
+    if not validTransferRows(transferRows):
         raise ValidationError("Transfer is incomplete or invalid")
     validateDate(transactionDate)
     description = requireText(description, "Description")
     amountCents = parseMoneyCents(enteredAmount, positiveOnly=True)
-    try:
-        selectedFromAccountId = int(fromAccountId)
-        selectedToAccountId = int(toAccountId)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValidationError("Transfer Account IDs must be integers") from error
+    selectedFromAccountId = integerFieldValue(fromAccountId, "Transfer Account IDs must be integers")
+    selectedToAccountId = integerFieldValue(toAccountId, "Transfer Account IDs must be integers")
     if selectedFromAccountId == selectedToAccountId:
         raise ValidationError("Transfer accounts must be different")
     currentAccountIds = {row["accountId"] for row in transferRows}
@@ -1147,24 +1204,13 @@ def updateTransfer(connection, transferId, transactionDate, fromAccountId, toAcc
     )]
     with connection:
         connection.execute("DELETE FROM transactions WHERE ledgerId = currentLedgerId() AND (transferId = ?)", (transferId,))
-        fromCursor = connection.execute(
-            """
-            INSERT INTO transactions
-                (accountId, date, description, amountCents, categoryId, transferId)
-            VALUES (?, ?, ?, ?, NULL, ?)
-            """,
-            (fromAccount["id"], transactionDate, description, -amountCents, transferId),
-        )
-        connection.execute(
-            """INSERT INTO transactions
-                   (accountId, date, description, amountCents, categoryId, transferId)
-               VALUES (?, ?, ?, ?, NULL, ?)""",
-            (toAccount["id"], transactionDate, description, amountCents, transferId),
+        _, sourceTransactionId = insertTransfer(
+            connection, (fromAccount["id"], toAccount["id"], transactionDate, description, amountCents), transferId
         )
         if linkedSimulatorRowIds:
             connection.executemany(
                 "UPDATE simulatorRows SET executed = 1, executedTransactionId = ? WHERE ledgerId = currentLedgerId() AND (id = ?)",
-                ((fromCursor.lastrowid, rowId) for rowId in linkedSimulatorRowIds),
+                ((sourceTransactionId, rowId) for rowId in linkedSimulatorRowIds),
             )
 
 
@@ -1249,24 +1295,26 @@ def minimumStatus(minimumBalanceCents, cautionPercent, balanceCents):
     return {"state": state, "label": label, "greenThresholdCents": greenThresholdCents}
 
 
+def validateAccountFields(name, accountClass, accountSubtype):
+    name = requireText(name, "Account name")
+    if name.casefold() == "external":
+        raise ValidationError("External is reserved for the built-in System Account")
+    if accountClass not in ("cash", "credit"):
+        raise ValidationError("Account class must be cash or credit")
+    accountSubtype = accountSubtype or None
+    if accountClass == "credit" and accountSubtype not in (None, "Credit Card", "Personal Loan", "Other"):
+        raise ValidationError("Credit account subtype is invalid")
+    if accountClass == "cash" and accountSubtype not in (None, "checking", "savings", "other"):
+        raise ValidationError("Cash account subtype is invalid")
+    return name, accountSubtype
+
+
 def createAccount(connection, name, accountClass, accountSubtype=None, displayOrder=0, openingBalance=None, creditLimit=None, minimumBalance=None, minimumCautionPercent=None, utilizationWarning=None, pinnedForSelection=False):
     requireLedger(connection)
     if type(pinnedForSelection) is not bool:
         raise ValidationError("Pin in account selectors must be Boolean")
-    name = requireText(name, "Account name")
-    if name.casefold() == "external":
-        raise ValidationError("External is reserved for the built-in System Account")
-    if accountClass not in {"cash", "credit"}:
-        raise ValidationError("Account class must be cash or credit")
-    accountSubtype = accountSubtype or None
-    if accountClass == "credit" and accountSubtype not in {None, "Credit Card", "Personal Loan", "Other"}:
-        raise ValidationError("Credit account subtype is invalid")
-    if accountClass == "cash" and accountSubtype not in {None, "checking", "savings", "other"}:
-        raise ValidationError("Cash account subtype is invalid")
-    try:
-        displayOrder = int(displayOrder)
-    except (TypeError, ValueError) as error:
-        raise ValidationError("Display order must be an integer") from error
+    name, accountSubtype = validateAccountFields(name, accountClass, accountSubtype)
+    displayOrder = integerFieldValue(displayOrder, "Display order must be an integer")
     openingAmountCents = 0
     creditLimitCents = creditLimitValue(accountClass, accountSubtype, creditLimit)
     utilizationWarningBasisPoints = utilizationWarningValue(accountClass, accountSubtype, creditLimitCents, utilizationWarning)
@@ -1307,16 +1355,7 @@ def updateAccount(connection, accountId, name, accountClass, accountSubtype=None
         raise ValidationError("System Accounts are managed by No Part Finance and cannot be modified")
     if type(pinnedForSelection) is not bool:
         raise ValidationError("Pin in account selectors must be Boolean")
-    name = requireText(name, "Account name")
-    if name.casefold() == "external":
-        raise ValidationError("External is reserved for the built-in System Account")
-    if accountClass not in {"cash", "credit"}:
-        raise ValidationError("Account class must be cash or credit")
-    accountSubtype = accountSubtype or None
-    if accountClass == "credit" and accountSubtype not in {None, "Credit Card", "Personal Loan", "Other"}:
-        raise ValidationError("Credit account subtype is invalid")
-    if accountClass == "cash" and accountSubtype not in {None, "checking", "savings", "other"}:
-        raise ValidationError("Cash account subtype is invalid")
+    name, accountSubtype = validateAccountFields(name, accountClass, accountSubtype)
     creditLimitCents = creditLimitValue(accountClass, accountSubtype, creditLimit)
     utilizationWarningBasisPoints = utilizationWarningValue(accountClass, accountSubtype, creditLimitCents, utilizationWarning)
     minimumBalanceCents, minimumCautionPercent = cashMinimumValues(accountClass, minimumBalance, minimumCautionPercent)
@@ -1335,7 +1374,7 @@ def updateAccount(connection, accountId, name, accountClass, accountSubtype=None
     ).fetchone() and (not active or accountClass != "credit" or accountSubtype not in {"Credit Card", "Personal Loan"}):
         raise ValidationError("Archive or remove the active planned debt payment before changing this account")
     try:
-        displayOrder = int(displayOrder)
+        displayOrder = integerFieldValue(displayOrder, "Display order must be an integer")
         activeValue = 1 if active else 0
         with connection:
             connection.execute(
@@ -1395,8 +1434,8 @@ def validateRollupParent(connection, parentCategoryId):
 def createCategory(connection, name, parentCategoryId=None, displayOrder=0, offerReimbursement=False, reportingRole="expense"):
     requireLedger(connection)
     name = requireText(name, "Category name")
-    parentCategoryId = int(parentCategoryId) if parentCategoryId not in (None, "") else None
-    if reportingRole not in {"expense", "income"}:
+    parentCategoryId = integerFieldValue(parentCategoryId, "Parent Category ID must be an integer", optional=True)
+    if reportingRole not in ("expense", "income"):
         raise ValidationError("Reporting role must be Expense or Income")
     if reportingRole == "income" and parentCategoryId:
         raise ValidationError("Income categories must be standalone")
@@ -1421,7 +1460,7 @@ def createCategory(connection, name, parentCategoryId=None, displayOrder=0, offe
             validateRollupParent(connection, parentCategoryId)
             cursor = connection.execute(
                 "INSERT INTO categories (name, parentCategoryId, displayOrder, offerReimbursement, reportingRole) VALUES (?, ?, ?, ?, ?)",
-                (name, parentCategoryId, int(displayOrder), 1 if offerReimbursement else 0, reportingRole),
+                (name, parentCategoryId, integerFieldValue(displayOrder, "Display order must be an integer"), 1 if offerReimbursement else 0, reportingRole),
             )
         return cursor.lastrowid
     except ValidationError:
@@ -1438,9 +1477,9 @@ def updateCategory(connection, categoryId, name, parentCategoryId=None, displayO
     if not category:
         raise ValidationError("Category does not exist")
     name = requireText(name, "Category name")
-    if reportingRole not in {"expense", "income"}:
+    if reportingRole not in ("expense", "income"):
         raise ValidationError("Reporting role must be Expense or Income")
-    parentCategoryId = int(parentCategoryId) if parentCategoryId not in (None, "") else None
+    parentCategoryId = integerFieldValue(parentCategoryId, "Parent Category ID must be an integer", optional=True)
     if parentCategoryId == int(categoryId):
         raise ValidationError("A category cannot be its own parent")
     hasChildren = connection.execute(
@@ -1491,7 +1530,7 @@ def updateCategory(connection, categoryId, name, parentCategoryId=None, displayO
                 SET name = ?, parentCategoryId = ?, displayOrder = ?, active = ?, offerReimbursement = ?, reportingRole = ?
                 WHERE ledgerId = currentLedgerId() AND (id = ?
                 )""",
-                (name, parentCategoryId, int(displayOrder), 1 if active else 0, 1 if offerReimbursement else 0, reportingRole, categoryId),
+                (name, parentCategoryId, integerFieldValue(displayOrder, "Display order must be an integer"), 1 if active else 0, 1 if offerReimbursement else 0, reportingRole, categoryId),
             )
     except ValidationError:
         raise
@@ -1567,6 +1606,20 @@ def percentageHundredths(numerator, denominator):
             Decimal("1"), rounding=ROUND_HALF_UP
         )
     )
+
+
+def accountChangeGroups(accountResults):
+    groups = []
+    for accountClass, label in (("cash", "Cash Accounts"), ("credit", "Credit Cards and Loans")):
+        groupAccounts = [account for account in accountResults if account["accountClass"] == accountClass]
+        if groupAccounts:
+            groups.append({
+                "accountClass": accountClass,
+                "label": label,
+                "amountCents": sum(account["amountCents"] for account in groupAccounts),
+                "accounts": groupAccounts,
+            })
+    return groups
 
 
 def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None, today=None):
@@ -1674,19 +1727,7 @@ def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None
         netChangeAccountResults.append({
             **accountDetails, "amountCents": netChangeCents, "isZero": netChangeCents == 0,
         })
-    netChangeGroups = []
-    for accountClass, label in (("cash", "Cash Accounts"), ("credit", "Credit Cards and Loans")):
-        groupAccounts = [
-            account for account in netChangeAccountResults
-            if account["accountClass"] == accountClass
-        ]
-        if groupAccounts:
-            netChangeGroups.append({
-                "accountClass": accountClass,
-                "label": label,
-                "amountCents": sum(account["amountCents"] for account in groupAccounts),
-                "accounts": groupAccounts,
-            })
+    netChangeGroups = accountChangeGroups(netChangeAccountResults)
     balanceChangeRows = connection.execute(
         """
         SELECT a.id, a.name, a.accountClass, a.active, a.displayOrder,
@@ -1712,19 +1753,7 @@ def dashboardReport(connection, period="thisMonth", startDate=None, endDate=None
             "amountCents": displayChangeCents,
             "isZero": displayChangeCents == 0,
         })
-    balanceChangeGroups = []
-    for accountClass, label in (("cash", "Cash Accounts"), ("credit", "Credit Cards and Loans")):
-        groupAccounts = [
-            account for account in balanceChangeAccountResults
-            if account["accountClass"] == accountClass
-        ]
-        if groupAccounts:
-            balanceChangeGroups.append({
-                "accountClass": accountClass,
-                "label": label,
-                "amountCents": sum(account["amountCents"] for account in groupAccounts),
-                "accounts": groupAccounts,
-            })
+    balanceChangeGroups = accountChangeGroups(balanceChangeAccountResults)
     expenseAccountCategoryRows = connection.execute(
         """
         SELECT t.accountId, t.categoryId, -SUM(t.amountCents) AS amountCents
@@ -1848,7 +1877,7 @@ def createTemplate(connection, name, accountId, description, categoryId, entered
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (name, account["id"] if account else None, description,
-                 category["id"] if category else None, amountCents, int(displayOrder), 1 if prefillAmount else 0),
+                 category["id"] if category else None, amountCents, integerFieldValue(displayOrder, "Display order must be an integer"), 1 if prefillAmount else 0),
             )
         return cursor.lastrowid
     except ValidationError:
@@ -1900,7 +1929,7 @@ def updateTemplate(connection, templateId, name, accountId, description, categor
                 )""",
                 (name, account["id"] if account else None, description,
                  category["id"] if category else None, amountCents,
-                 int(displayOrder), 1 if active else 0, 1 if prefillAmount else 0, templateId),
+                 integerFieldValue(displayOrder, "Display order must be an integer"), 1 if active else 0, 1 if prefillAmount else 0, templateId),
             )
     except ValidationError:
         raise
@@ -1927,27 +1956,31 @@ def deleteTemplate(connection, templateId):
         connection.execute("DELETE FROM transactionTemplates WHERE ledgerId = currentLedgerId() AND (id = ?)", (templateId,))
 
 
-def validateCompleteExpenseTemplate(connection, templateId):
+def planningTemplateValues(connection, templateId, reportingRole):
     requireLedger(connection)
+    templateId = integerFieldValue(templateId, "Template ID must be an integer", optional=True)
     template = connection.execute(
-        """SELECT tt.*, a.active AS accountActive, c.active AS categoryActive,
-                  c.reportingRole,
+        """SELECT tt.*, a.active AS accountActive, c.active AS categoryActive, c.reportingRole,
                   EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
            FROM scopedtransactionTemplates tt
            LEFT JOIN scopedaccounts a ON a.id = tt.accountId
            LEFT JOIN scopedcategories c ON c.id = tt.categoryId
-           WHERE tt.id = ?""",
-        (templateId,),
+           WHERE tt.id = ?""", (templateId,)
     ).fetchone()
-    if not template:
-        raise ValidationError("Template does not exist")
-    complete = (
-        template["active"] and (template["accountId"] is None or template["accountActive"])
+    complete = bool(
+        template and template["active"] and (template["accountId"] is None or template["accountActive"])
         and template["description"] and template["categoryId"] is not None
-        and template["categoryActive"] and template["reportingRole"] == "expense"
+        and template["categoryActive"] and template["reportingRole"] == reportingRole
         and not template["hasChildren"] and template["enteredAmountCents"] is not None
         and template["enteredAmountCents"] > 0
     )
+    return template, complete
+
+
+def validateCompleteExpenseTemplate(connection, templateId):
+    template, complete = planningTemplateValues(connection, templateId, "expense")
+    if not template:
+        raise ValidationError("Template does not exist")
     if not complete:
         raise ValidationError("Sinking Fund plans require a complete active Expense template with a positive amount")
     return template
@@ -2016,6 +2049,7 @@ def applicationSettingInteger(connection, key, defaultValue):
 
 def validateFlexibleCategory(connection, categoryId):
     requireLedger(connection)
+    categoryId = integerFieldValue(categoryId, "Category ID must be an integer", optional=True)
     category = connection.execute(
         """SELECT c.*, EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
            FROM scopedcategories c WHERE c.id = ?""", (categoryId,)
@@ -2072,19 +2106,7 @@ def deleteFlexibleCategoryBudget(connection, budgetId):
 
 
 def validateCompleteIncomeTemplate(connection, templateId):
-    requireLedger(connection)
-    template = connection.execute(
-        """SELECT tt.*, a.active AS accountActive, c.active AS categoryActive, c.reportingRole,
-                  EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
-           FROM scopedtransactionTemplates tt
-           LEFT JOIN scopedaccounts a ON a.id = tt.accountId
-           LEFT JOIN scopedcategories c ON c.id = tt.categoryId
-           WHERE tt.id = ?""", (templateId,)
-    ).fetchone()
-    complete = template and template["active"] and (template["accountId"] is None or template["accountActive"])
-    complete = complete and template["description"] and template["categoryId"] is not None
-    complete = complete and template["categoryActive"] and template["reportingRole"] == "income" and not template["hasChildren"]
-    complete = complete and template["enteredAmountCents"] is not None and template["enteredAmountCents"] > 0
+    template, complete = planningTemplateValues(connection, templateId, "income")
     if not complete:
         raise ValidationError("Expected income plans require a complete active Income template with a positive amount")
     return template
@@ -2106,6 +2128,7 @@ def updateExpectedIncomePlan(connection, planId, templateId, expectedDate, activ
     requireLedger(connection)
     if not connection.execute("SELECT 1 FROM scopedexpectedIncomePlans WHERE id = ?", (planId,)).fetchone():
         raise ValidationError("Expected income plan does not exist")
+    templateId = integerFieldValue(templateId, "Template ID must be an integer")
     if active:
         validateCompleteIncomeTemplate(connection, templateId)
     validateDate(expectedDate)
@@ -2151,6 +2174,7 @@ def updatePlannedCreditPayment(connection, planId, expectedDate, accountId, desc
     if not connection.execute("SELECT 1 FROM scopedplannedCreditPayments WHERE id = ?", (planId,)).fetchone():
         raise ValidationError("Planned credit payment does not exist")
     validateDate(expectedDate)
+    accountId = integerFieldValue(accountId, "Account ID must be an integer")
     if active:
         validateCreditPaymentAccount(connection, accountId)
     description = requireText(description, "Description")
@@ -2216,12 +2240,9 @@ def deleteSimulatorPlan(connection, planId):
 def saveSimulatorRow(connection, planId, rowId, rowType, fromAccountId=None, toAccountId=None,
                      categoryId=None, label=None, amount=None):
     requireLedger(connection)
-    try:
-        fromAccountId = int(fromAccountId) if fromAccountId not in (None, "") else None
-        toAccountId = int(toAccountId) if toAccountId not in (None, "") else None
-        categoryId = int(categoryId) if categoryId not in (None, "") else None
-    except (TypeError, ValueError) as error:
-        raise ValidationError("Selected account or category does not exist") from error
+    fromAccountId = integerFieldValue(fromAccountId, "Selected account or category does not exist", optional=True)
+    toAccountId = integerFieldValue(toAccountId, "Selected account or category does not exist", optional=True)
+    categoryId = integerFieldValue(categoryId, "Selected account or category does not exist", optional=True)
     if rowType not in {"live", "income", "spend", "transfer", "payoff", "buffer"}:
         raise ValidationError("Type is required")
     payoffMode = rowType == "payoff"
@@ -2411,24 +2432,15 @@ def recordSimulatorTransfer(connection, planId, rowId, transactionDate, fromAcco
     validateDate(transactionDate)
     description = requireText(description, "Description")
     amountCents = parseMoneyCents(enteredAmount, positiveOnly=True)
-    try:
-        selectedFromAccountId = int(fromAccountId)
-        selectedToAccountId = int(toAccountId)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValidationError("Transfer Account IDs must be integers") from error
+    selectedFromAccountId = integerFieldValue(fromAccountId, "Transfer Account IDs must be integers")
+    selectedToAccountId = integerFieldValue(toAccountId, "Transfer Account IDs must be integers")
     if selectedFromAccountId == selectedToAccountId:
         raise ValidationError("Transfer accounts must be different")
     fromAccount = getAccount(connection, fromAccountId, activeRequired=True)
     toAccount = getAccount(connection, toAccountId, activeRequired=True)
-    transferId = str(uuid4())
     with connection:
-        sourceCursor = connection.execute(
-            "INSERT INTO transactions (accountId,date,description,amountCents,categoryId,transferId) VALUES (?,?,?,?,NULL,?)",
-            (fromAccount["id"], transactionDate, description, -amountCents, transferId),
-        )
-        connection.execute(
-            "INSERT INTO transactions (accountId,date,description,amountCents,categoryId,transferId) VALUES (?,?,?,?,NULL,?)",
-            (toAccount["id"], transactionDate, description, amountCents, transferId),
+        transferId, sourceTransactionId = insertTransfer(
+            connection, (fromAccount["id"], toAccount["id"], transactionDate, description, amountCents)
         )
         if row["amountMode"] == "payoff":
             connection.execute(
@@ -2436,14 +2448,14 @@ def recordSimulatorTransfer(connection, planId, rowId, transactionDate, fromAcco
                    fromAccountId=?, toAccountId=?, label=?, amountCents=?, executed=1,
                    executedTransactionId=? WHERE ledgerId = currentLedgerId() AND (id=? AND planId=?)""",
                 (fromAccount["id"], toAccount["id"], description, amountCents,
-                 sourceCursor.lastrowid, rowId, planId),
+                 sourceTransactionId, rowId, planId),
             )
         else:
             connection.execute(
                 "UPDATE simulatorRows SET executed=1, executedTransactionId=? WHERE ledgerId = currentLedgerId() AND (id=? AND planId=?)",
-                (sourceCursor.lastrowid, rowId, planId),
+                (sourceTransactionId, rowId, planId),
             )
-    return transferId, sourceCursor.lastrowid
+    return transferId, sourceTransactionId
 
 
 def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True):
@@ -2524,7 +2536,7 @@ def simulatorWorkspace(connection, requestedPlanId=None, repairMissingLinks=True
                         "SELECT * FROM scopedtransactions WHERE transferId=? ORDER BY amountCents",
                         (linked["transferId"],),
                     ).fetchall()
-                    if len(pair) == 2 and sum(item["amountCents"] for item in pair) == 0:
+                    if validTransferRows(pair):
                         row["fromAccountId"], row["toAccountId"] = pair[0]["accountId"], pair[1]["accountId"]
                         row["amountCents"] = -pair[0]["amountCents"]
                 else:
@@ -2637,43 +2649,27 @@ def createSinkingFundPlan(connection, templateId, frequency, expectedDate):
         raise ValidationError("A template may have only one active Sinking Fund plan") from error
 
 
-def simulatorLedgerMapping(connection, transactionId=None, transferId=None):
-    requireLedger(connection)
-    """Return an eligible ledger event as existing Simulator row values."""
-    if bool(transactionId) == bool(transferId):
-        raise ValidationError("Select one ledger event to send")
-    if transferId:
-        rows = connection.execute(
-            """SELECT t.*, a.name AS accountName, a.active AS accountActive
-               FROM scopedtransactions t JOIN scopedaccounts a ON a.id = t.accountId
-               WHERE t.transferId = ? ORDER BY t.amountCents""", (transferId,)
-        ).fetchall()
-        if (len(rows) != 2 or sum(row["amountCents"] for row in rows) != 0
-                or rows[0]["amountCents"] >= 0 or rows[1]["amountCents"] <= 0
-                or not all(row["accountActive"] for row in rows)):
-            raise ValidationError("This transfer cannot be sent to Simulator")
-        fromRow, toRow = rows
-        return {
-            "rowType": "transfer", "rowTypeLabel": "Planned Transfer",
-            "fromAccountId": fromRow["accountId"], "fromAccountName": fromRow["accountName"],
-            "toAccountId": toRow["accountId"], "toAccountName": toRow["accountName"],
-            "categoryId": None, "label": fromRow["description"],
-            "amountCents": -fromRow["amountCents"],
-        }
-    row = connection.execute(
-        """SELECT t.*, a.name AS accountName, a.active AS accountActive,
-                  c.name AS categoryName, c.active AS categoryActive,
-                  c.reportingRole, EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
-           FROM scopedtransactions t JOIN scopedaccounts a ON a.id = t.accountId
-           LEFT JOIN scopedcategories c ON c.id = t.categoryId WHERE t.id = ?""", (transactionId,)
-    ).fetchone()
+def simulatorTransferMapping(rows):
+    if not validTransferRows(rows) or not all(row["accountActive"] for row in rows):
+        raise ValidationError("This transfer cannot be sent to Simulator")
+    fromRow, toRow = sorted(rows, key=lambda item: item["amountCents"])
+    return {
+        "rowType": "transfer", "rowTypeLabel": "Planned Transfer",
+        "fromAccountId": fromRow["accountId"], "fromAccountName": fromRow["accountName"],
+        "toAccountId": toRow["accountId"], "toAccountName": toRow["accountName"],
+        "categoryId": None, "label": fromRow["description"],
+        "amountCents": -fromRow["amountCents"],
+    }
+
+
+def simulatorTransactionMapping(row):
     if (not row or row["transferId"] or not row["categoryId"] or not row["accountActive"]
             or not row["categoryActive"] or row["hasChildren"]):
         raise ValidationError("This transaction cannot be sent to Simulator")
-    amountCents = row["amountCents"] if row["reportingRole"] == "income" else -row["amountCents"]
+    amountCents = row["amountCents"] if row["categoryRole"] == "income" else -row["amountCents"]
     if amountCents <= 0:
         raise ValidationError("Refunds and negative corrections cannot be sent to Simulator")
-    income = row["reportingRole"] == "income"
+    income = row["categoryRole"] == "income"
     return {
         "rowType": "income" if income else "spend",
         "rowTypeLabel": "Planned Income" if income else "Planned Spend",
@@ -2683,6 +2679,29 @@ def simulatorLedgerMapping(connection, transactionId=None, transferId=None):
         "categoryName": row["categoryName"], "label": row["description"],
         "amountCents": amountCents,
     }
+
+
+def simulatorLedgerMapping(connection, transactionId=None, transferId=None):
+    """Return an eligible ledger event as existing Simulator row values."""
+    requireLedger(connection)
+    if bool(transactionId) == bool(transferId):
+        raise ValidationError("Select one ledger event to send")
+    if transferId:
+        rows = connection.execute(
+            """SELECT t.*, a.name AS accountName, a.active AS accountActive
+               FROM scopedtransactions t JOIN scopedaccounts a ON a.id = t.accountId
+               WHERE t.transferId = ? ORDER BY t.amountCents""", (transferId,)
+        ).fetchall()
+        return simulatorTransferMapping(rows)
+    row = connection.execute(
+        """SELECT t.*, a.name AS accountName, a.active AS accountActive,
+                  c.name AS categoryName, c.active AS categoryActive,
+                  c.reportingRole AS categoryRole,
+                  EXISTS(SELECT 1 FROM scopedcategories child WHERE child.parentCategoryId = c.id) AS hasChildren
+           FROM scopedtransactions t JOIN scopedaccounts a ON a.id = t.accountId
+           LEFT JOIN scopedcategories c ON c.id = t.categoryId WHERE t.id = ?""", (transactionId,)
+    ).fetchone()
+    return simulatorTransactionMapping(row)
 
 
 def sendLedgerEventToSimulator(connection, planId, transactionId=None, transferId=None):
@@ -2703,6 +2722,7 @@ def updateSinkingFundPlan(connection, planId, templateId, frequency, expectedDat
         raise ValidationError("Sinking Fund plan does not exist")
     if frequency not in {"monthly", "quarterly", "yearly"}:
         raise ValidationError("Frequency must be Monthly, Quarterly, or Yearly")
+    templateId = integerFieldValue(templateId, "Template ID must be an integer")
     if active:
         if frequency != "monthly" and not connection.execute("SELECT 1 FROM scopedapplicationSettings WHERE key = 'paychecksPerYear'").fetchone():
             raise ValidationError("Set Paychecks Per Year before activating a Sinking Fund plan")
@@ -3106,18 +3126,7 @@ def integrationTransferReview(connection, submitted):
     if not setting or setting["value"] != "1":
         return submitted
     destination = getAccount(connection, submitted.get("toAccountId"), activeRequired=True)
-    name = destination["name"].strip()
-    if destination["accountClass"] == "credit":
-        suffix = " Card" if destination["accountSubtype"] == "Credit Card" and not re.search(r"\bcard$", name, re.IGNORECASE | re.ASCII) else ""
-        description = f"{name}{suffix} Payment"
-    else:
-        description = f"Transfer to {name}"
-    return {**submitted, "description": description}
-
-
-def submitPendingTransaction(connection, integrationId, submitted):
-    requireLedger(connection)
-    return submitPendingEntry(connection, integrationId, submitted)
+    return {**submitted, "description": defaultTransferDescription(destination)}
 
 
 def submitPendingEntry(connection, integrationId, submitted):
@@ -3268,7 +3277,7 @@ def decidePendingTransactions(connection, decision, rows, approveAll=False):
             if decision == "approve":
                 content, values = validatedReview(connection, proposal, row)
                 if proposal["kind"] == "transfer":
-                    transferId = insertTransfer(connection, values)
+                    transferId, _ = insertTransfer(connection, values)
                 else:
                     transactionId = connection.execute("INSERT INTO transactions (accountId, date, description, amountCents, categoryId, pinned) VALUES (?, ?, ?, ?, ?, ?)", values).lastrowid
             connection.execute("UPDATE pendingSubmissions SET status = ?, transactionId = ?, transferId = ? WHERE ledgerId = currentLedgerId() AND (id = ?)", ("Approved" if decision == "approve" else "Rejected", transactionId, transferId, row["id"]))
@@ -3281,7 +3290,7 @@ def ledgerMoveSnapshot(connection, transactionId=None, transferId=None):
         raise ValidationError("Choose one ledger event")
     if transferId is not None:
         rows = connection.execute("SELECT * FROM scopedtransactions WHERE transferId = ? ORDER BY amountCents, id", (transferId,)).fetchall()
-        if len(rows) != 2 or rows[0]["amountCents"] >= 0 or rows[1]["amountCents"] <= 0 or sum(row["amountCents"] for row in rows) != 0 or rows[0]["accountId"] == rows[1]["accountId"] or rows[0]["date"] != rows[1]["date"] or rows[0]["description"] != rows[1]["description"] or any(row["categoryId"] is not None for row in rows):
+        if not validTransferRows(rows):
             raise ValidationError("Transfer is incomplete or invalid")
     else:
         row = connection.execute("SELECT * FROM scopedtransactions WHERE id = ?", (transactionId,)).fetchone()
@@ -3715,7 +3724,7 @@ def setIntegrationState(connection, secretId, enabled):
         connection.execute("UPDATE integrationSecrets SET active = ? WHERE ledgerId = currentLedgerId() AND id = ?", (int(enabled), secretId))
 
 
-def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKeys=False):
+def exportLedgerDatabase(sourceConnection, destinationPath):
     """Copy a consistent authorized subset into fresh pages, never redact a full DB."""
     ledgerId = requireLedger(sourceConnection)
     if sourceConnection.in_transaction:
@@ -3732,7 +3741,6 @@ def exportLedgerDatabase(sourceConnection, destinationPath, disableIntegrationKe
             memberships = snapshot.execute("SELECT a.*, u.username FROM ledgerAccess a JOIN users u ON u.id = a.userId WHERE ledgerId = ?", (ledgerId,)).fetchall()
             if sum(row["role"] == "owner" for row in memberships) != 1:
                 raise ValidationError("Export requires exactly one Owner")
-            userIds = [row["userId"] for row in memberships]
             # Retain creator identities even after their memberships are removed.
             userSelection = "SELECT userId FROM ledgerAccess WHERE ledgerId = ? UNION SELECT creatorUserId FROM integrationSecrets WHERE ledgerId = ?"
             destination = sqlite3.connect(destinationPath)

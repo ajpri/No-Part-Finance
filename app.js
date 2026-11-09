@@ -62,10 +62,6 @@ function friendlyCalendarDate(isoDate) {
   return Number(year) === new Date().getFullYear() ? result : `${result}, ${year}`;
 }
 
-function setMoneyInputValue(input, value) {
-  input.value = value;
-}
-
 function submittedMoneyValue(rawValue) {
   return String(rawValue ?? "").trim();
 }
@@ -148,10 +144,10 @@ function resumeNotificationTimer() {
   notificationTimer = setTimeout(closeNotification, Math.max(1, notificationRemainingMilliseconds));
 }
 
-function friendlyAccountBalance(account) {
+function friendlyAccountBalance(account, amountCents = account.balanceCents) {
   return account.accountClass === "credit"
-    ? account.balanceCents > 0 ? `${dollars(account.balanceCents)} credit` : dollars(-account.balanceCents)
-    : dollars(account.balanceCents);
+    ? amountCents > 0 ? `${dollars(amountCents)} credit` : dollars(-amountCents)
+    : dollars(amountCents);
 }
 
 async function ledgerNotification(action, accountIds) {
@@ -162,11 +158,6 @@ async function ledgerNotification(action, accountIds) {
     if (account && account.accountClass !== "system") lines.push(`${account.name}: ${friendlyAccountBalance(account)}`);
   }
   sendNotification(lines.join("\n"));
-}
-
-function friendlySimulatorBalance(account, amountCents) {
-  if (account.accountClass !== "credit") return dollars(amountCents);
-  return amountCents > 0 ? `${dollars(amountCents)} credit` : dollars(-amountCents);
 }
 
 async function loadSimulator(requestedPlanId = new URLSearchParams(location.search).get("plan"), preservedDrafts = []) {
@@ -195,47 +186,508 @@ function activeSimulatorDirtyRows() {
   for (const row of simulatorDirtyRows) if (!row.isConnected || !row.classList.contains("unsavedRow")) simulatorDirtyRows.delete(row);
   return [...simulatorDirtyRows].filter((row) => !row.classList.contains("hangingRow"));
 }
-function preservedSimulatorDrafts(excludedRow = null) { return activeSimulatorDirtyRows().filter((row)=>row!==excludedRow).map((row)=>({id:row.dataset.id?Number(row.dataset.id):null,categoryId:row.dataset.categoryId?Number(row.dataset.categoryId):null,values:simulatorDraftFromRow(row)})); }
+function preservedSimulatorDrafts(excludedRow = null) {
+  return activeSimulatorDirtyRows().filter((row) => row !== excludedRow).map((row) => ({
+    id: row.dataset.id ? Number(row.dataset.id) : null,
+    categoryId: row.dataset.categoryId ? Number(row.dataset.categoryId) : null,
+    values: simulatorDraftFromRow(row)
+  }));
+}
 function appendSimulatorRow(saved = {}, groupStart = false, dirty = false, originalSavedRow = null) {
-  const hanging=!saved.id&&!saved.rowType; const tr=document.createElement("tr"); if (saved.id) tr.dataset.id=saved.id; else if (hanging) tr.classList.add("hangingRow"); else tr.classList.add("unsavedRow"); if(dirty)tr.classList.add("unsavedRow");if(saved.categoryId)tr.dataset.categoryId=saved.categoryId;
+  const hanging = !saved.id && !saved.rowType;
+  const tr = document.createElement("tr");
+  if (saved.id) tr.dataset.id = saved.id;
+  else if (hanging) tr.classList.add("hangingRow");
+  else tr.classList.add("unsavedRow");
+  if (dirty) tr.classList.add("unsavedRow");
+  if (saved.categoryId) tr.dataset.categoryId = saved.categoryId;
   if (groupStart) tr.classList.add("simulatorGroupStart");
-  const originalSaved={...(originalSavedRow||saved)};
-  let previousKind=saved.rowType||""; let retainedTransferAmount=saved.rowType==="transfer"&&saved.amountCents?(saved.amountCents/100).toFixed(2):saved.rowType==="payoff"&&saved.effectiveAmountCents!==undefined?(saved.effectiveAmountCents/100).toFixed(2):saved.amountValue||"";
-  const type=simulatorSelect([{id:"live",name:"Live balance",active:true},{id:"income",name:"Income",active:true},{id:"spend",name:"Spend",active:true},{id:"transfer",name:"Transfer",active:true},{id:"payoff",name:"Payoff",active:true},{id:"buffer",name:"Buffer",active:true}],"Select type",saved.rowType); tr.insertCell().append(type);
-  const templateCell=tr.insertCell(), accountCell=tr.insertCell(), labelCell=tr.insertCell(), amountCell=tr.insertCell(), actions=tr.insertCell(); amountCell.className="amount";
+  const originalSaved = {
+    ...(originalSavedRow || saved)
+  };
+  let previousKind = saved.rowType || "";
+  let retainedTransferAmount = saved.rowType === "transfer" && saved.amountCents ? (saved.amountCents / 100).toFixed(2) : saved.rowType === "payoff" && saved.effectiveAmountCents !== undefined ? (saved.effectiveAmountCents / 100).toFixed(2) : saved.amountValue || "";
+  const type = simulatorSelect([{
+    id: "live",
+    name: "Live balance",
+    active: true
+  }, {
+    id: "income",
+    name: "Income",
+    active: true
+  }, {
+    id: "spend",
+    name: "Spend",
+    active: true
+  }, {
+    id: "transfer",
+    name: "Transfer",
+    active: true
+  }, {
+    id: "payoff",
+    name: "Payoff",
+    active: true
+  }, {
+    id: "buffer",
+    name: "Buffer",
+    active: true
+  }], "Select type", saved.rowType);
+  tr.insertCell().append(type);
+  const templateCell = tr.insertCell(),
+    accountCell = tr.insertCell(),
+    labelCell = tr.insertCell(),
+    amountCell = tr.insertCell(),
+    actions = tr.insertCell();
+  amountCell.className = "amount";
   if (saved.executed) {
     tr.classList.add("simulatorExecutedRow");
-    type.disabled=true; templateCell.textContent="—";
-    const accountName=(id)=>accounts.find((account)=>account.id===Number(id))?.name||"—";
-    accountCell.textContent=["transfer","payoff"].includes(saved.rowType)?`${accountName(saved.fromAccountId)} → ${accountName(saved.toAccountId)}`:accountName(saved.rowType==="income"?saved.toAccountId:saved.fromAccountId);
-    labelCell.textContent=saved.label||"—"; amountCell.textContent=dollars(saved.effectiveAmountCents||0);
-    const edit=document.createElement("button");edit.type="button";edit.textContent="Edit";edit.addEventListener("click",()=>openSimulatorRowDialog(saved));actions.append(edit);bodyAppend(tr);return;
+    type.disabled = true;
+    templateCell.textContent = "—";
+    const accountName = (id) => accounts.find((account) => account.id === Number(id))?.name || "—";
+    accountCell.textContent = ["transfer", "payoff"].includes(saved.rowType) ? `${accountName(saved.fromAccountId)} → ${accountName(saved.toAccountId)}` : accountName(saved.rowType === "income" ? saved.toAccountId : saved.fromAccountId);
+    labelCell.textContent = saved.label || "—";
+    amountCell.textContent = dollars(saved.effectiveAmountCents || 0);
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => openSimulatorRowDialog(saved));
+    actions.append(edit);
+    bodyAppend(tr);
+    return;
   }
+
   function rebuild() {
-    const kind=type.value; templateCell.replaceChildren(); accountCell.replaceChildren(); labelCell.replaceChildren(); amountCell.replaceChildren();
-    if (!kind) { for (const cell of [templateCell,accountCell,labelCell,amountCell]) cell.textContent=""; return; }
-    if (["income","spend"].includes(kind)) { const compatible=activeTemplates().filter((item)=>!item.categoryId || categories.find((c)=>c.id===item.categoryId)?.reportingRole===(kind==="income"?"income":"expense")); const use=simulatorSelect(compatible,"None",saved.selectedTemplateId||""); use.className="rowTemplate"; templateCell.append(use); use.addEventListener("change",()=>{const item=templates.find((x)=>x.id===Number(use.value));if(item){accountCell.querySelector("select").value=item.accountId||"";labelCell.querySelector("input").value=item.description||"";setMoneyInputValue(amountCell.querySelector("input"),item.enteredAmountCents?(item.enteredAmountCents/100).toFixed(2):"");if(item.categoryId)tr.dataset.categoryId=item.categoryId;else delete tr.dataset.categoryId;}else delete tr.dataset.categoryId;mark();}); } else templateCell.textContent="—";
-    const currentAccount = kind==="income" ? saved.toAccountId : saved.fromAccountId; const allowed=accounts.filter((a)=>kind==="buffer"?a.active:(a.active || a.id===Number(currentAccount))).filter((a)=>kind==="transfer" || a.accountClass!=="system").filter((a)=>(!["live","payoff","buffer"].includes(kind)) || a.accountClass==="cash"); const first=simulatorAccountSelect(allowed,"Select account",currentAccount); first.className="fromAccount"; accountCell.append(first);
-    if (["transfer","payoff"].includes(kind)) { const destinations=accounts.filter((a)=>a.active || a.id===Number(saved.toAccountId)).filter((a)=>kind!=="payoff"||a.accountClass==="credit");const second=simulatorAccountSelect(destinations,"Select account",saved.toAccountId); second.className="toAccount"; second.addEventListener("change",()=>{const destination=accounts.find((account)=>account.id===Number(second.value));const label=labelCell.querySelector("input");if(destination?.accountClass==="credit"&&label){label.value=paymentDescription(destination);mark();}else if(destination?.accountClass==="cash"&&label){label.value=`Transfer to ${destination.name}`;mark();}}); const arrow=document.createElement("span");arrow.textContent="→";arrow.setAttribute("aria-hidden","true");const pair=document.createElement("div");pair.className="simulatorAccountPair";pair.append(first,arrow,second);accountCell.replaceChildren(pair); }
-    if (kind==="live") { labelCell.textContent="—"; const account=accounts.find((a)=>a.id===Number(currentAccount)); amountCell.textContent=account?dollars(account.balanceCents):"—"; } else { const label=document.createElement("input"); label.value=saved.label||""; labelCell.append(label); if(kind==="payoff"){amountCell.textContent=Number.isInteger(saved.effectiveAmountCents)?dollars(saved.effectiveAmountCents):"Calculated on save";}else{const amount=document.createElement("input"); amount.inputMode="decimal"; amount.placeholder="0.00"; amount.value=saved.amountValue??(saved.amountCents?(saved.amountCents/100).toFixed(2):""); amountCell.append(amount);} }
+    const kind = type.value;
+    templateCell.replaceChildren();
+    accountCell.replaceChildren();
+    labelCell.replaceChildren();
+    amountCell.replaceChildren();
+    if (!kind) {
+      for (const cell of [templateCell, accountCell, labelCell, amountCell]) cell.textContent = "";
+      return;
+    }
+    if (["income", "spend"].includes(kind)) {
+      const compatible = activeTemplates().filter((item) => !item.categoryId || categories.find((c) => c.id === item.categoryId)?.reportingRole === (kind === "income" ? "income" : "expense"));
+      const use = simulatorSelect(compatible, "None", saved.selectedTemplateId || "");
+      use.className = "rowTemplate";
+      templateCell.append(use);
+      use.addEventListener("change", () => {
+        const item = templates.find((x) => x.id === Number(use.value));
+        if (item) {
+          accountCell.querySelector("select").value = item.accountId || "";
+          labelCell.querySelector("input").value = item.description || "";
+          amountCell.querySelector("input").value = item.enteredAmountCents ? (item.enteredAmountCents / 100).toFixed(2) : "";
+          if (item.categoryId) tr.dataset.categoryId = item.categoryId;
+          else delete tr.dataset.categoryId;
+        } else delete tr.dataset.categoryId;
+        mark();
+      });
+    } else templateCell.textContent = "—";
+    const currentAccount = kind === "income" ? saved.toAccountId : saved.fromAccountId;
+    const allowed = accounts.filter((a) => kind === "buffer" ? a.active : (a.active || a.id === Number(currentAccount))).filter((a) => kind === "transfer" || a.accountClass !== "system").filter((a) => (!["live", "payoff", "buffer"].includes(kind)) || a.accountClass === "cash");
+    const first = simulatorAccountSelect(allowed, "Select account", currentAccount);
+    first.className = "fromAccount";
+    accountCell.append(first);
+    if (["transfer", "payoff"].includes(kind)) {
+      const destinations = accounts.filter((a) => a.active || a.id === Number(saved.toAccountId)).filter((a) => kind !== "payoff" || a.accountClass === "credit");
+      const second = simulatorAccountSelect(destinations, "Select account", saved.toAccountId);
+      second.className = "toAccount";
+      second.addEventListener("change", () => {
+        const destination = accounts.find((account) => account.id === Number(second.value));
+        const label = labelCell.querySelector("input");
+        if (["credit", "cash"].includes(destination?.accountClass) && label) {
+          label.value = destination.defaultTransferDescription;
+          mark();
+        }
+      });
+      const arrow = document.createElement("span");
+      arrow.textContent = "→";
+      arrow.setAttribute("aria-hidden", "true");
+      const pair = document.createElement("div");
+      pair.className = "simulatorAccountPair";
+      pair.append(first, arrow, second);
+      accountCell.replaceChildren(pair);
+    }
+    if (kind === "live") {
+      labelCell.textContent = "—";
+      const account = accounts.find((a) => a.id === Number(currentAccount));
+      amountCell.textContent = account ? dollars(account.balanceCents) : "—";
+    } else {
+      const label = document.createElement("input");
+      label.value = saved.label || "";
+      labelCell.append(label);
+      if (kind === "payoff") {
+        amountCell.textContent = Number.isInteger(saved.effectiveAmountCents) ? dollars(saved.effectiveAmountCents) : "Calculated on save";
+      } else {
+        const amount = document.createElement("input");
+        amount.inputMode = "decimal";
+        amount.placeholder = "0.00";
+        amount.value = saved.amountValue ?? (saved.amountCents ? (saved.amountCents / 100).toFixed(2) : "");
+        amountCell.append(amount);
+      }
+    }
   }
-  function mark(){simulatorDirtyRows.add(tr);tr.classList.add("unsavedRow");save.hidden=false;if(tr.dataset.id)cancel.hidden=false;if(typeof record!=="undefined")record.hidden=true;}
-  tr.addEventListener("keydown",(event)=>{if(event.key==="Enter"&&tr.dataset.id&&tr.classList.contains("unsavedRow")&&event.target.matches('input[type="text"], input:not([type]), input[type="number"], input[type="date"]')){event.preventDefault();if(!simulatorSavePending)saveSimulatorWorksheetRow(tr);}});type.addEventListener("change",()=>{ const wasHanging=tr.classList.contains("hangingRow"); const nextKind=type.value; const accountSelects=accountCell.querySelectorAll("select"); const currentLabel=labelCell.querySelector("input")?.value||""; const currentAmount=amountCell.querySelector("input")?.value||""; const previousFrom=previousKind==="income"?null:accountSelects[0]?.value;const previousTo=previousKind==="income"?accountSelects[0]?.value:["transfer","payoff"].includes(previousKind)?accountSelects[1]?.value:null;if(previousKind==="transfer")retainedTransferAmount=currentAmount||retainedTransferAmount;const fixedTypes=["income","spend","transfer","buffer"];const preserveFixedFields=fixedTypes.includes(previousKind)&&fixedTypes.includes(nextKind);const preservePaymentFields=["transfer","payoff"].includes(previousKind)&&["transfer","payoff"].includes(nextKind);const nextSaved={id:saved.id};if(["live","spend","transfer","payoff","buffer"].includes(nextKind)&&previousFrom)nextSaved.fromAccountId=previousFrom;if(["income","transfer","payoff"].includes(nextKind)&&previousTo)nextSaved.toAccountId=previousTo;if(preserveFixedFields||preservePaymentFields)nextSaved.label=currentLabel;if(preserveFixedFields)nextSaved.amountValue=currentAmount;if(preservePaymentFields)nextSaved.amountValue=nextKind==="transfer"?retainedTransferAmount:"";tr.classList.remove("hangingRow");saved=nextSaved;previousKind=nextKind;delete tr.dataset.categoryId;rebuild();mark();if(wasHanging){actions.append(save," ",remove);appendSimulatorRow();} }); tr.addEventListener("input",mark); tr.addEventListener("change",mark); rebuild();
-  const save=document.createElement("button"); save.type="button"; save.textContent="Save Row"; save.hidden=Boolean(saved.id)&&!dirty; save.addEventListener("click",()=>saveSimulatorWorksheetRow(tr)); const cancel=document.createElement("button");cancel.type="button";cancel.textContent="Cancel Changes";cancel.hidden=!dirty;cancel.addEventListener("click",()=>{simulatorDirtyRows.delete(tr);tr.classList.remove("unsavedRow");saved={...originalSaved};previousKind=saved.rowType||"";retainedTransferAmount=saved.rowType==="transfer"&&saved.amountCents?(saved.amountCents/100).toFixed(2):saved.rowType==="payoff"&&saved.effectiveAmountCents!==undefined?(saved.effectiveAmountCents/100).toFixed(2):"";type.value=saved.rowType||"";if(saved.categoryId)tr.dataset.categoryId=saved.categoryId;else delete tr.dataset.categoryId;rebuild();save.hidden=true;cancel.hidden=true;record.hidden=false;}); const remove=document.createElement("button"); remove.type="button"; remove.className="destructiveButton"; remove.textContent="Delete"; remove.addEventListener("click",()=>deleteSimulatorWorksheetRow(tr)); const edit=document.createElement("button");edit.type="button";edit.textContent="Edit";edit.addEventListener("click",()=>openSimulatorRowDialog(saved));const record=document.createElement("button");record.type="button";record.className="positiveAction";record.textContent=["income","spend"].includes(saved.rowType)?"+ Transaction":"+ Transfer";record.hidden=dirty;record.addEventListener("click",()=>recordSimulatorRow(saved)); if(!hanging){actions.append(save," ");if(saved.id)actions.append(cancel," ");if(saved.id&&!["live","buffer"].includes(saved.rowType))actions.append(record," ",edit);else if(saved.id)actions.append(edit);else actions.append(remove);} if(dirty||(!saved.id&&saved.rowType))simulatorDirtyRows.add(tr);bodyAppend(tr); function bodyAppend(row){const body=document.querySelector("#simulatorRows"),composer=body.querySelector(".hangingRow");if(composer&&row!==composer)body.insertBefore(row,composer);else body.append(row);}
+
+  function mark() {
+    simulatorDirtyRows.add(tr);
+    tr.classList.add("unsavedRow");
+    save.hidden = false;
+    if (tr.dataset.id) cancel.hidden = false;
+    if (typeof record !== "undefined") record.hidden = true;
+  }
+  tr.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && tr.dataset.id && tr.classList.contains("unsavedRow") && event.target.matches('input[type="text"], input:not([type]), input[type="number"], input[type="date"]')) {
+      event.preventDefault();
+      if (!simulatorSavePending) saveSimulatorWorksheetRow(tr);
+    }
+  });
+  type.addEventListener("change", () => {
+    const wasHanging = tr.classList.contains("hangingRow");
+    const nextKind = type.value;
+    const accountSelects = accountCell.querySelectorAll("select");
+    const currentLabel = labelCell.querySelector("input")?.value || "";
+    const currentAmount = amountCell.querySelector("input")?.value || "";
+    const previousFrom = previousKind === "income" ? null : accountSelects[0]?.value;
+    const previousTo = previousKind === "income" ? accountSelects[0]?.value : ["transfer", "payoff"].includes(previousKind) ? accountSelects[1]?.value : null;
+    if (previousKind === "transfer") retainedTransferAmount = currentAmount || retainedTransferAmount;
+    const fixedTypes = ["income", "spend", "transfer", "buffer"];
+    const preserveFixedFields = fixedTypes.includes(previousKind) && fixedTypes.includes(nextKind);
+    const preservePaymentFields = ["transfer", "payoff"].includes(previousKind) && ["transfer", "payoff"].includes(nextKind);
+    const nextSaved = {
+      id: saved.id
+    };
+    if (["live", "spend", "transfer", "payoff", "buffer"].includes(nextKind) && previousFrom) nextSaved.fromAccountId = previousFrom;
+    if (["income", "transfer", "payoff"].includes(nextKind) && previousTo) nextSaved.toAccountId = previousTo;
+    if (preserveFixedFields || preservePaymentFields) nextSaved.label = currentLabel;
+    if (preserveFixedFields) nextSaved.amountValue = currentAmount;
+    if (preservePaymentFields) nextSaved.amountValue = nextKind === "transfer" ? retainedTransferAmount : "";
+    tr.classList.remove("hangingRow");
+    saved = nextSaved;
+    previousKind = nextKind;
+    delete tr.dataset.categoryId;
+    rebuild();
+    mark();
+    if (wasHanging) {
+      actions.append(save, " ", remove);
+      appendSimulatorRow();
+    }
+  });
+  tr.addEventListener("input", mark);
+  tr.addEventListener("change", mark);
+  rebuild();
+  const save = document.createElement("button");
+  save.type = "button";
+  save.textContent = "Save Row";
+  save.hidden = Boolean(saved.id) && !dirty;
+  save.addEventListener("click", () => saveSimulatorWorksheetRow(tr));
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel Changes";
+  cancel.hidden = !dirty;
+  cancel.addEventListener("click", () => {
+    simulatorDirtyRows.delete(tr);
+    tr.classList.remove("unsavedRow");
+    saved = {
+      ...originalSaved
+    };
+    previousKind = saved.rowType || "";
+    retainedTransferAmount = saved.rowType === "transfer" && saved.amountCents ? (saved.amountCents / 100).toFixed(2) : saved.rowType === "payoff" && saved.effectiveAmountCents !== undefined ? (saved.effectiveAmountCents / 100).toFixed(2) : "";
+    type.value = saved.rowType || "";
+    if (saved.categoryId) tr.dataset.categoryId = saved.categoryId;
+    else delete tr.dataset.categoryId;
+    rebuild();
+    save.hidden = true;
+    cancel.hidden = true;
+    record.hidden = false;
+  });
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "destructiveButton";
+  remove.textContent = "Delete";
+  remove.addEventListener("click", () => deleteSimulatorWorksheetRow(tr));
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.textContent = "Edit";
+  edit.addEventListener("click", () => openSimulatorRowDialog(saved));
+  const record = document.createElement("button");
+  record.type = "button";
+  record.className = "positiveAction";
+  record.textContent = ["income", "spend"].includes(saved.rowType) ? "+ Transaction" : "+ Transfer";
+  record.hidden = dirty;
+  record.addEventListener("click", () => recordSimulatorRow(saved));
+  if (!hanging) {
+    actions.append(save, " ");
+    if (saved.id) actions.append(cancel, " ");
+    if (saved.id && !["live", "buffer"].includes(saved.rowType)) actions.append(record, " ", edit);
+    else if (saved.id) actions.append(edit);
+    else actions.append(remove);
+  }
+  if (dirty || (!saved.id && saved.rowType)) simulatorDirtyRows.add(tr);
+  bodyAppend(tr);
+
+  function bodyAppend(row) {
+    const body = document.querySelector("#simulatorRows"),
+      composer = body.querySelector(".hangingRow");
+    if (composer && row !== composer) body.insertBefore(row, composer);
+    else body.append(row);
+  }
 }
 
-function recordSimulatorRow(row){simulatorRecordingRowId=row.id;if(["income","spend"].includes(row.rowType)){newTransaction().then(()=>{document.querySelector("#transactionAccount").value=row.rowType==="income"?row.toAccountId:row.fromAccountId;document.querySelector("#transactionDescription").value=row.label||"";document.querySelector("#transactionCategory").value=row.rowType==="income"?(simulator.reimbursementCategoryId||""):(row.categoryId||"");setMoneyInputValue(document.querySelector("#transactionAmount"),((row.effectiveAmountCents||row.amountCents)/100).toFixed(2));});}else{newTransfer();document.querySelector("#transferFromAccount").value=row.fromAccountId;document.querySelector("#transferToAccount").value=row.toAccountId;setMoneyInputValue(document.querySelector("#transferAmount"),(row.effectiveAmountCents/100).toFixed(2));document.querySelector("#transferDescription").value=row.label||"Transfer";updateTransferPresentation(false);}}
-function openSimulatorRowDialog(row){const form=document.querySelector("#simulatorRowForm");form.reset();form.dataset.rowType=row.rowType;const summary=document.querySelector("#simulatorRowSummary");summary.replaceChildren();const accountName=(id)=>accounts.find((item)=>item.id===Number(id))?.name||"—";const details=[["Type",row.rowType==="live"?"Live balance":row.rowType[0].toUpperCase()+row.rowType.slice(1)],["Status",row.executed?"Executed":"Planned"]];if(row.rowType==="income")details.push(["Account",accountName(row.toAccountId)]);else if(["transfer","payoff"].includes(row.rowType))details.push(["From Account",accountName(row.fromAccountId)],["To Account",accountName(row.toAccountId)]);else details.push(["Account",accountName(row.fromAccountId)]);if(row.label)details.push(["Label",row.label]);if(row.rowType!=="live")details.push(["Amount",dollars(row.effectiveAmountCents||row.amountCents||0)]);if(row.executedTransactionId)details.push(["Source",row.linkedTransferId?"Linked ledger transfer":"Linked ledger transaction"]);for(const [name,value] of details){const wrapper=document.createElement("div"),term=document.createElement("dt"),description=document.createElement("dd");term.textContent=name;description.textContent=value;wrapper.append(term,description);summary.append(wrapper);}form.dataset.hasLinkedLedger=row.executedTransactionId?"true":"false";const planningOnly=["live","buffer"].includes(row.rowType);document.querySelector("#simulatorEditRowId").value=row.id;document.querySelector("#simulatorExecuted").checked=Boolean(row.executed);document.querySelector("#simulatorExecutedLabel").hidden=planningOnly;document.querySelector("#simulatorExecutedHelp").hidden=planningOnly;document.querySelector("#simulatorExecuted").disabled=Boolean(row.executedTransactionId);document.querySelector("#saveSimulatorExecution").hidden=planningOnly||Boolean(row.executedTransactionId);document.querySelector("#simulatorManualExecutionMessage").hidden=!(row.executed&&!row.executedTransactionId);const duplicate=document.querySelector("#duplicateSimulatorRowButton");duplicate.hidden=row.rowType==="live";duplicate.onclick=()=>{appendSimulatorRow({rowType:row.rowType,fromAccountId:row.fromAccountId,toAccountId:row.toAccountId,label:row.label,amountValue:((row.effectiveAmountCents||row.amountCents||0)/100).toFixed(2),categoryId:row.categoryId});document.querySelector("#simulatorRowDialog").close();};const linked=document.querySelector("#editLinkedSimulatorTransaction");linked.hidden=!row.executedTransactionId;linked.onclick=()=>{document.querySelector("#simulatorRowDialog").close();if(row.linkedTransferId){editTransfer(row.linkedTransferId).then(()=>document.querySelector("#transferForm").dataset.simulatorLinked="true");}else{editOrdinaryTransaction({...row,id:row.executedTransactionId,date:row.linkedDate,accountId:row.rowType==="income"?row.toAccountId:row.fromAccountId,description:row.label,enteredAmountCents:row.effectiveAmountCents,pinned:0,transferId:null});document.querySelector("#transactionForm").dataset.simulatorLinked="true";}};openDialog(document.querySelector("#simulatorRowDialog"),form);}
-async function saveSimulatorExecutionState(event){event.preventDefault();const rowId=document.querySelector("#simulatorEditRowId").value;const row=simulator.plan.rows.find((item)=>item.id===Number(rowId));const executed=document.querySelector("#simulatorExecuted").checked;if(row.executed&&!row.executedTransactionId&&!executed&&!confirm("Simulator has no linked ledger transaction. Returning this row to Planned may double-count money if you recorded the activity elsewhere. Continue?"))return;await api(`/api/simulator/plans/${simulator.plan.id}/rows/${rowId}/execution`,{method:"PATCH",body:JSON.stringify({executed})});document.querySelector("#simulatorRowDialog").close();await loadSimulator(simulator.plan.id);}
+function recordSimulatorRow(row) {
+  simulatorRecordingRowId = row.id;
+  if (["income", "spend"].includes(row.rowType)) {
+    newTransaction().then(() => {
+      document.querySelector("#transactionAccount").value = row.rowType === "income" ? row.toAccountId : row.fromAccountId;
+      document.querySelector("#transactionDescription").value = row.label || "";
+      document.querySelector("#transactionCategory").value = row.rowType === "income" ? (simulator.reimbursementCategoryId || "") : (row.categoryId || "");
+      document.querySelector("#transactionAmount").value = ((row.effectiveAmountCents || row.amountCents) / 100).toFixed(2);
+    });
+  } else {
+    newTransfer();
+    document.querySelector("#transferFromAccount").value = row.fromAccountId;
+    document.querySelector("#transferToAccount").value = row.toAccountId;
+    document.querySelector("#transferAmount").value = (row.effectiveAmountCents / 100).toFixed(2);
+    document.querySelector("#transferDescription").value = row.label || "Transfer";
+    updateTransferPresentation(false);
+  }
+}
+function openSimulatorRowDialog(row) {
+  const form = document.querySelector("#simulatorRowForm");
+  form.reset();
+  form.dataset.rowType = row.rowType;
+  const summary = document.querySelector("#simulatorRowSummary");
+  summary.replaceChildren();
+  const accountName = (id) => accounts.find((item) => item.id === Number(id))?.name || "—";
+  const details = [
+    ["Type", row.rowType === "live" ? "Live balance" : row.rowType[0].toUpperCase() + row.rowType.slice(1)],
+    ["Status", row.executed ? "Executed" : "Planned"]
+  ];
+  if (row.rowType === "income") details.push(["Account", accountName(row.toAccountId)]);
+  else if (["transfer", "payoff"].includes(row.rowType)) details.push(["From Account", accountName(row.fromAccountId)], ["To Account", accountName(row.toAccountId)]);
+  else details.push(["Account", accountName(row.fromAccountId)]);
+  if (row.label) details.push(["Label", row.label]);
+  if (row.rowType !== "live") details.push(["Amount", dollars(row.effectiveAmountCents || row.amountCents || 0)]);
+  if (row.executedTransactionId) details.push(["Source", row.linkedTransferId ? "Linked ledger transfer" : "Linked ledger transaction"]);
+  for (const [name, value] of details) {
+    const wrapper = document.createElement("div"),
+      term = document.createElement("dt"),
+      description = document.createElement("dd");
+    term.textContent = name;
+    description.textContent = value;
+    wrapper.append(term, description);
+    summary.append(wrapper);
+  }
+  form.dataset.hasLinkedLedger = row.executedTransactionId ? "true" : "false";
+  const planningOnly = ["live", "buffer"].includes(row.rowType);
+  document.querySelector("#simulatorEditRowId").value = row.id;
+  document.querySelector("#simulatorExecuted").checked = Boolean(row.executed);
+  document.querySelector("#simulatorExecutedLabel").hidden = planningOnly;
+  document.querySelector("#simulatorExecutedHelp").hidden = planningOnly;
+  document.querySelector("#simulatorExecuted").disabled = Boolean(row.executedTransactionId);
+  document.querySelector("#saveSimulatorExecution").hidden = planningOnly || Boolean(row.executedTransactionId);
+  document.querySelector("#simulatorManualExecutionMessage").hidden = !(row.executed && !row.executedTransactionId);
+  const duplicate = document.querySelector("#duplicateSimulatorRowButton");
+  duplicate.hidden = row.rowType === "live";
+  duplicate.onclick = () => {
+    appendSimulatorRow({
+      rowType: row.rowType,
+      fromAccountId: row.fromAccountId,
+      toAccountId: row.toAccountId,
+      label: row.label,
+      amountValue: ((row.effectiveAmountCents || row.amountCents || 0) / 100).toFixed(2),
+      categoryId: row.categoryId
+    });
+    document.querySelector("#simulatorRowDialog").close();
+  };
+  const linked = document.querySelector("#editLinkedSimulatorTransaction");
+  linked.hidden = !row.executedTransactionId;
+  linked.onclick = () => {
+    document.querySelector("#simulatorRowDialog").close();
+    if (row.linkedTransferId) {
+      editTransfer(row.linkedTransferId).then(() => document.querySelector("#transferForm").dataset.simulatorLinked = "true");
+    } else {
+      editOrdinaryTransaction({
+        ...row,
+        id: row.executedTransactionId,
+        date: row.linkedDate,
+        accountId: row.rowType === "income" ? row.toAccountId : row.fromAccountId,
+        description: row.label,
+        enteredAmountCents: row.effectiveAmountCents,
+        pinned: 0,
+        transferId: null
+      });
+      document.querySelector("#transactionForm").dataset.simulatorLinked = "true";
+    }
+  };
+  openDialog(document.querySelector("#simulatorRowDialog"), form);
+}
+async function saveSimulatorExecutionState(event) {
+  event.preventDefault();
+  const rowId = document.querySelector("#simulatorEditRowId").value;
+  const row = simulator.plan.rows.find((item) => item.id === Number(rowId));
+  const executed = document.querySelector("#simulatorExecuted").checked;
+  if (row.executed && !row.executedTransactionId && !executed && !confirm("Simulator has no linked ledger transaction. Returning this row to Planned may double-count money if you recorded the activity elsewhere. Continue?")) return;
+  await api(`/api/simulator/plans/${simulator.plan.id}/rows/${rowId}/execution`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      executed
+    })
+  });
+  document.querySelector("#simulatorRowDialog").close();
+  await loadSimulator(simulator.plan.id);
+}
 
-async function saveSimulatorWorksheetRow(row) { if(simulatorSavePending)return;simulatorSavePending=true;const type=row.cells[0].querySelector("select").value; const selects=row.cells[2].querySelectorAll("select"); const payload={rowType:type,fromAccountId:type==="income"?null:selects[0]?.value,toAccountId:type==="income"?selects[0]?.value:selects[1]?.value,categoryId:row.dataset.categoryId||null,label:row.cells[3].querySelector("input")?.value,amount:row.cells[4].querySelector("input")?.value}; const preservedDrafts=preservedSimulatorDrafts(row);try { await api(`/api/simulator/plans/${simulator.plan.id}/rows${row.dataset.id?`/${row.dataset.id}`:""}`,{method:row.dataset.id?"PATCH":"POST",body:JSON.stringify(payload)}); await loadSimulator(simulator.plan.id,preservedDrafts); } catch(error){window.alert(error.message);} finally{simulatorSavePending=false;} }
-async function deleteSimulatorWorksheetRow(row){if(!row.dataset.id){row.remove();simulatorDirtyRows.delete(row);return;} if(!confirm("Permanently delete this worksheet row?"))return;const preservedDrafts=preservedSimulatorDrafts(row);await api(`/api/simulator/plans/${simulator.plan.id}/rows/${row.dataset.id}`,{method:"DELETE"});await loadSimulator(simulator.plan.id,preservedDrafts);}
-function statusBadge(status, utilization = false){const badge=document.createElement("span");badge.className=`utilizationBadge utilization${status.state[0].toUpperCase()}${status.state.slice(1)}`;badge.textContent=status.label;badge.setAttribute("aria-label",status.accessibleLabel||status.label+(utilization?" projected utilization":""));return badge;}
-function renderSimulatorResults(){const p=simulator.plan,t=p.totals; document.querySelector("#simulatorStartingCash").textContent=dollars(t.startingCashCents); document.querySelector("#simulatorIncomeTotal").textContent=dollars(t.plannedIncomeCents); document.querySelector("#simulatorSpendingTotal").textContent=dollars(t.plannedSpendingCents); document.querySelector("#simulatorTransferTotal").textContent=dollars(t.transfersPaymentsCents); document.querySelector("#simulatorUnallocated").textContent=dollars(t.unallocatedMoneyCents); const excludeBuffer=document.querySelector("#excludeBufferFromProjectedBalances").checked;const body=document.querySelector("#simulatorResultRows");body.replaceChildren();for(const a of p.results){const row=body.insertRow();if(a.accountClass==="credit")row.classList.add("creditResultRow");const name=row.insertCell();name.append(a.name+(a.active?"":" (archived)"));if(a.minimumStatus)name.append(" ",statusBadge(a.minimumStatus));if(a.projectedUtilization)name.append(" ",statusBadge(a.projectedUtilization,true));const displayedProjectedBalanceCents=excludeBuffer&&a.accountClass==="cash"?a.projectedBalanceCents-a.bufferCents:a.projectedBalanceCents;const balance=row.insertCell();balance.textContent=friendlySimulatorBalance(a,displayedProjectedBalanceCents);balance.className="amount";}}
-function openSimulatorPlanDialog(mode="new"){const form=document.querySelector("#simulatorPlanDialogForm");form.reset();if(mode===true)mode="duplicate";if(mode===false)mode="new";const editing=mode==="edit",duplicating=mode==="duplicate";document.querySelector("#simulatorPlanDialogTitle").textContent=editing?"Edit Plan":duplicating?"Duplicate Plan":"New Plan";document.querySelector("#simulatorPlanSubmitButton").textContent=editing?"Save":"Create Plan";document.querySelector("#simulatorDuplicateSource").value=duplicating?simulator.plan.id:"";document.querySelector("#simulatorEditPlanId").value=editing?simulator.plan.id:"";document.querySelector("#simulatorDialogDate").value=editing?simulator.plan.planDate:today;document.querySelector("#simulatorDialogName").value=editing?simulator.plan.name:"";document.querySelector("#deleteSimulatorPlanButton").hidden=!editing;openDialog(document.querySelector("#simulatorPlanDialog"),form);}
-async function createSimulatorPlanFromDialog(event){event.preventDefault();const form=event.currentTarget,editPlanId=document.querySelector("#simulatorEditPlanId").value,preservedDrafts=editPlanId?preservedSimulatorDrafts():[];const payload={name:document.querySelector("#simulatorDialogName").value,planDate:document.querySelector("#simulatorDialogDate").value};try{if(editPlanId){await api(`/api/simulator/plans/${editPlanId}`,{method:"PATCH",body:JSON.stringify(payload)});document.querySelector("#simulatorPlanDialog").close();await loadSimulator(Number(editPlanId),preservedDrafts);return;}payload.duplicatePlanId=document.querySelector("#simulatorDuplicateSource").value||null;const result=await api("/api/simulator/plans",{method:"POST",body:JSON.stringify(payload)});document.querySelector("#simulatorPlanDialog").close();const nextUrl=new URL(window.location.href);nextUrl.searchParams.set("plan",result.id);history.pushState({},"",`${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);await loadSimulator();}catch(error){showFormError(form,error);}}
-async function removeSimulatorPlan(){const form=document.querySelector("#simulatorPlanDialogForm"),plan=simulator.plan;if(!confirm(`Permanently delete plan "${plan.name}"? Type the plan name in the next prompt to confirm.`))return;if(prompt("Enter the plan name to confirm deletion:")!==plan.name)return;try{await api(`/api/simulator/plans/${plan.id}`,{method:"DELETE"});document.querySelector("#simulatorPlanDialog").close();await loadSimulator();}catch(error){showFormError(form,error);}}
-async function removeExecutedSimulatorRows(){const plan=simulator.plan,executedCount=plan.rows.filter((row)=>row.executed&&!["live","buffer"].includes(row.rowType)).length;if(!executedCount)return;const message=`Delete ${executedCount} executed ${executedCount===1?"row":"rows"} from "${plan.name}"?\n\nLinked transactions and transfers will remain in the ledger.\nThis cannot be undone.`;if(!confirm(message))return;const preservedDrafts=preservedSimulatorDrafts();try{await api(`/api/simulator/plans/${plan.id}/executed-rows`,{method:"DELETE",body:JSON.stringify({expectedCount:executedCount})});await loadSimulator(plan.id,preservedDrafts);}catch(error){window.alert(error.message);}}
+async function saveSimulatorWorksheetRow(row) {
+  if (simulatorSavePending) return;
+  simulatorSavePending = true;
+  const type = row.cells[0].querySelector("select").value;
+  const selects = row.cells[2].querySelectorAll("select");
+  const payload = {
+    rowType: type,
+    fromAccountId: type === "income" ? null : selects[0]?.value,
+    toAccountId: type === "income" ? selects[0]?.value : selects[1]?.value,
+    categoryId: row.dataset.categoryId || null,
+    label: row.cells[3].querySelector("input")?.value,
+    amount: row.cells[4].querySelector("input")?.value
+  };
+  const preservedDrafts = preservedSimulatorDrafts(row);
+  try {
+    await api(`/api/simulator/plans/${simulator.plan.id}/rows${row.dataset.id?`/${row.dataset.id}`:""}`, {
+      method: row.dataset.id ? "PATCH" : "POST",
+      body: JSON.stringify(payload)
+    });
+    await loadSimulator(simulator.plan.id, preservedDrafts);
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    simulatorSavePending = false;
+  }
+}
+async function deleteSimulatorWorksheetRow(row) {
+  if (!row.dataset.id) {
+    row.remove();
+    simulatorDirtyRows.delete(row);
+    return;
+  }
+  if (!confirm("Permanently delete this worksheet row?")) return;
+  const preservedDrafts = preservedSimulatorDrafts(row);
+  await api(`/api/simulator/plans/${simulator.plan.id}/rows/${row.dataset.id}`, {
+    method: "DELETE"
+  });
+  await loadSimulator(simulator.plan.id, preservedDrafts);
+}
+function statusBadge(status, utilization = false) {
+  const badge = document.createElement("span");
+  badge.className = `utilizationBadge utilization${status.state[0].toUpperCase()}${status.state.slice(1)}`;
+  badge.textContent = status.label;
+  badge.setAttribute("aria-label", status.accessibleLabel || status.label + (utilization ? " projected utilization" : ""));
+  return badge;
+}
+function renderSimulatorResults() {
+  const p = simulator.plan,
+    t = p.totals;
+  document.querySelector("#simulatorStartingCash").textContent = dollars(t.startingCashCents);
+  document.querySelector("#simulatorIncomeTotal").textContent = dollars(t.plannedIncomeCents);
+  document.querySelector("#simulatorSpendingTotal").textContent = dollars(t.plannedSpendingCents);
+  document.querySelector("#simulatorTransferTotal").textContent = dollars(t.transfersPaymentsCents);
+  document.querySelector("#simulatorUnallocated").textContent = dollars(t.unallocatedMoneyCents);
+  const excludeBuffer = document.querySelector("#excludeBufferFromProjectedBalances").checked;
+  const body = document.querySelector("#simulatorResultRows");
+  body.replaceChildren();
+  for (const a of p.results) {
+    const row = body.insertRow();
+    if (a.accountClass === "credit") row.classList.add("creditResultRow");
+    const name = row.insertCell();
+    name.append(a.name + (a.active ? "" : " (archived)"));
+    if (a.minimumStatus) name.append(" ", statusBadge(a.minimumStatus));
+    if (a.projectedUtilization) name.append(" ", statusBadge(a.projectedUtilization, true));
+    const displayedProjectedBalanceCents = excludeBuffer && a.accountClass === "cash" ? a.projectedBalanceCents - a.bufferCents : a.projectedBalanceCents;
+    const balance = row.insertCell();
+    balance.textContent = friendlyAccountBalance(a, displayedProjectedBalanceCents);
+    balance.className = "amount";
+  }
+}
+function openSimulatorPlanDialog(mode = "new") {
+  const form = document.querySelector("#simulatorPlanDialogForm");
+  form.reset();
+  const editing = mode === "edit",
+    duplicating = mode === "duplicate";
+  document.querySelector("#simulatorPlanDialogTitle").textContent = editing ? "Edit Plan" : duplicating ? "Duplicate Plan" : "New Plan";
+  document.querySelector("#simulatorPlanSubmitButton").textContent = editing ? "Save" : "Create Plan";
+  document.querySelector("#simulatorDuplicateSource").value = duplicating ? simulator.plan.id : "";
+  document.querySelector("#simulatorEditPlanId").value = editing ? simulator.plan.id : "";
+  document.querySelector("#simulatorDialogDate").value = editing ? simulator.plan.planDate : today;
+  document.querySelector("#simulatorDialogName").value = editing ? simulator.plan.name : "";
+  document.querySelector("#deleteSimulatorPlanButton").hidden = !editing;
+  openDialog(document.querySelector("#simulatorPlanDialog"), form);
+}
+async function createSimulatorPlanFromDialog(event) {
+  event.preventDefault();
+  const form = event.currentTarget,
+    editPlanId = document.querySelector("#simulatorEditPlanId").value,
+    preservedDrafts = editPlanId ? preservedSimulatorDrafts() : [];
+  const payload = {
+    name: document.querySelector("#simulatorDialogName").value,
+    planDate: document.querySelector("#simulatorDialogDate").value
+  };
+  try {
+    if (editPlanId) {
+      await api(`/api/simulator/plans/${editPlanId}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      });
+      document.querySelector("#simulatorPlanDialog").close();
+      await loadSimulator(Number(editPlanId), preservedDrafts);
+      return;
+    }
+    payload.duplicatePlanId = document.querySelector("#simulatorDuplicateSource").value || null;
+    const result = await api("/api/simulator/plans", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    document.querySelector("#simulatorPlanDialog").close();
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("plan", result.id);
+    history.pushState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    await loadSimulator();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function removeSimulatorPlan() {
+  const form = document.querySelector("#simulatorPlanDialogForm"),
+    plan = simulator.plan;
+  if (!confirm(`Permanently delete plan "${plan.name}"? Type the plan name in the next prompt to confirm.`)) return;
+  if (prompt("Enter the plan name to confirm deletion:") !== plan.name) return;
+  try {
+    await api(`/api/simulator/plans/${plan.id}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#simulatorPlanDialog").close();
+    await loadSimulator();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function removeExecutedSimulatorRows() {
+  const plan = simulator.plan,
+    executedCount = plan.rows.filter((row) => row.executed && !["live", "buffer"].includes(row.rowType)).length;
+  if (!executedCount) return;
+  const message = `Delete ${executedCount} executed ${executedCount===1?"row":"rows"} from "${plan.name}"?\n\nLinked transactions and transfers will remain in the ledger.\nThis cannot be undone.`;
+  if (!confirm(message)) return;
+  const preservedDrafts = preservedSimulatorDrafts();
+  try {
+    await api(`/api/simulator/plans/${plan.id}/executed-rows`, {
+      method: "DELETE",
+      body: JSON.stringify({
+        expectedCount: executedCount
+      })
+    });
+    await loadSimulator(plan.id, preservedDrafts);
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
 function warnSimulatorUnsaved(event){if(activeSimulatorDirtyRows().length){event.preventDefault();event.returnValue="";}}
 
 async function api(path, options = {}) {
@@ -583,7 +1035,7 @@ async function duplicateTransaction(transaction) {
     document.querySelector("#transactionAccount").value=transaction.accountId;
     document.querySelector("#transactionDescription").value=transaction.description;
     document.querySelector("#transactionCategory").value=transaction.categoryId;
-    setMoneyInputValue(document.querySelector("#transactionAmount"),(transaction.enteredAmountCents/100).toFixed(2));
+    document.querySelector("#transactionAmount").value = (transaction.enteredAmountCents/100).toFixed(2);
     document.querySelector("#transactionPinned").checked=false;
     return;
   }
@@ -594,7 +1046,7 @@ async function duplicateTransaction(transaction) {
     newTransfer();
     document.querySelector("#transferFromAccount").value=transfer.fromAccountId;
     document.querySelector("#transferToAccount").value=transfer.toAccountId;
-    setMoneyInputValue(document.querySelector("#transferAmount"),(transfer.amountCents/100).toFixed(2));
+    document.querySelector("#transferAmount").value = (transfer.amountCents/100).toFixed(2);
     document.querySelector("#transferDescription").value=transfer.description;
     updateTransferPresentation(false);
   } catch(error){document.querySelector("#transactionStatus").textContent=error.message;}
@@ -808,7 +1260,24 @@ async function saveTransaction(event) {
   } catch (error) { showFormError(form, error); }
 }
 
-async function removeEditedTransaction() { const form=document.querySelector("#transactionForm"),transactionId=document.querySelector("#transactionId").value;if(!transactionId)return;const linked=form.dataset.simulatorLinked==="true";if(!confirm(`Delete this transaction?${linked?" The linked Simulator row will return to Planned.":""}`))return;const accountId=document.querySelector("#transactionAccount").value;try{await api(`/api/transactions/${transactionId}`,{method:"DELETE"});document.querySelector("#transactionDialog").close();await ledgerNotification("Deleted - Transaction deleted",[accountId]);await refreshDailyPage();}catch(error){showFormError(form,error);}}
+async function removeEditedTransaction() {
+  const form = document.querySelector("#transactionForm"),
+    transactionId = document.querySelector("#transactionId").value;
+  if (!transactionId) return;
+  const linked = form.dataset.simulatorLinked === "true";
+  if (!confirm(`Delete this transaction?${linked?" The linked Simulator row will return to Planned.":""}`)) return;
+  const accountId = document.querySelector("#transactionAccount").value;
+  try {
+    await api(`/api/transactions/${transactionId}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#transactionDialog").close();
+    await ledgerNotification("Deleted - Transaction deleted", [accountId]);
+    await refreshDailyPage();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
 
 function newTransfer() {
   const form = document.querySelector("#transferForm");
@@ -826,18 +1295,12 @@ function newTransfer() {
   openDialog(document.querySelector("#transferDialog"), form);
 }
 
-function paymentDescription(account) {
-  const name = account.name.trim();
-  const needsCardSuffix = account.accountSubtype === "Credit Card" && !/\bcard$/i.test(name);
-  return `${name}${needsCardSuffix ? " Card" : ""} Payment`;
-}
-
 function updateTransferPresentation(updateDescription = true) {
   const destinationSelect = document.querySelector("#transferToAccount");
   const destination = accounts.find((account) => account.id === Number(destinationSelect.value));
   const isPayment = destinationSelect.selectedOptions[0]?.dataset.accountClass === "credit";
   const paymentHint = document.querySelector("#transferPaymentHint");
-  for(const [selectId,lineId] of [["#transferFromAccount","#transferFromBalance"],["#transferToAccount","#transferToBalance"]]){const selected=accounts.find((account)=>account.id===Number(document.querySelector(selectId).value));const line=document.querySelector(lineId);line.hidden=!selected||selected.accountClass==="system";if(selected&&selected.accountClass!=="system"){const friendly=selected.accountClass==="credit"?(selected.balanceCents>0?`${dollars(selected.balanceCents)} credit`:dollars(-selected.balanceCents)):dollars(selected.balanceCents);line.textContent=`Current Balance: ${friendly}`;}}
+  for(const [selectId,lineId] of [["#transferFromAccount","#transferFromBalance"],["#transferToAccount","#transferToBalance"]]){const selected=accounts.find((account)=>account.id===Number(document.querySelector(selectId).value));const line=document.querySelector(lineId);line.hidden=!selected||selected.accountClass==="system";if(selected&&selected.accountClass!=="system"){line.textContent=`Current Balance: ${friendlyAccountBalance(selected)}`;}}
   document.querySelector("#transferSubmitButton").textContent = isPayment ? "Make Payment" : "Save";
   paymentHint.hidden = !isPayment;
   paymentHint.replaceChildren();
@@ -845,9 +1308,7 @@ function updateTransferPresentation(updateDescription = true) {
     paymentHint.append(`This will be recorded as a payment to ${destination.name}. `);
   }
   if (updateDescription) {
-    document.querySelector("#transferDescription").value = isPayment
-      ? paymentDescription(destination)
-      : destination ? `Transfer to ${destination.name}` : "Transfer";
+    document.querySelector("#transferDescription").value = destination?.defaultTransferDescription ?? "Transfer";
   }
   refreshTransferAmountHelper();
 }
@@ -873,7 +1334,7 @@ async function refreshTransferAmountHelper() {
     helper.className = "transferAmountHelper";
     helper.textContent = result.label;
     helper.setAttribute("aria-label", result.label);
-    helper.addEventListener("click", () => setMoneyInputValue(document.querySelector("#transferAmount"), (result.amountCents / 100).toFixed(2)));
+    helper.addEventListener("click", () => document.querySelector("#transferAmount").value = (result.amountCents / 100).toFixed(2));
     hint.append(helper);
   } catch (error) {
     if (isCurrentRequest()) showFormError(document.querySelector("#transferForm"), error);
@@ -911,7 +1372,24 @@ async function saveTransfer(event) {
   catch (error) { showFormError(form, error); }
 }
 
-async function removeEditedTransfer(){const form=document.querySelector("#transferForm"),transferId=document.querySelector("#transferId").value;if(!transferId)return;const linked=form.dataset.simulatorLinked==="true";if(!confirm(`Delete this transfer? Both ledger rows will be deleted.${linked?" The linked Simulator row will return to Planned.":""}`))return;const accountIds=[document.querySelector("#transferFromAccount").value,document.querySelector("#transferToAccount").value];try{await api(`/api/transfers/${transferId}`,{method:"DELETE"});document.querySelector("#transferDialog").close();await ledgerNotification("Deleted - Transfer deleted",accountIds);await refreshDailyPage();}catch(error){showFormError(form,error);}}
+async function removeEditedTransfer() {
+  const form = document.querySelector("#transferForm"),
+    transferId = document.querySelector("#transferId").value;
+  if (!transferId) return;
+  const linked = form.dataset.simulatorLinked === "true";
+  if (!confirm(`Delete this transfer? Both ledger rows will be deleted.${linked?" The linked Simulator row will return to Planned.":""}`)) return;
+  const accountIds = [document.querySelector("#transferFromAccount").value, document.querySelector("#transferToAccount").value];
+  try {
+    await api(`/api/transfers/${transferId}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#transferDialog").close();
+    await ledgerNotification("Deleted - Transfer deleted", accountIds);
+    await refreshDailyPage();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
 
 function applyTransactionTemplate(event) {
   const template = templates.find((item) => item.id === Number(event.target.value));
@@ -926,7 +1404,7 @@ function applyTransactionTemplate(event) {
   document.querySelector("#transactionAccount").value = template.accountId || "";
   document.querySelector("#transactionDescription").value = template.description || "";
   document.querySelector("#transactionCategory").value = template.categoryId || "";
-  setMoneyInputValue(document.querySelector("#transactionAmount"), template.prefillAmount && template.enteredAmountCents !== null ? (template.enteredAmountCents / 100).toFixed(2) : "");
+  document.querySelector("#transactionAmount").value = template.prefillAmount && template.enteredAmountCents !== null ? (template.enteredAmountCents / 100).toFixed(2) : "";
   updateReimbursementAvailability();
 }
 
@@ -975,12 +1453,12 @@ function renderDashboardAccounts(dashboard) {
       cashTotal += account.balanceCents;
       if (hideZero && account.balanceCents === 0 && account.minimumStatus?.state !== "red") continue;
       const row = cashRows.insertRow(); const accountCell=row.insertCell();accountCell.textContent = account.name;if(account.minimumStatus)accountCell.append(" ",statusBadge(account.minimumStatus));
-      const balance = row.insertCell(); balance.className = "amount"; balance.textContent = dollars(account.balanceCents);
+      const balance = row.insertCell(); balance.className = "amount"; balance.textContent = friendlyAccountBalance(account);
     } else {
       if (hideZero && account.balanceCents === 0) continue;
       const row = creditRows.insertRow(); const accountCell = row.insertCell(); accountCell.textContent = account.name;
       const balance = row.insertCell(); balance.className = "amount";
-      balance.textContent = account.balanceCents > 0 ? `${dollars(account.balanceCents)} credit` : dollars(-account.balanceCents);
+      balance.textContent = friendlyAccountBalance(account);
       if (account.utilization) accountCell.append(" ", statusBadge(account.utilization));
     }
   }
@@ -1122,7 +1600,7 @@ function renderRecentTransactions(rows) {
     for (const value of [friendlyCalendarDate(transaction.date), transaction.accountName, transaction.description, transaction.categoryName || "—"]) row.insertCell().textContent = value;
     const amount = row.insertCell(); amount.className = "amount"; amount.textContent = dollars(transaction.displayAmountCents ?? transaction.amountCents, !transaction.categoryId && !transaction.combinedTransfer);
     const action = row.insertCell(); const edit = document.createElement("button"); edit.type = "button"; edit.textContent = "Edit";
-    edit.addEventListener("click", () => transaction.transferId ? editTransfer(transaction.transferId) : editOrdinaryTransaction({...transaction, enteredAmountCents: transaction.categoryRole === "income" ? transaction.amountCents : transaction.categoryName ? -transaction.amountCents : transaction.amountCents}));
+    edit.addEventListener("click", () => transaction.transferId ? editTransfer(transaction.transferId) : editOrdinaryTransaction(transaction));
     action.append(edit);
   }
 }
@@ -1136,7 +1614,7 @@ function renderQuickUpdates(rows) {
     for (const value of [friendlyCalendarDate(transaction.date), transaction.accountName, transaction.description, transaction.categoryName || "—"]) row.insertCell().textContent = value;
     const amount = row.insertCell(); amount.className = "amount"; amount.textContent = dollars(transaction.displayAmountCents ?? transaction.amountCents, !transaction.categoryId);
     const action = row.insertCell(); const edit = document.createElement("button"); edit.type = "button"; edit.textContent = "Edit";
-    edit.addEventListener("click", () => editOrdinaryTransaction({...transaction, enteredAmountCents: transaction.categoryRole === "income" ? transaction.amountCents : transaction.categoryName ? -transaction.amountCents : transaction.amountCents}));
+    edit.addEventListener("click", () => editOrdinaryTransaction(transaction));
     action.append(edit);
   }
 }
@@ -1270,28 +1748,359 @@ function renderAccounts() {
   }
 }
 
-function updateCreditLimitVisibility() { const visible = document.querySelector("#accountClass").value === "credit" && document.querySelector("#accountSubtype").value === "Credit Card"; document.querySelector("#creditCardFields").hidden = !visible; if (!visible){document.querySelector("#creditLimit").value="";document.querySelector("#utilizationWarning").value="";} }
-function updateAccountSubtypeOptions(currentValue = "") { const select = document.querySelector("#accountSubtype"); select.replaceChildren(); option(select, "", "None"); const cash=document.querySelector("#accountClass").value === "cash"; const values = !cash ? [["Credit Card", "Credit Card"], ["Personal Loan", "Personal Loan"], ["Other", "Other"]] : [["checking", "Checking"], ["savings", "Savings"], ["other", "Other"]]; for (const [value, label] of values) option(select, value, label); select.value = currentValue; document.querySelector("#cashMinimumFields").hidden=!cash; updateCreditLimitVisibility(); }
-function newAccount() { document.querySelector("#accountPinnedForSelection").disabled = false; const form = document.querySelector("#accountForm"); form.reset(); document.querySelector("#accountId").value = ""; updateAccountSubtypeOptions(); document.querySelector("#accountDialogTitle").textContent = "New Account"; document.querySelector("#accountActiveLabel").hidden = true; document.querySelector("#openingBalanceFields").hidden = false; document.querySelector("#reconciliationFields").hidden=true; openDialog(document.querySelector("#accountDialog"), form); }
-function editAccount(account) { const form = document.querySelector("#accountForm"); form.reset(); document.querySelector("#accountId").value = account.id; document.querySelector("#accountName").value = account.name; document.querySelector("#accountClass").value = account.accountClass; updateAccountSubtypeOptions(account.accountSubtype || ""); document.querySelector("#creditLimit").value = account.creditLimitCents ? (account.creditLimitCents / 100).toFixed(2) : "";document.querySelector("#utilizationWarning").value=account.utilizationWarningBasisPoints?`${Math.floor(account.utilizationWarningBasisPoints/100)}.${String(account.utilizationWarningBasisPoints%100).padStart(2,"0")}`:""; document.querySelector("#minimumBalance").value=account.minimumBalanceCents?(account.minimumBalanceCents/100).toFixed(2):"";document.querySelector("#minimumCautionPercent").value=account.minimumCautionPercent??25; document.querySelector("#accountActive").checked = Boolean(account.active); document.querySelector("#accountPinnedForSelection").checked = Boolean(account.pinnedForSelection); document.querySelector("#accountPinnedForSelection").disabled = !account.active; document.querySelector("#accountDialogTitle").textContent = "Edit Account"; document.querySelector("#accountActiveLabel").hidden = false; document.querySelector("#openingBalanceFields").hidden = true;document.querySelector("#reconciliationFields").hidden=false;document.querySelector("#actualBalance").value="";document.querySelector("#reconciliationStatus").textContent="";setReconciliationBalance(account); openDialog(document.querySelector("#accountDialog"), form); updateMinimumHelper(); }
-async function saveAccount(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#accountId").value; const payload = {name: document.querySelector("#accountName").value, accountClass: document.querySelector("#accountClass").value, accountSubtype: document.querySelector("#accountSubtype").value, creditLimit: document.querySelector("#creditLimit").value,utilizationWarning:document.querySelector("#utilizationWarning").value, minimumBalance:document.querySelector("#minimumBalance").value,minimumCautionPercent:document.querySelector("#minimumCautionPercent").value, active: document.querySelector("#accountActive").checked, pinnedForSelection: document.querySelector("#accountPinnedForSelection").checked}; if (!id) payload.openingBalance = document.querySelector("#openingBalance").value; try { await api(id ? `/api/accounts/${id}` : "/api/accounts", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#accountDialog").close(); await loadSettings(); } catch (error) { showFormError(form, error); } }
-async function updateMinimumHelper(){const helper=document.querySelector("#minimumBalanceHelper");const requestId=++minimumHelperRequest;if(document.querySelector("#accountClass").value!=="cash"){helper.replaceChildren();return;}const minimumBalance=document.querySelector("#minimumBalance").value,minimumCautionPercent=document.querySelector("#minimumCautionPercent").value;if(!minimumBalance||minimumCautionPercent===""){helper.replaceChildren();return;}try{const result=await api("/api/accounts/minimum-helper",{method:"POST",body:JSON.stringify({minimumBalance,minimumCautionPercent})});if(requestId!==minimumHelperRequest)return;const lines=result.lines.map((line)=>{const item=document.createElement("div");item.textContent=line;return item;});helper.replaceChildren(...lines);}catch(error){if(requestId===minimumHelperRequest)helper.replaceChildren();}}
-function setReconciliationBalance(account){document.querySelector("#reconciliationCurrentBalance").textContent=account.accountClass==="credit"?(account.balanceCents>0?`${dollars(account.balanceCents)} credit`:`${dollars(Math.abs(account.balanceCents))} owed`):dollars(account.balanceCents);document.querySelector("#reconciliationHint").textContent=account.accountClass==="credit"?"Enter the actual amount currently owed as a positive number.":"Enter the actual current balance.";}
-async function saveReconciliation(){const form=document.querySelector("#accountForm"),id=document.querySelector("#accountId").value;try{const result=await api(`/api/accounts/${id}/reconciliation`,{method:"POST",body:JSON.stringify({actualBalance:document.querySelector("#actualBalance").value})});document.querySelector("#actualBalance").value="";const account=accounts.find((item)=>item.id===Number(id));account.balanceCents=result.balanceCents;setReconciliationBalance(account);document.querySelector("#reconciliationStatus").textContent="Balance reconciled.";await loadReferenceData();}catch(error){showFormError(form,error);}}
-async function updateUtilizationWarningHelper(){const helper=document.querySelector("#utilizationWarningHelper"),requestId=++utilizationHelperRequest,creditLimit=document.querySelector("#creditLimit").value,utilizationWarning=document.querySelector("#utilizationWarning").value;if(document.querySelector("#creditCardFields").hidden||!creditLimit||!utilizationWarning){helper.textContent="";return;}try{const result=await api("/api/accounts/utilization-warning-helper",{method:"POST",body:JSON.stringify({creditLimit,utilizationWarning})});if(requestId===utilizationHelperRequest)helper.textContent=result.text;}catch(error){if(requestId===utilizationHelperRequest)helper.textContent="";}}
+function updateCreditLimitVisibility() {
+  const visible = document.querySelector("#accountClass").value === "credit" && document.querySelector("#accountSubtype").value === "Credit Card";
+  document.querySelector("#creditCardFields").hidden = !visible;
+  if (!visible) {
+    document.querySelector("#creditLimit").value = "";
+    document.querySelector("#utilizationWarning").value = "";
+  }
+}
+function updateAccountSubtypeOptions(currentValue = "") {
+  const select = document.querySelector("#accountSubtype");
+  select.replaceChildren();
+  option(select, "", "None");
+  const cash = document.querySelector("#accountClass").value === "cash";
+  const values = !cash ? [
+    ["Credit Card", "Credit Card"],
+    ["Personal Loan", "Personal Loan"],
+    ["Other", "Other"]
+  ] : [
+    ["checking", "Checking"],
+    ["savings", "Savings"],
+    ["other", "Other"]
+  ];
+  for (const [value, label] of values) option(select, value, label);
+  select.value = currentValue;
+  document.querySelector("#cashMinimumFields").hidden = !cash;
+  updateCreditLimitVisibility();
+}
+function newAccount() {
+  document.querySelector("#accountPinnedForSelection").disabled = false;
+  const form = document.querySelector("#accountForm");
+  form.reset();
+  document.querySelector("#accountId").value = "";
+  updateAccountSubtypeOptions();
+  document.querySelector("#accountDialogTitle").textContent = "New Account";
+  document.querySelector("#accountActiveLabel").hidden = true;
+  document.querySelector("#openingBalanceFields").hidden = false;
+  document.querySelector("#reconciliationFields").hidden = true;
+  openDialog(document.querySelector("#accountDialog"), form);
+}
+function editAccount(account) {
+  const form = document.querySelector("#accountForm");
+  form.reset();
+  document.querySelector("#accountId").value = account.id;
+  document.querySelector("#accountName").value = account.name;
+  document.querySelector("#accountClass").value = account.accountClass;
+  updateAccountSubtypeOptions(account.accountSubtype || "");
+  document.querySelector("#creditLimit").value = account.creditLimitCents ? (account.creditLimitCents / 100).toFixed(2) : "";
+  document.querySelector("#utilizationWarning").value = account.utilizationWarningBasisPoints ? `${Math.floor(account.utilizationWarningBasisPoints/100)}.${String(account.utilizationWarningBasisPoints%100).padStart(2,"0")}` : "";
+  document.querySelector("#minimumBalance").value = account.minimumBalanceCents ? (account.minimumBalanceCents / 100).toFixed(2) : "";
+  document.querySelector("#minimumCautionPercent").value = account.minimumCautionPercent ?? 25;
+  document.querySelector("#accountActive").checked = Boolean(account.active);
+  document.querySelector("#accountPinnedForSelection").checked = Boolean(account.pinnedForSelection);
+  document.querySelector("#accountPinnedForSelection").disabled = !account.active;
+  document.querySelector("#accountDialogTitle").textContent = "Edit Account";
+  document.querySelector("#accountActiveLabel").hidden = false;
+  document.querySelector("#openingBalanceFields").hidden = true;
+  document.querySelector("#reconciliationFields").hidden = false;
+  document.querySelector("#actualBalance").value = "";
+  document.querySelector("#reconciliationStatus").textContent = "";
+  setReconciliationBalance(account);
+  openDialog(document.querySelector("#accountDialog"), form);
+  updateMinimumHelper();
+}
+async function saveAccount(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = document.querySelector("#accountId").value;
+  const payload = {
+    name: document.querySelector("#accountName").value,
+    accountClass: document.querySelector("#accountClass").value,
+    accountSubtype: document.querySelector("#accountSubtype").value,
+    creditLimit: document.querySelector("#creditLimit").value,
+    utilizationWarning: document.querySelector("#utilizationWarning").value,
+    minimumBalance: document.querySelector("#minimumBalance").value,
+    minimumCautionPercent: document.querySelector("#minimumCautionPercent").value,
+    active: document.querySelector("#accountActive").checked,
+    pinnedForSelection: document.querySelector("#accountPinnedForSelection").checked
+  };
+  if (!id) payload.openingBalance = document.querySelector("#openingBalance").value;
+  try {
+    await api(id ? `/api/accounts/${id}` : "/api/accounts", {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload)
+    });
+    document.querySelector("#accountDialog").close();
+    await loadSettings();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function updateMinimumHelper() {
+  const helper = document.querySelector("#minimumBalanceHelper");
+  const requestId = ++minimumHelperRequest;
+  if (document.querySelector("#accountClass").value !== "cash") {
+    helper.replaceChildren();
+    return;
+  }
+  const minimumBalance = document.querySelector("#minimumBalance").value,
+    minimumCautionPercent = document.querySelector("#minimumCautionPercent").value;
+  if (!minimumBalance || minimumCautionPercent === "") {
+    helper.replaceChildren();
+    return;
+  }
+  try {
+    const result = await api("/api/accounts/minimum-helper", {
+      method: "POST",
+      body: JSON.stringify({
+        minimumBalance,
+        minimumCautionPercent
+      })
+    });
+    if (requestId !== minimumHelperRequest) return;
+    const lines = result.lines.map((line) => {
+      const item = document.createElement("div");
+      item.textContent = line;
+      return item;
+    });
+    helper.replaceChildren(...lines);
+  } catch (error) {
+    if (requestId === minimumHelperRequest) helper.replaceChildren();
+  }
+}
+function setReconciliationBalance(account) {
+  document.querySelector("#reconciliationCurrentBalance").textContent = account.accountClass === "credit" ? (account.balanceCents > 0 ? `${dollars(account.balanceCents)} credit` : `${dollars(Math.abs(account.balanceCents))} owed`) : dollars(account.balanceCents);
+  document.querySelector("#reconciliationHint").textContent = account.accountClass === "credit" ? "Enter the actual amount currently owed as a positive number." : "Enter the actual current balance.";
+}
+async function saveReconciliation() {
+  const form = document.querySelector("#accountForm"),
+    id = document.querySelector("#accountId").value;
+  try {
+    const result = await api(`/api/accounts/${id}/reconciliation`, {
+      method: "POST",
+      body: JSON.stringify({
+        actualBalance: document.querySelector("#actualBalance").value
+      })
+    });
+    document.querySelector("#actualBalance").value = "";
+    const account = accounts.find((item) => item.id === Number(id));
+    account.balanceCents = result.balanceCents;
+    setReconciliationBalance(account);
+    document.querySelector("#reconciliationStatus").textContent = "Balance reconciled.";
+    await loadReferenceData();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function updateUtilizationWarningHelper() {
+  const helper = document.querySelector("#utilizationWarningHelper"),
+    requestId = ++utilizationHelperRequest,
+    creditLimit = document.querySelector("#creditLimit").value,
+    utilizationWarning = document.querySelector("#utilizationWarning").value;
+  if (document.querySelector("#creditCardFields").hidden || !creditLimit || !utilizationWarning) {
+    helper.textContent = "";
+    return;
+  }
+  try {
+    const result = await api("/api/accounts/utilization-warning-helper", {
+      method: "POST",
+      body: JSON.stringify({
+        creditLimit,
+        utilizationWarning
+      })
+    });
+    if (requestId === utilizationHelperRequest) helper.textContent = result.text;
+  } catch (error) {
+    if (requestId === utilizationHelperRequest) helper.textContent = "";
+  }
+}
 
-function renderCategories() { const names = new Map(categories.map((category) => [category.id, category.name])); const body = document.querySelector("#categoryRows"); body.replaceChildren(); for (const category of categories) { const row = body.insertRow(); for (const value of [category.displayOrder, category.name, names.get(category.parentCategoryId) || "—", category.reportingRole === "income" ? "Income" : "Expense", category.active ? "Active" : "Archived"]) row.insertCell().textContent = value; const actions = row.insertCell(); const edit = document.createElement("button"); edit.textContent = "Edit"; edit.addEventListener("click", () => editCategory(category)); actions.append(edit); } }
+function renderCategories() {
+  const names = new Map(categories.map((category) => [category.id, category.name]));
+  const body = document.querySelector("#categoryRows");
+  body.replaceChildren();
+  for (const category of categories) {
+    const row = body.insertRow();
+    for (const value of [category.displayOrder, category.name, names.get(category.parentCategoryId) || "—", category.reportingRole === "income" ? "Income" : "Expense", category.active ? "Active" : "Archived"]) row.insertCell().textContent = value;
+    const actions = row.insertCell();
+    const edit = document.createElement("button");
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => editCategory(category));
+    actions.append(edit);
+  }
+}
 function categoryParents(currentId = null) { return categories.filter((category) => category.parentCategoryId === null && category.id !== Number(currentId)); }
-function newCategory() { const form = document.querySelector("#categoryForm"); form.reset(); document.querySelector("#categoryId").value = ""; document.querySelector("#categoryReportingRole").value = "expense"; document.querySelector("#categoryDialogTitle").textContent = "New Category"; document.querySelector("#categoryActiveLabel").hidden = true; document.querySelector("#deleteCategoryButton").hidden = true; setOptions(document.querySelector("#categoryParent"), categoryParents(), "None"); openDialog(document.querySelector("#categoryDialog"), form); }
-function editCategory(category) { const form = document.querySelector("#categoryForm"); form.reset(); document.querySelector("#categoryId").value = category.id; document.querySelector("#categoryReportingRole").value = category.reportingRole; document.querySelector("#categoryName").value = category.name; document.querySelector("#categoryDisplayOrder").value = category.displayOrder; document.querySelector("#categoryOfferReimbursement").checked = Boolean(category.offerReimbursement); document.querySelector("#categoryActive").checked = Boolean(category.active); document.querySelector("#categoryDialogTitle").textContent = "Edit Category"; document.querySelector("#categoryActiveLabel").hidden = false; document.querySelector("#deleteCategoryButton").hidden = false; setOptions(document.querySelector("#categoryParent"), categoryParents(category.id), "None", category.parentCategoryId); openDialog(document.querySelector("#categoryDialog"), form); }
-async function saveCategory(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#categoryId").value; const payload = {name: document.querySelector("#categoryName").value, reportingRole: document.querySelector("#categoryReportingRole").value, parentCategoryId: document.querySelector("#categoryParent").value || null, displayOrder: document.querySelector("#categoryDisplayOrder").value, active: document.querySelector("#categoryActive").checked, offerReimbursement: document.querySelector("#categoryOfferReimbursement").checked}; try { await api(id ? `/api/categories/${id}` : "/api/categories", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#categoryDialog").close(); await loadSettings(); } catch (error) { showFormError(form, error); } }
-async function removeEditedCategory() { const category = categories.find((item) => item.id === Number(document.querySelector("#categoryId").value)); if (!category || !window.confirm(`Permanently delete category "${category.name}"? This cannot be undone.`)) return; try { await api(`/api/categories/${category.id}`, {method: "DELETE"}); document.querySelector("#categoryDialog").close(); await loadSettings(); } catch (error) { window.alert(error.message); } }
-function renderTemplates() { const body = document.querySelector("#templateRows"); body.replaceChildren(); for (const template of templates) { const row = body.insertRow(); row.dataset.templateId = template.id; for (const value of [template.displayOrder, template.name + (template.active ? "" : " (archived)"), template.accountName || "—", template.categoryName || "—"]) row.insertCell().textContent = value; const amount = row.insertCell(); amount.className = "amount"; amount.textContent = template.enteredAmountCents === null ? "—" : dollars(template.enteredAmountCents); const actions = row.insertCell(); actions.className = "rowActions"; const edit = document.createElement("button"); edit.textContent = "Edit"; edit.addEventListener("click", () => editTemplate(template)); actions.append(edit); } }
-function newTemplate() { const form = document.querySelector("#templateForm"); form.reset(); document.querySelector("#templateId").value = ""; document.querySelector("#templateDialogTitle").textContent = "New Template"; document.querySelector("#templateActiveLabel").hidden = true; document.querySelector("#deleteTemplateButton").hidden = true; setAccountOptions(document.querySelector("#templateAccount"), activeAccountsWith(), "None"); setMixedCategoryOptions(document.querySelector("#templateCategory"), selectableCategoriesWith(), "None"); openDialog(document.querySelector("#templateDialog"), form); }
-function editTemplate(template) { const form = document.querySelector("#templateForm"); form.reset(); document.querySelector("#templateId").value = template.id; document.querySelector("#templateName").value = template.name; document.querySelector("#templateDescription").value = template.description || ""; document.querySelector("#templateAmount").value = template.enteredAmountCents === null ? "" : (template.enteredAmountCents / 100).toFixed(2); document.querySelector("#templatePrefillAmount").checked = Boolean(template.prefillAmount); document.querySelector("#templateDisplayOrder").value = template.displayOrder; document.querySelector("#templateActive").checked = Boolean(template.active); document.querySelector("#templateDialogTitle").textContent = "Edit Template"; document.querySelector("#templateActiveLabel").hidden = false; document.querySelector("#deleteTemplateButton").hidden = false; setAccountOptions(document.querySelector("#templateAccount"), activeAccountsWith(template.accountId), "None", template.accountId); setMixedCategoryOptions(document.querySelector("#templateCategory"), selectableCategoriesWith(template.categoryId), "None", template.categoryId); openDialog(document.querySelector("#templateDialog"), form); }
-async function saveTemplate(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#templateId").value; const payload = {name: document.querySelector("#templateName").value, accountId: document.querySelector("#templateAccount").value, description: document.querySelector("#templateDescription").value, categoryId: document.querySelector("#templateCategory").value, amount: document.querySelector("#templateAmount").value, prefillAmount: document.querySelector("#templatePrefillAmount").checked, displayOrder: document.querySelector("#templateDisplayOrder").value, active: document.querySelector("#templateActive").checked}; try { await api(id ? `/api/templates/${id}` : "/api/templates", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#templateDialog").close(); await loadSettings(); } catch (error) { showFormError(form, error); } }
-async function removeEditedTemplate() { const template = templates.find((item) => item.id === Number(document.querySelector("#templateId").value)); if (!template || !window.confirm(`Permanently delete template "${template.name}"? Existing transactions are unaffected.`)) return; try { await api(`/api/templates/${template.id}`, {method: "DELETE"}); document.querySelector("#templateDialog").close(); await loadSettings(); } catch (error) { window.alert(error.message); } }
-async function loadSettings() { await loadLedgerName(); await loadSharing(); await loadReferenceData(); renderAccounts(); renderCategories(); renderTemplates(); const [settings, databaseStatus] = await Promise.all([api("/api/settings"), api("/api/system/database-status")]); const selected = categories.find((category) => category.id === Number(settings.reimbursementCategoryId)); document.querySelector("#reimbursementCategoryName").textContent = selected?.name || "Not selected"; setOptions(document.querySelector("#reimbursementCategorySetting"), categories.filter((category) => category.active && category.reportingRole === "income" && !category.parentCategoryId && !category.hasChildren), "Select category", settings.reimbursementCategoryId); document.querySelector("#paychecksPerYear").value = settings.paychecksPerYear || ""; setMoneyInputValue(document.querySelector("#suggestionRounding"), settings.suggestionRoundingCents ? (Number(settings.suggestionRoundingCents) / 100).toFixed(2) : ""); document.querySelector("#monthlySuggestionWindow").value = settings.monthlySuggestionWindowDays; document.querySelector("#quarterlySuggestionWindow").value = settings.quarterlySuggestionWindowMonths; document.querySelector("#annualSuggestionWindow").value = settings.annualSuggestionWindowMonths; document.querySelector("#integrationTransferDefaultDescription").checked = settings.integrationTransferDefaultDescription === "1"; document.querySelector("#themeSetting").value = window.readThemePreference(); document.querySelector("#databaseTransactionCount").textContent = databaseStatus.transactionCount.toLocaleString("en-US"); document.querySelector("#databaseAccountCount").textContent = databaseStatus.accountCount.toLocaleString("en-US"); document.querySelector("#databaseModifiedLocal").textContent = databaseStatus.modifiedLocal; rememberLedgerForms(); }
+function newCategory() {
+  const form = document.querySelector("#categoryForm");
+  form.reset();
+  document.querySelector("#categoryId").value = "";
+  document.querySelector("#categoryReportingRole").value = "expense";
+  document.querySelector("#categoryDialogTitle").textContent = "New Category";
+  document.querySelector("#categoryActiveLabel").hidden = true;
+  document.querySelector("#deleteCategoryButton").hidden = true;
+  setOptions(document.querySelector("#categoryParent"), categoryParents(), "None");
+  openDialog(document.querySelector("#categoryDialog"), form);
+}
+function editCategory(category) {
+  const form = document.querySelector("#categoryForm");
+  form.reset();
+  document.querySelector("#categoryId").value = category.id;
+  document.querySelector("#categoryReportingRole").value = category.reportingRole;
+  document.querySelector("#categoryName").value = category.name;
+  document.querySelector("#categoryDisplayOrder").value = category.displayOrder;
+  document.querySelector("#categoryOfferReimbursement").checked = Boolean(category.offerReimbursement);
+  document.querySelector("#categoryActive").checked = Boolean(category.active);
+  document.querySelector("#categoryDialogTitle").textContent = "Edit Category";
+  document.querySelector("#categoryActiveLabel").hidden = false;
+  document.querySelector("#deleteCategoryButton").hidden = false;
+  setOptions(document.querySelector("#categoryParent"), categoryParents(category.id), "None", category.parentCategoryId);
+  openDialog(document.querySelector("#categoryDialog"), form);
+}
+async function saveCategory(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = document.querySelector("#categoryId").value;
+  const payload = {
+    name: document.querySelector("#categoryName").value,
+    reportingRole: document.querySelector("#categoryReportingRole").value,
+    parentCategoryId: document.querySelector("#categoryParent").value || null,
+    displayOrder: document.querySelector("#categoryDisplayOrder").value,
+    active: document.querySelector("#categoryActive").checked,
+    offerReimbursement: document.querySelector("#categoryOfferReimbursement").checked
+  };
+  try {
+    await api(id ? `/api/categories/${id}` : "/api/categories", {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload)
+    });
+    document.querySelector("#categoryDialog").close();
+    await loadSettings();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function removeEditedCategory() {
+  const category = categories.find((item) => item.id === Number(document.querySelector("#categoryId").value));
+  if (!category || !window.confirm(`Permanently delete category "${category.name}"? This cannot be undone.`)) return;
+  try {
+    await api(`/api/categories/${category.id}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#categoryDialog").close();
+    await loadSettings();
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
+function renderTemplates() {
+  const body = document.querySelector("#templateRows");
+  body.replaceChildren();
+  for (const template of templates) {
+    const row = body.insertRow();
+    row.dataset.templateId = template.id;
+    for (const value of [template.displayOrder, template.name + (template.active ? "" : " (archived)"), template.accountName || "—", template.categoryName || "—"]) row.insertCell().textContent = value;
+    const amount = row.insertCell();
+    amount.className = "amount";
+    amount.textContent = template.enteredAmountCents === null ? "—" : dollars(template.enteredAmountCents);
+    const actions = row.insertCell();
+    actions.className = "rowActions";
+    const edit = document.createElement("button");
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => editTemplate(template));
+    actions.append(edit);
+  }
+}
+function newTemplate() {
+  const form = document.querySelector("#templateForm");
+  form.reset();
+  document.querySelector("#templateId").value = "";
+  document.querySelector("#templateDialogTitle").textContent = "New Template";
+  document.querySelector("#templateActiveLabel").hidden = true;
+  document.querySelector("#deleteTemplateButton").hidden = true;
+  setAccountOptions(document.querySelector("#templateAccount"), activeAccountsWith(), "None");
+  setMixedCategoryOptions(document.querySelector("#templateCategory"), selectableCategoriesWith(), "None");
+  openDialog(document.querySelector("#templateDialog"), form);
+}
+function editTemplate(template) {
+  const form = document.querySelector("#templateForm");
+  form.reset();
+  document.querySelector("#templateId").value = template.id;
+  document.querySelector("#templateName").value = template.name;
+  document.querySelector("#templateDescription").value = template.description || "";
+  document.querySelector("#templateAmount").value = template.enteredAmountCents === null ? "" : (template.enteredAmountCents / 100).toFixed(2);
+  document.querySelector("#templatePrefillAmount").checked = Boolean(template.prefillAmount);
+  document.querySelector("#templateDisplayOrder").value = template.displayOrder;
+  document.querySelector("#templateActive").checked = Boolean(template.active);
+  document.querySelector("#templateDialogTitle").textContent = "Edit Template";
+  document.querySelector("#templateActiveLabel").hidden = false;
+  document.querySelector("#deleteTemplateButton").hidden = false;
+  setAccountOptions(document.querySelector("#templateAccount"), activeAccountsWith(template.accountId), "None", template.accountId);
+  setMixedCategoryOptions(document.querySelector("#templateCategory"), selectableCategoriesWith(template.categoryId), "None", template.categoryId);
+  openDialog(document.querySelector("#templateDialog"), form);
+}
+async function saveTemplate(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = document.querySelector("#templateId").value;
+  const payload = {
+    name: document.querySelector("#templateName").value,
+    accountId: document.querySelector("#templateAccount").value,
+    description: document.querySelector("#templateDescription").value,
+    categoryId: document.querySelector("#templateCategory").value,
+    amount: document.querySelector("#templateAmount").value,
+    prefillAmount: document.querySelector("#templatePrefillAmount").checked,
+    displayOrder: document.querySelector("#templateDisplayOrder").value,
+    active: document.querySelector("#templateActive").checked
+  };
+  try {
+    await api(id ? `/api/templates/${id}` : "/api/templates", {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload)
+    });
+    document.querySelector("#templateDialog").close();
+    await loadSettings();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function removeEditedTemplate() {
+  const template = templates.find((item) => item.id === Number(document.querySelector("#templateId").value));
+  if (!template || !window.confirm(`Permanently delete template "${template.name}"? Existing transactions are unaffected.`)) return;
+  try {
+    await api(`/api/templates/${template.id}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#templateDialog").close();
+    await loadSettings();
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
+async function loadSettings() {
+  await loadLedgerName();
+  await loadSharing();
+  await loadReferenceData();
+  renderAccounts();
+  renderCategories();
+  renderTemplates();
+  const [settings, databaseStatus] = await Promise.all([api("/api/settings"), api("/api/system/database-status")]);
+  const selected = categories.find((category) => category.id === Number(settings.reimbursementCategoryId));
+  document.querySelector("#reimbursementCategoryName").textContent = selected?.name || "Not selected";
+  setOptions(document.querySelector("#reimbursementCategorySetting"), categories.filter((category) => category.active && category.reportingRole === "income" && !category.parentCategoryId && !category.hasChildren), "Select category", settings.reimbursementCategoryId);
+  document.querySelector("#paychecksPerYear").value = settings.paychecksPerYear || "";
+  document.querySelector("#suggestionRounding").value = settings.suggestionRoundingCents ? (Number(settings.suggestionRoundingCents) / 100).toFixed(2) : "";
+  document.querySelector("#monthlySuggestionWindow").value = settings.monthlySuggestionWindowDays;
+  document.querySelector("#quarterlySuggestionWindow").value = settings.quarterlySuggestionWindowMonths;
+  document.querySelector("#annualSuggestionWindow").value = settings.annualSuggestionWindowMonths;
+  document.querySelector("#integrationTransferDefaultDescription").checked = settings.integrationTransferDefaultDescription === "1";
+  document.querySelector("#themeSetting").value = window.readThemePreference();
+  document.querySelector("#databaseTransactionCount").textContent = databaseStatus.transactionCount.toLocaleString("en-US");
+  document.querySelector("#databaseAccountCount").textContent = databaseStatus.accountCount.toLocaleString("en-US");
+  document.querySelector("#databaseModifiedLocal").textContent = databaseStatus.modifiedLocal;
+  rememberLedgerForms();
+}
 
 function completeExpenseTemplates() {
   return templates.filter((template) => template.active && template.description
@@ -1550,7 +2359,19 @@ async function saveSinkingFund(event) {
   catch (error) { showFormError(form, error); }
 }
 
-async function removeEditedSinkingFund() { const plan = budget.plans.find((item) => item.id === Number(document.querySelector("#sinkingFundId").value)); if (!plan || !window.confirm(`Permanently delete Budget plan "${plan.name}"?`)) return; try { await api(`/api/sinking-funds/${plan.id}`, {method: "DELETE"}); document.querySelector("#sinkingFundDialog").close(); await loadBudget(); } catch (error) { window.alert(error.message); } }
+async function removeEditedSinkingFund() {
+  const plan = budget.plans.find((item) => item.id === Number(document.querySelector("#sinkingFundId").value));
+  if (!plan || !window.confirm(`Permanently delete Budget plan "${plan.name}"?`)) return;
+  try {
+    await api(`/api/sinking-funds/${plan.id}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#sinkingFundDialog").close();
+    await loadBudget();
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
 
 function renderFlexibleBudgets() {
   const body = document.querySelector("#flexibleBudgetRows"); body.replaceChildren();
@@ -1587,14 +2408,72 @@ function editFlexibleBudget(item) {
   document.querySelector("#flexibleBudgetTarget").value = (item.monthlyTargetCents / 100).toFixed(2); updateFlexibleSuggestion(); openDialog(document.querySelector("#flexibleBudgetDialog"), form);
 }
 
-async function saveFlexibleBudget(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#flexibleBudgetId").value; const payload = {categoryId: document.querySelector("#flexibleBudgetCategory").value, monthlyTarget: document.querySelector("#flexibleBudgetTarget").value}; try { await api(id ? `/api/flexible-budgets/${id}` : "/api/flexible-budgets", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#flexibleBudgetDialog").close(); await loadBudget(); } catch (error) { showFormError(form, error); } }
-async function removeFlexibleBudget() { const item = budget.flexibleBudgets.find((row) => row.id === Number(document.querySelector("#flexibleBudgetId").value)); if (!item || !window.confirm(`Permanently delete category budget "${item.categoryName}"?`)) return; try { await api(`/api/flexible-budgets/${item.id}`, {method: "DELETE"}); document.querySelector("#flexibleBudgetDialog").close(); await loadBudget(); } catch (error) { window.alert(error.message); } }
+async function saveFlexibleBudget(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = document.querySelector("#flexibleBudgetId").value;
+  const payload = {
+    categoryId: document.querySelector("#flexibleBudgetCategory").value,
+    monthlyTarget: document.querySelector("#flexibleBudgetTarget").value
+  };
+  try {
+    await api(id ? `/api/flexible-budgets/${id}` : "/api/flexible-budgets", {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload)
+    });
+    document.querySelector("#flexibleBudgetDialog").close();
+    await loadBudget();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function removeFlexibleBudget() {
+  const item = budget.flexibleBudgets.find((row) => row.id === Number(document.querySelector("#flexibleBudgetId").value));
+  if (!item || !window.confirm(`Permanently delete category budget "${item.categoryName}"?`)) return;
+  try {
+    await api(`/api/flexible-budgets/${item.id}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#flexibleBudgetDialog").close();
+    await loadBudget();
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
 
-function incomeTemplates() { return templates.filter((template) => template.active && template.description && template.categoryId && template.enteredAmountCents > 0 && (!template.accountId || accounts.some((account) => account.id === template.accountId && account.active)) && categories.some((category) => category.id === template.categoryId && category.active && category.reportingRole === "income" && !category.hasChildren)); }
+function incomeTemplates() {
+  return templates.filter((template) => template.active && template.description && template.categoryId && template.enteredAmountCents > 0 && (!template.accountId || accounts.some((account) => account.id === template.accountId && account.active)) && categories.some((category) => category.id === template.categoryId && category.active && category.reportingRole === "income" && !category.hasChildren));
+}
 
-function nextDateSort(items, state, values) { return [...items].sort((left, right) => { const leftValue = values[state.sort](left); const rightValue = values[state.sort](right); let comparison = typeof leftValue === "number" ? leftValue - rightValue : String(leftValue).localeCompare(String(rightValue), undefined, {sensitivity: "base"}); if (comparison === 0) comparison = left.id - right.id; return state.direction === "asc" ? comparison : -comparison; }); }
-function planSortState(prefix, validSorts) { const values = new URLSearchParams(window.location.search); const sort = validSorts.includes(values.get(`${prefix}Sort`)) ? values.get(`${prefix}Sort`) : "nextDate"; return {sort, direction: values.get(`${prefix}Direction`) === "desc" ? "desc" : "asc"}; }
-function changePlanSort(prefix, selectedSort, numeric, render) { const current = planSortState(prefix, prefix === "income" ? ["nextDate", "income", "amount"] : ["nextDate", "account", "description", "amount"]); const first = numeric.includes(selectedSort) ? "desc" : "asc"; const direction = current.sort === selectedSort ? current.direction === "asc" ? "desc" : "asc" : first; const values = new URLSearchParams(window.location.search); values.set(`${prefix}Sort`, selectedSort); values.set(`${prefix}Direction`, direction); window.history.pushState({}, "", `/budget?${values}${window.location.hash}`); render(); }
+function nextDateSort(items, state, values) {
+  return [...items].sort((left, right) => {
+    const leftValue = values[state.sort](left);
+    const rightValue = values[state.sort](right);
+    let comparison = typeof leftValue === "number" ? leftValue - rightValue : String(leftValue).localeCompare(String(rightValue), undefined, {
+      sensitivity: "base"
+    });
+    if (comparison === 0) comparison = left.id - right.id;
+    return state.direction === "asc" ? comparison : -comparison;
+  });
+}
+function planSortState(prefix, validSorts) {
+  const values = new URLSearchParams(window.location.search);
+  const sort = validSorts.includes(values.get(`${prefix}Sort`)) ? values.get(`${prefix}Sort`) : "nextDate";
+  return {
+    sort,
+    direction: values.get(`${prefix}Direction`) === "desc" ? "desc" : "asc"
+  };
+}
+function changePlanSort(prefix, selectedSort, numeric, render) {
+  const current = planSortState(prefix, prefix === "income" ? ["nextDate", "income", "amount"] : ["nextDate", "account", "description", "amount"]);
+  const first = numeric.includes(selectedSort) ? "desc" : "asc";
+  const direction = current.sort === selectedSort ? current.direction === "asc" ? "desc" : "asc" : first;
+  const values = new URLSearchParams(window.location.search);
+  values.set(`${prefix}Sort`, selectedSort);
+  values.set(`${prefix}Direction`, direction);
+  window.history.pushState({}, "", `/budget?${values}${window.location.hash}`);
+  render();
+}
 
 function renderExpectedIncome() {
   const state = planSortState("income", ["nextDate", "income", "amount"]); const values = {nextDate: (item) => item.upcomingExpectedDate, income: (item) => item.name, amount: (item) => item.enteredAmountCents};
@@ -1603,10 +2482,64 @@ function renderExpectedIncome() {
   for (const button of document.querySelectorAll("[data-income-sort]")) button.textContent = button.dataset.label + (button.dataset.incomeSort === state.sort ? ` ${state.direction === "asc" ? "▲" : "▼"}` : "");
 }
 
-function newExpectedIncome() { const form = document.querySelector("#expectedIncomeForm"); form.reset(); document.querySelector("#expectedIncomeId").value = ""; document.querySelector("#expectedIncomeDate").value = today; document.querySelector("#expectedIncomeDialogTitle").textContent = "New Expected Monthly Income"; document.querySelector("#expectedIncomeActiveLabel").hidden = true; document.querySelector("#deleteExpectedIncomeButton").hidden = true; setOptions(document.querySelector("#expectedIncomeTemplate"), incomeTemplates(), "Select template"); updateRequiredTemplateLink("expectedIncome", false); openDialog(document.querySelector("#expectedIncomeDialog"), form); }
-function editExpectedIncome(item) { const form = document.querySelector("#expectedIncomeForm"); form.reset(); document.querySelector("#expectedIncomeId").value = item.id; document.querySelector("#expectedIncomeDate").value = item.expectedDate; document.querySelector("#expectedIncomeActive").checked = Boolean(item.active); document.querySelector("#expectedIncomeActiveLabel").hidden = false; document.querySelector("#deleteExpectedIncomeButton").hidden = false; document.querySelector("#expectedIncomeDialogTitle").textContent = "Edit Expected Income"; setOptions(document.querySelector("#expectedIncomeTemplate"), incomeTemplates(), "Select template", item.templateId); updateRequiredTemplateLink("expectedIncome", true); openDialog(document.querySelector("#expectedIncomeDialog"), form); }
-async function saveExpectedIncome(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#expectedIncomeId").value; const payload = {templateId: document.querySelector("#expectedIncomeTemplate").value, expectedDate: document.querySelector("#expectedIncomeDate").value, active: document.querySelector("#expectedIncomeActive").checked}; try { await api(id ? `/api/expected-income-plans/${id}` : "/api/expected-income-plans", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#expectedIncomeDialog").close(); await loadBudget(); } catch (error) { showFormError(form, error); } }
-async function removeExpectedIncome() { const item = budget.expectedIncomePlans.find((row) => row.id === Number(document.querySelector("#expectedIncomeId").value)); if (!item || !window.confirm(`Permanently delete expected income "${item.name}"?`)) return; try { await api(`/api/expected-income-plans/${item.id}`, {method: "DELETE"}); document.querySelector("#expectedIncomeDialog").close(); await loadBudget(); } catch (error) { window.alert(error.message); } }
+function newExpectedIncome() {
+  const form = document.querySelector("#expectedIncomeForm");
+  form.reset();
+  document.querySelector("#expectedIncomeId").value = "";
+  document.querySelector("#expectedIncomeDate").value = today;
+  document.querySelector("#expectedIncomeDialogTitle").textContent = "New Expected Monthly Income";
+  document.querySelector("#expectedIncomeActiveLabel").hidden = true;
+  document.querySelector("#deleteExpectedIncomeButton").hidden = true;
+  setOptions(document.querySelector("#expectedIncomeTemplate"), incomeTemplates(), "Select template");
+  updateRequiredTemplateLink("expectedIncome", false);
+  openDialog(document.querySelector("#expectedIncomeDialog"), form);
+}
+function editExpectedIncome(item) {
+  const form = document.querySelector("#expectedIncomeForm");
+  form.reset();
+  document.querySelector("#expectedIncomeId").value = item.id;
+  document.querySelector("#expectedIncomeDate").value = item.expectedDate;
+  document.querySelector("#expectedIncomeActive").checked = Boolean(item.active);
+  document.querySelector("#expectedIncomeActiveLabel").hidden = false;
+  document.querySelector("#deleteExpectedIncomeButton").hidden = false;
+  document.querySelector("#expectedIncomeDialogTitle").textContent = "Edit Expected Income";
+  setOptions(document.querySelector("#expectedIncomeTemplate"), incomeTemplates(), "Select template", item.templateId);
+  updateRequiredTemplateLink("expectedIncome", true);
+  openDialog(document.querySelector("#expectedIncomeDialog"), form);
+}
+async function saveExpectedIncome(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = document.querySelector("#expectedIncomeId").value;
+  const payload = {
+    templateId: document.querySelector("#expectedIncomeTemplate").value,
+    expectedDate: document.querySelector("#expectedIncomeDate").value,
+    active: document.querySelector("#expectedIncomeActive").checked
+  };
+  try {
+    await api(id ? `/api/expected-income-plans/${id}` : "/api/expected-income-plans", {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload)
+    });
+    document.querySelector("#expectedIncomeDialog").close();
+    await loadBudget();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function removeExpectedIncome() {
+  const item = budget.expectedIncomePlans.find((row) => row.id === Number(document.querySelector("#expectedIncomeId").value));
+  if (!item || !window.confirm(`Permanently delete expected income "${item.name}"?`)) return;
+  try {
+    await api(`/api/expected-income-plans/${item.id}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#expectedIncomeDialog").close();
+    await loadBudget();
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
 
 function renderPlannedPayments() {
   const state = planSortState("payment", ["nextDate", "account", "description", "amount"]); const values = {nextDate: (item) => item.upcomingExpectedDate, account: (item) => item.accountName, description: (item) => item.description, amount: (item) => item.amountCents}; const body = document.querySelector("#plannedPaymentRows"); body.replaceChildren();
@@ -1615,13 +2548,104 @@ function renderPlannedPayments() {
 }
 
 function creditPaymentAccounts() { return accounts.filter((account) => account.active && account.accountClass === "credit" && ["Credit Card", "Personal Loan"].includes(account.accountSubtype)); }
-function newPlannedPayment() { const form = document.querySelector("#plannedPaymentForm"); form.reset(); document.querySelector("#plannedPaymentId").value = ""; document.querySelector("#plannedPaymentDate").value = today; document.querySelector("#plannedPaymentDialogTitle").textContent = "New Planned Monthly Debt Payment"; document.querySelector("#plannedPaymentActiveLabel").hidden = true; document.querySelector("#deletePlannedPaymentButton").hidden = true; setAccountOptions(document.querySelector("#plannedPaymentAccount"), creditPaymentAccounts(), "Select account"); openDialog(document.querySelector("#plannedPaymentDialog"), form); }
-function editPlannedPayment(item) { const form = document.querySelector("#plannedPaymentForm"); form.reset(); document.querySelector("#plannedPaymentId").value = item.id; document.querySelector("#plannedPaymentDate").value = item.expectedDate; setAccountOptions(document.querySelector("#plannedPaymentAccount"), creditPaymentAccounts(), "Select account", item.accountId); document.querySelector("#plannedPaymentDescription").value = item.description; document.querySelector("#plannedPaymentAmount").value = (item.amountCents / 100).toFixed(2); document.querySelector("#plannedPaymentActive").checked = Boolean(item.active); document.querySelector("#plannedPaymentActiveLabel").hidden = false; document.querySelector("#deletePlannedPaymentButton").hidden = false; document.querySelector("#plannedPaymentDialogTitle").textContent = "Edit Planned Monthly Debt Payment"; openDialog(document.querySelector("#plannedPaymentDialog"), form); }
-async function savePlannedPayment(event) { event.preventDefault(); const form = event.currentTarget; const id = document.querySelector("#plannedPaymentId").value; const payload = {expectedDate: document.querySelector("#plannedPaymentDate").value, accountId: document.querySelector("#plannedPaymentAccount").value, description: document.querySelector("#plannedPaymentDescription").value, amount: document.querySelector("#plannedPaymentAmount").value, active: document.querySelector("#plannedPaymentActive").checked}; try { await api(id ? `/api/planned-credit-payments/${id}` : "/api/planned-credit-payments", {method: id ? "PATCH" : "POST", body: JSON.stringify(payload)}); document.querySelector("#plannedPaymentDialog").close(); await loadBudget(); } catch (error) { showFormError(form, error); } }
-async function removePlannedPayment() { const item = budget.plannedCreditPayments.find((row) => row.id === Number(document.querySelector("#plannedPaymentId").value)); if (!item || !window.confirm(`Permanently delete planned payment "${item.description}"?`)) return; try { await api(`/api/planned-credit-payments/${item.id}`, {method: "DELETE"}); document.querySelector("#plannedPaymentDialog").close(); await loadBudget(); } catch (error) { window.alert(error.message); } }
-function makePlannedPayment(item) { newTransfer(); document.querySelector("#transferToAccount").value = String(item.accountId); updateTransferPresentation(false); document.querySelector("#transferDescription").value = item.description; setMoneyInputValue(document.querySelector("#transferAmount"), (item.amountCents / 100).toFixed(2)); document.querySelector("#transferDate").value = localCalendarDate(); }
+function newPlannedPayment() {
+  const form = document.querySelector("#plannedPaymentForm");
+  form.reset();
+  document.querySelector("#plannedPaymentId").value = "";
+  document.querySelector("#plannedPaymentDate").value = today;
+  document.querySelector("#plannedPaymentDialogTitle").textContent = "New Planned Monthly Debt Payment";
+  document.querySelector("#plannedPaymentActiveLabel").hidden = true;
+  document.querySelector("#deletePlannedPaymentButton").hidden = true;
+  setAccountOptions(document.querySelector("#plannedPaymentAccount"), creditPaymentAccounts(), "Select account");
+  openDialog(document.querySelector("#plannedPaymentDialog"), form);
+}
+function editPlannedPayment(item) {
+  const form = document.querySelector("#plannedPaymentForm");
+  form.reset();
+  document.querySelector("#plannedPaymentId").value = item.id;
+  document.querySelector("#plannedPaymentDate").value = item.expectedDate;
+  setAccountOptions(document.querySelector("#plannedPaymentAccount"), creditPaymentAccounts(), "Select account", item.accountId);
+  document.querySelector("#plannedPaymentDescription").value = item.description;
+  document.querySelector("#plannedPaymentAmount").value = (item.amountCents / 100).toFixed(2);
+  document.querySelector("#plannedPaymentActive").checked = Boolean(item.active);
+  document.querySelector("#plannedPaymentActiveLabel").hidden = false;
+  document.querySelector("#deletePlannedPaymentButton").hidden = false;
+  document.querySelector("#plannedPaymentDialogTitle").textContent = "Edit Planned Monthly Debt Payment";
+  openDialog(document.querySelector("#plannedPaymentDialog"), form);
+}
+async function savePlannedPayment(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = document.querySelector("#plannedPaymentId").value;
+  const payload = {
+    expectedDate: document.querySelector("#plannedPaymentDate").value,
+    accountId: document.querySelector("#plannedPaymentAccount").value,
+    description: document.querySelector("#plannedPaymentDescription").value,
+    amount: document.querySelector("#plannedPaymentAmount").value,
+    active: document.querySelector("#plannedPaymentActive").checked
+  };
+  try {
+    await api(id ? `/api/planned-credit-payments/${id}` : "/api/planned-credit-payments", {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload)
+    });
+    document.querySelector("#plannedPaymentDialog").close();
+    await loadBudget();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
+async function removePlannedPayment() {
+  const item = budget.plannedCreditPayments.find((row) => row.id === Number(document.querySelector("#plannedPaymentId").value));
+  if (!item || !window.confirm(`Permanently delete planned payment "${item.description}"?`)) return;
+  try {
+    await api(`/api/planned-credit-payments/${item.id}`, {
+      method: "DELETE"
+    });
+    document.querySelector("#plannedPaymentDialog").close();
+    await loadBudget();
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
+function makePlannedPayment(item) {
+  newTransfer();
+  document.querySelector("#transferToAccount").value = String(item.accountId);
+  updateTransferPresentation(false);
+  document.querySelector("#transferDescription").value = item.description;
+  document.querySelector("#transferAmount").value = (item.amountCents / 100).toFixed(2);
+  document.querySelector("#transferDate").value = localCalendarDate();
+}
 
-async function saveBudgetSettings(event) { event.preventDefault(); const form = event.currentTarget; try { await api("/api/settings/paychecks-per-year", {method: "PUT", body: JSON.stringify({paychecksPerYear: document.querySelector("#paychecksPerYear").value})}); await api("/api/settings/suggestion-rounding", {method: "PUT", body: JSON.stringify({amount: document.querySelector("#suggestionRounding").value})}); await api("/api/settings/budget-suggestion-windows", {method: "PUT", body: JSON.stringify({monthlyDays: document.querySelector("#monthlySuggestionWindow").value, quarterlyMonths: document.querySelector("#quarterlySuggestionWindow").value, annualMonths: document.querySelector("#annualSuggestionWindow").value})}); await loadSettings(); } catch (error) { showFormError(form, error); } }
+async function saveBudgetSettings(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    await api("/api/settings/paychecks-per-year", {
+      method: "PUT",
+      body: JSON.stringify({
+        paychecksPerYear: document.querySelector("#paychecksPerYear").value
+      })
+    });
+    await api("/api/settings/suggestion-rounding", {
+      method: "PUT",
+      body: JSON.stringify({
+        amount: document.querySelector("#suggestionRounding").value
+      })
+    });
+    await api("/api/settings/budget-suggestion-windows", {
+      method: "PUT",
+      body: JSON.stringify({
+        monthlyDays: document.querySelector("#monthlySuggestionWindow").value,
+        quarterlyMonths: document.querySelector("#quarterlySuggestionWindow").value,
+        annualMonths: document.querySelector("#annualSuggestionWindow").value
+      })
+    });
+    await loadSettings();
+  } catch (error) {
+    showFormError(form, error);
+  }
+}
 
 function applyTheme(theme) {
   window.applyThemePreference(theme);
@@ -2079,9 +3103,9 @@ document.querySelector(".budgetNavigation").addEventListener("click", useBudgetF
 document.querySelector("#transactionCategory").addEventListener("change", updateReimbursementAvailability); document.querySelector("#alsoLogReimbursement").addEventListener("change", updateReimbursementFields);
 document.querySelector("#dashboardTransactionButton").addEventListener("click", () => newTransaction()); document.querySelector("#dashboardTransferButton").addEventListener("click", newTransfer); document.querySelector("#hideZeroBalances").addEventListener("change", loadDashboard); document.querySelector("#dashboardPeriod").addEventListener("change", (event) => { const custom = event.target.value === "custom"; document.querySelector("#dashboardCustomDates").hidden = !custom; document.querySelector("#dashboardStartDate").disabled = !custom; document.querySelector("#dashboardEndDate").disabled = !custom; if (!custom) loadDashboard(); }); document.querySelector("#dashboardStartDate").addEventListener("change", () => { if (document.querySelector("#dashboardEndDate").value) loadDashboard(); }); document.querySelector("#dashboardEndDate").addEventListener("change", () => { if (document.querySelector("#dashboardStartDate").value) loadDashboard(); });
 document.querySelector("#dashboardBreakdown").addEventListener("change", (event) => { showDashboardBreakdown(event.target.value); cacheDashboard(); });
-document.querySelector("#newSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog(false));
-document.querySelector("#emptyNewSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog(false));
-document.querySelector("#duplicateSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog(true));
+document.querySelector("#newSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog("new"));
+document.querySelector("#emptyNewSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog("new"));
+document.querySelector("#duplicateSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog("duplicate"));
 document.querySelector("#editSimulatorPlanButton").addEventListener("click",()=>openSimulatorPlanDialog("edit"));
 document.querySelector("#deleteSimulatorPlanButton").addEventListener("click",removeSimulatorPlan);
 document.querySelector("#deleteExecutedSimulatorRowsButton").addEventListener("click",removeExecutedSimulatorRows);
@@ -2363,7 +3387,7 @@ async function savePendingRow(row) {
 
 function pendingTransferDefaultDescription(row) {
   const destination = accounts.find((account) => account.id === Number(row.querySelector("[data-pending-field=toAccountId]").value));
-  return destination ? (destination.accountClass === "credit" ? paymentDescription(destination) : `Transfer to ${destination.name}`) : null;
+  return destination?.defaultTransferDescription ?? null;
 }
 
 function usePendingTransferDescription(row) {

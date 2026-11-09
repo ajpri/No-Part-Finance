@@ -1,17 +1,19 @@
-from tests.test_support import snapshotWithoutLoginTime
-import tests  # Enable the production database guard before application imports.
+"""PWA metadata, public assets, packaging, and administrator policy."""
+
+import tests  # Enable the production-database guard before application imports.
 import base64
 import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-
 from app import createApp
 import database as ledger
 from tests.test_support import ownerClient
+import os
+import subprocess
+from unittest.mock import patch
 from tests.test_support import connectFixtureDatabase as connectDatabase
-
+from tests.test_support import PwaFixture
 
 class PwaServerTests(unittest.TestCase):
     def setUp(self):
@@ -154,7 +156,6 @@ class PwaServerTests(unittest.TestCase):
             self.assertEqual(404, self.client.get("/assets/private.txt").status_code)
         self.assertEqual(before, self.snapshot())
 
-
 class PwaPackageTests(unittest.TestCase):
     def setUp(self):
         from packageApplication import includedFiles
@@ -186,7 +187,7 @@ class PwaPackageTests(unittest.TestCase):
                 result = self.package(includeDatabase)
                 with zipfile.ZipFile(result["archivePath"]) as archive:
                     names = set(archive.namelist())
-                    for required in ("theme.js", "pwa.webmanifest", "assets/README.md", "tests/test_version261018_pwa.py"):
+                    for required in ("theme.js", "pwa.webmanifest", "assets/README.md", "tests/test_pwa.py"):
                         self.assertIn(archiveRootName + "/" + required, names)
                     self.assertEqual(includeDatabase, archiveRootName + "/finance.db" in names)
                     for iconPath in pwaIconFiles:
@@ -209,3 +210,78 @@ class PwaPackageTests(unittest.TestCase):
                         self.assertEqual(pngBytes, archive.read(archivedPath))
                         self.assertEqual((self.repositoryPath / iconPath).stat().st_mode & 0o777, (archive.getinfo(archivedPath).external_attr >> 16) & 0o777)
                     self.assertNotIn(archiveRootName + "/assets/private.txt", archive.namelist())
+
+class PwaPolicyTests(PwaFixture, unittest.TestCase):
+    def testPwaPolicyDefaultsFalseAndIndependentOverrides(self):
+        from platformConfiguration import ConfigurationError, configurationSample, loadConfiguration
+        root = Path(self.directory.name) / "default-installation"
+        root.mkdir()
+        defaults = loadConfiguration(root)
+        self.assertFalse(defaults["pwaOfflineEnabled"])
+        self.assertFalse(defaults["pushNotificationsEnabled"])
+        sample = configurationSample()
+        self.assertIn("pwaOfflineEnabled = false", sample)
+        self.assertIn("pushNotificationsEnabled = false", sample)
+        path = root / "platform.conf"
+        for offline, push in [(False, False), (True, False), (False, True), (True, True)]:
+            path.write_text(f"pwaOfflineEnabled = {str(offline).lower()}\npushNotificationsEnabled = {str(push).lower()}\n")
+            saved = loadConfiguration(root)
+            self.assertEqual(offline, saved["pwaOfflineEnabled"])
+            self.assertEqual(push, saved["pushNotificationsEnabled"])
+        for key in ("pwaOfflineEnabled", "pushNotificationsEnabled"):
+            path.write_text(f"{key} = not-a-boolean\n")
+            with self.assertRaises(ConfigurationError):
+                loadConfiguration(root)
+        path.write_text("pwaOfflineEnabled = true\npushNotificationsEnabled = true\n")
+        running = createApp(root / "restart-test.db")
+        path.write_text("pwaOfflineEnabled = false\npushNotificationsEnabled = false\n")
+        self.assertTrue(running.test_client().get("/pwa-policy").get_json()["pwaOfflineEnabled"])
+        restarted = createApp(root / "restart-test.db")
+        self.assertEqual({"pwaOfflineEnabled": False, "pushNotificationsEnabled": False}, restarted.test_client().get("/pwa-policy").get_json())
+
+    def testPwaPolicyPublicRoutesManifestAndWorkerCombinations(self):
+        signedOut = self.application.test_client()
+        configuration = self.application.config["PLATFORM_CONFIGURATION"]
+        for offline, push in [(False, False), (True, False), (False, True), (True, True)]:
+            with self.subTest(offline=offline, push=push):
+                configuration.update(pwaOfflineEnabled=offline, pushNotificationsEnabled=push)
+                response = signedOut.get("/pwa-policy")
+                self.assertEqual(200, response.status_code)
+                self.assertEqual({"pwaOfflineEnabled": offline, "pushNotificationsEnabled": push}, response.get_json())
+                self.assertEqual("no-store", response.headers["Cache-Control"])
+                with signedOut.get("/pwa.webmanifest") as manifest:
+                    self.assertEqual(200, manifest.status_code)
+                self.assertEqual(200 if offline else 404, signedOut.get("/offline-shell").status_code)
+                worker = signedOut.get("/service-worker.js").get_data(as_text=True)
+                self.assertIn(f'const offlineEnabled = "{str(offline).lower()}" === "true";', worker)
+                self.assertIn(f'const pushEnabled = "{str(push).lower()}" === "true";', worker)
+                self.assertNotIn("__PWA_OFFLINE_ENABLED__", worker)
+                self.assertIn('/pwa.webmanifest', signedOut.get("/sign-in").get_data(as_text=True))
+
+    def testDisabledWorkerClearsOnlyOwnedCachesAndDoesNotIntercept(self):
+        node = os.environ.get("NODE_BINARY")
+        if not node:
+            self.skipTest("Set NODE_BINARY for disabled worker checks")
+        source = Path("service-worker.js").read_text().replace("__PUSH_NOTIFICATIONS_ENABLED__", "false").replace("__PWA_OFFLINE_ENABLED__", "false")
+        harness = r'''
+const assert=require("node:assert/strict");
+const names=new Set(["npf-shell-old","other-app-cache"]),handlers={};let pending;
+const caches={async keys(){return [...names];},async delete(name){names.delete(name);},open(){throw new Error("Disabled worker must not populate cache");}};
+const self={location:{origin:"https://finance.example.org"},addEventListener:(name,handler)=>handlers[name]=handler,async skipWaiting(){},clients:{async claim(){}},registration:{showNotification(){throw new Error("Push disabled");}}};
+'''
+        check = r'''
+async function check(){
+ handlers.install({waitUntil(promise){pending=promise;}});await pending;
+ handlers.activate({waitUntil(promise){pending=promise;}});await pending;
+ assert.deepEqual([...names],["other-app-cache"]);
+ handlers.fetch({request:{url:"https://finance.example.org/",method:"GET",mode:"navigate"},respondWith(){throw new Error("Disabled cache intercepted navigation");}});
+ handlers.push({waitUntil(){throw new Error("Disabled push processed notification");}});
+}
+check().catch(error=>{console.error(error);process.exit(1);});
+'''
+        result = subprocess.run([node, "-e", harness + source + check], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
